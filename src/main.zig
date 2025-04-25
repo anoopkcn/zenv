@@ -8,7 +8,8 @@ const json = std.json;
 
 const ActiveConfig = struct {
     allocator: Allocator,
-    cluster_name: []const u8,
+    env_name: []const u8,      // Environment name from command line
+    target_cluster: []const u8, // Target cluster from config or hostname
     parent_envs_dir: []const u8,
     requirements_file: []const u8,
     python_executable: []const u8,
@@ -34,7 +35,8 @@ const ActiveConfig = struct {
     }
 
     fn deinit(self: *ActiveConfig) void {
-        self.allocator.free(self.cluster_name);
+        self.allocator.free(self.env_name);
+        self.allocator.free(self.target_cluster);
         self.allocator.free(self.parent_envs_dir);
         self.allocator.free(self.requirements_file);
         self.allocator.free(self.python_executable);
@@ -53,6 +55,7 @@ const ZenvError = error{
     JsonParseError,
     ConfigInvalid,
     ClusterNotFound,
+    EnvironmentNotFound, // Add this new error type for environment not found
     IoError,
     ProcessError,
     MissingPythonExecutable,
@@ -165,7 +168,7 @@ fn getClusterName(allocator: Allocator) ![]const u8 {
     }
 }
 
-fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8) !ActiveConfig {
+fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8, env_name: []const u8) !ActiveConfig {
     const config_base_dir = fs.path.dirname(config_path) orelse ".";
 
     const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
@@ -189,26 +192,44 @@ fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8) !ActiveConf
     if (common_value != .object) return ZenvError.ConfigInvalid;
     const common_object = common_value.object;
 
-    const sc_value = root_object.get("sc") orelse return ZenvError.ConfigInvalid;
-    if (sc_value != .object) return ZenvError.ConfigInvalid;
-    const sc_object = sc_value.object;
-
-    const cluster_name = try getClusterName(allocator);
-
-    const cluster_config_value = sc_object.get(cluster_name) orelse {
-        std.debug.print("Error: Configuration for cluster '{s}' not found in '{s}' under 'sc'.\n", .{ cluster_name, config_path });
-        allocator.free(cluster_name);
-        return ZenvError.ClusterNotFound;
+    const env_config_value = root_object.get(env_name) orelse {
+        std.debug.print("Error: Environment '{s}' not found in '{s}'.\n", .{ env_name, config_path });
+        return ZenvError.EnvironmentNotFound;
     };
-    if (cluster_config_value != .object) {
-        allocator.free(cluster_name);
-        return ZenvError.ConfigInvalid;
+    if (env_config_value != .object) return ZenvError.ConfigInvalid;
+    const env_config_object = env_config_value.object;
+
+    // Get the current hostname-based cluster
+    const current_cluster = try getClusterName(allocator);
+    defer allocator.free(current_cluster);
+    
+    // Check if target is specified in environment config
+    var target_cluster: []const u8 = undefined;
+    const has_target = env_config_object.get("target") != null;
+    
+    if (has_target) {
+        const target_value = env_config_object.get("target") orelse unreachable; // We just checked it exists
+        if (target_value != .string) return ZenvError.ConfigInvalid;
+        const specified_target = target_value.string;
+        
+        // Validate that the target matches the current hostname-based cluster
+        if (!mem.eql(u8, specified_target, current_cluster)) {
+            std.debug.print("Error: Environment '{s}' targets cluster '{s}', but you are on '{s}'.\n", 
+                           .{ env_name, specified_target, current_cluster });
+            std.debug.print("Please run this command on the correct cluster or update the target in your config.\n", .{});
+            return ZenvError.ClusterNotFound;
+        }
+        
+        target_cluster = try allocator.dupe(u8, specified_target);
+    } else {
+        // No target specified, use current cluster
+        target_cluster = try allocator.dupe(u8, current_cluster);
     }
-    const cluster_config_object = cluster_config_value.object;
 
     var active_config = ActiveConfig{
         .allocator = allocator,
-        .cluster_name = cluster_name,
+        .env_name = try allocator.dupe(u8, env_name),
+        .target_cluster = target_cluster, // Already allocated above
         .parent_envs_dir = undefined,
         .requirements_file = undefined,
         .python_executable = undefined,
@@ -290,13 +311,14 @@ fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8) !ActiveConf
     try fillStringArray(&active_config.custom_setup_commands, allocator, common_object, "custom_setup_commands");
     try fillStringMap(&active_config.custom_activate_vars, allocator, common_object, "custom_activate_vars", false);
 
-    const cluster_python = try getOptionalString(cluster_config_object, "python_executable");
-    try fillStringArray(&active_config.modules_to_load, allocator, cluster_config_object, "modules_to_load");
-    try fillStringArray(&active_config.custom_setup_commands, allocator, cluster_config_object, "custom_setup_commands");
-    try fillStringMap(&active_config.custom_activate_vars, allocator, cluster_config_object, "custom_activate_vars", true);
+    // Get environment-specific values from env_config_object
+    const env_python = try getOptionalString(env_config_object, "python_executable");
+    try fillStringArray(&active_config.modules_to_load, allocator, env_config_object, "modules_to_load");
+    try fillStringArray(&active_config.custom_setup_commands, allocator, env_config_object, "custom_setup_commands");
+    try fillStringMap(&active_config.custom_activate_vars, allocator, env_config_object, "custom_activate_vars", true);
 
 
-    if (cluster_python) |pypath| {
+    if (env_python) |pypath| {
         active_config.python_executable = try allocator.dupe(u8, pypath);
     } else if (common_python) |pypath| {
         active_config.python_executable = try allocator.dupe(u8, pypath);
@@ -311,7 +333,7 @@ fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8) !ActiveConf
 fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
     defer allocator.free(parent_dir_abs);
-    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.cluster_name });
+    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.env_name });
     defer allocator.free(venv_path_abs);
     const req_path_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.requirements_file });
     defer allocator.free(req_path_abs);
@@ -408,9 +430,11 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     defer activate_content.deinit();
 
     try activate_content.appendSlice("#!/bin/bash\n\n");
-    try activate_content.appendSlice("# Generated by zenv for cluster: ");
-    try activate_content.appendSlice(config.cluster_name);
-    try activate_content.appendSlice("\n\n");
+    try activate_content.appendSlice("# Generated by zenv for environment: ");
+    try activate_content.appendSlice(config.env_name);
+    try activate_content.appendSlice(" (target: ");
+    try activate_content.appendSlice(config.target_cluster);
+    try activate_content.appendSlice(")\n\n");
 
     if (config.modules_to_load.items.len > 0) {
         try activate_content.appendSlice("# Load required modules\n");
@@ -451,9 +475,11 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     }
 
     try activate_content.appendSlice("# Reminder: This script must be sourced, not executed\n");
-    try activate_content.appendSlice("echo \"Environment activated for cluster: ");
-    try activate_content.appendSlice(config.cluster_name);
-    try activate_content.appendSlice("\"\n");
+    try activate_content.appendSlice("echo \"Environment activated for environment: ");
+    try activate_content.appendSlice(config.env_name);
+    try activate_content.appendSlice(" (target: ");
+    try activate_content.appendSlice(config.target_cluster);
+    try activate_content.appendSlice(")\"\n");
 
     const activate_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
     defer allocator.free(activate_path);
@@ -466,14 +492,14 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     std.debug.print("Created activate.sh at: {s}\n", .{activate_path});
     std.debug.print("Usage: source {s}\n", .{activate_path});
 
-    std.debug.print("Setup for cluster '{s}' complete.\n", .{config.cluster_name});
+    std.debug.print("Setup for environment '{s}' (target: {s}) complete.\n", .{config.env_name, config.target_cluster});
 }
 
 fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
     const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
     defer allocator.free(parent_dir_abs);
 
-    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.cluster_name });
+    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.env_name });
     defer allocator.free(venv_path_abs);
 
     const activate_sh_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
@@ -487,8 +513,8 @@ fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
         try err_writer.print("To activate this environment, run:\n", .{});
         try err_writer.print("source {s}\n", .{activate_sh_path});
     } else {
-        try err_writer.print("No activation script found for cluster '{s}'\n", .{config.cluster_name});
-        try err_writer.print("Run 'zenv setup' first to create the virtual environment\n", .{});
+        try err_writer.print("No activation script found for environment '{s}'\n", .{config.env_name});
+        try err_writer.print("Run 'zenv setup {s}' first to create the virtual environment\n", .{config.env_name});
         return ZenvError.ConfigInvalid;
     }
 }
@@ -499,9 +525,9 @@ fn printUsage() void {
         \\Usage: zenv <command>
         \\
         \\Commands:
-        \\  setup      Set up the virtual environment for the current cluster.
-        \\  activate   Print shell commands to activate the environment.
-        \\  help       Show this help message.
+        \\  setup <env_name>      Set up the virtual environment for the specified environment.
+        \\  activate <env_name>   Print instructions to activate the environment.
+        \\  help                  Show this help message.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -528,7 +554,8 @@ pub fn main() anyerror!void {
             stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
             switch (@as(ZenvError, @errorCast(err))) {
                 ZenvError.ConfigFileNotFound => stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {},
-                ZenvError.ClusterNotFound => stderr.print(" -> Check HOSTNAME and ensure the cluster is defined under 'sc' in '{s}'.\n", .{config_path}) catch {},
+                ZenvError.ClusterNotFound => stderr.print(" -> Target cluster doesn't match current hostname.\n", .{}) catch {},
+                ZenvError.EnvironmentNotFound => stderr.print(" -> Environment not found in '{s}'.\n", .{config_path}) catch {},
                 ZenvError.JsonParseError => stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {},
                 ZenvError.ConfigInvalid => stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types.\n", .{config_path}) catch {},
                 ZenvError.ProcessError => stderr.print(" -> An external command failed. See output above for details.\n", .{}) catch {},
@@ -541,8 +568,18 @@ pub fn main() anyerror!void {
         }
     }.func;
 
+    // Check if we have enough arguments for commands that require an environment name
+    if (mem.eql(u8, command, "setup") or mem.eql(u8, command, "activate")) {
+        if (args.len < 3) {
+            std.io.getStdErr().writer().print("Error: Missing environment name for '{s}' command\n", .{command}) catch {};
+            std.io.getStdErr().writer().print("Usage: zenv {s} <environment_name>\n", .{command}) catch {};
+            process.exit(1);
+        }
+    }
+
     if (mem.eql(u8, command, "setup")) {
-        var active_config = loadAndMergeConfig(allocator, config_path) catch |err| {
+        const env_name = args[2];
+        var active_config = loadAndMergeConfig(allocator, config_path, env_name) catch |err| {
             handleError(err);
             return error.CommandFailed;
         };
@@ -551,7 +588,8 @@ pub fn main() anyerror!void {
             return error.CommandFailed;
         };
     } else if (mem.eql(u8, command, "activate")) {
-        var active_config = loadAndMergeConfig(allocator, config_path) catch |err| {
+        const env_name = args[2];
+        var active_config = loadAndMergeConfig(allocator, config_path, env_name) catch |err| {
             handleError(err);
             return error.CommandFailed;
         };
