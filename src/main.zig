@@ -8,8 +8,8 @@ const json = std.json;
 
 const ActiveConfig = struct {
     allocator: Allocator,
-    env_name: []const u8,      // Environment name from command line
-    target_cluster: []const u8, // Target cluster from config or hostname
+    env_name: []const u8,
+    target_cluster: []const u8,
     parent_envs_dir: []const u8,
     requirements_file: []const u8,
     python_executable: []const u8,
@@ -55,7 +55,7 @@ const ZenvError = error{
     JsonParseError,
     ConfigInvalid,
     ClusterNotFound,
-    EnvironmentNotFound, // Add this new error type for environment not found
+    EnvironmentNotFound,
     IoError,
     ProcessError,
     MissingPythonExecutable,
@@ -149,7 +149,6 @@ fn getClusterName(allocator: Allocator) ![]const u8 {
         if (err == error.EnvironmentVariableNotFound) return ZenvError.MissingHostname;
         return err; // Propagate other errors like OOM
     };
-    // No need to defer free here, ownership transferred on success or error
 
     // For hostname formats like jrlogin04.jureca, extract 'jureca'
     // This handles both jrlogin04.jureca and login01.jureca.fz-juelich.de
@@ -199,37 +198,33 @@ fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8, env_name: [
     if (env_config_value != .object) return ZenvError.ConfigInvalid;
     const env_config_object = env_config_value.object;
 
-    // Get the current hostname-based cluster
     const current_cluster = try getClusterName(allocator);
     defer allocator.free(current_cluster);
-    
-    // Check if target is specified in environment config
+
     var target_cluster: []const u8 = undefined;
     const has_target = env_config_object.get("target") != null;
-    
+
     if (has_target) {
-        const target_value = env_config_object.get("target") orelse unreachable; // We just checked it exists
+        const target_value = env_config_object.get("target") orelse unreachable;
         if (target_value != .string) return ZenvError.ConfigInvalid;
         const specified_target = target_value.string;
-        
-        // Validate that the target matches the current hostname-based cluster
+
         if (!mem.eql(u8, specified_target, current_cluster)) {
-            std.debug.print("Error: Environment '{s}' targets cluster '{s}', but you are on '{s}'.\n", 
+            std.debug.print("Error: Environment '{s}' targets cluster '{s}', but you are on '{s}'.\n",
                            .{ env_name, specified_target, current_cluster });
             std.debug.print("Please run this command on the correct cluster or update the target in your config.\n", .{});
             return ZenvError.ClusterNotFound;
         }
-        
+
         target_cluster = try allocator.dupe(u8, specified_target);
     } else {
-        // No target specified, use current cluster
         target_cluster = try allocator.dupe(u8, current_cluster);
     }
 
     var active_config = ActiveConfig{
         .allocator = allocator,
         .env_name = try allocator.dupe(u8, env_name),
-        .target_cluster = target_cluster, // Already allocated above
+        .target_cluster = target_cluster,
         .parent_envs_dir = undefined,
         .requirements_file = undefined,
         .python_executable = undefined,
@@ -311,7 +306,6 @@ fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8, env_name: [
     try fillStringArray(&active_config.custom_setup_commands, allocator, common_object, "custom_setup_commands");
     try fillStringMap(&active_config.custom_activate_vars, allocator, common_object, "custom_activate_vars", false);
 
-    // Get environment-specific values from env_config_object
     const env_python = try getOptionalString(env_config_object, "python_executable");
     try fillStringArray(&active_config.modules_to_load, allocator, env_config_object, "modules_to_load");
     try fillStringArray(&active_config.custom_setup_commands, allocator, env_config_object, "custom_setup_commands");
@@ -495,6 +489,68 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     std.debug.print("Setup for environment '{s}' (target: {s}) complete.\n", .{config.env_name, config.target_cluster});
 }
 
+// Finds environments in the config that target the current hostname
+fn findMatchingEnvs(allocator: Allocator, config_path: []const u8) !std.ArrayList([]const u8) {
+    const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read config file '{s}': {s}\n", .{ config_path, @errorName(err) });
+        if (err == error.FileNotFound) return ZenvError.ConfigFileNotFound;
+        return ZenvError.ConfigFileReadError;
+    };
+    defer allocator.free(config_content);
+
+    var tree = json.parseFromSlice(json.Value, allocator, config_content, .{}) catch |err| {
+        std.debug.print("Failed to parse JSON in '{s}': {s}\n", .{ config_path, @errorName(err) });
+        return ZenvError.JsonParseError;
+    };
+    defer tree.deinit();
+
+    const root_value = tree.value;
+    if (root_value != .object) return ZenvError.ConfigInvalid;
+    const root_object = root_value.object;
+
+    // Get the current hostname-based cluster
+    const current_cluster = try getClusterName(allocator);
+    defer allocator.free(current_cluster);
+
+    // Find environments that target this cluster
+    var matching_envs = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (matching_envs.items) |env_name| {
+            allocator.free(env_name);
+        }
+        matching_envs.deinit();
+    }
+
+    var root_iter = root_object.iterator();
+    while (root_iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        // Skip "common" and non-object entries
+        if (mem.eql(u8, key, "common") or value != .object) {
+            continue;
+        }
+
+        const env_object = value.object;
+
+        // Check if this environment has a target field
+        if (env_object.get("target")) |target_value| {
+            if (target_value != .string) continue;
+            const target = target_value.string;
+
+            // If target matches current cluster, add to matches
+            if (mem.eql(u8, target, current_cluster)) {
+                try matching_envs.append(try allocator.dupe(u8, key));
+            }
+        } else {
+            // No target field means it could run anywhere
+            // Optionally, you could include these too
+            // try matching_envs.append(try allocator.dupe(u8, key));
+        }
+    }
+
+    return matching_envs;
+}
 fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
     const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
     defer allocator.free(parent_dir_abs);
@@ -525,9 +581,11 @@ fn printUsage() void {
         \\Usage: zenv <command>
         \\
         \\Commands:
-        \\  setup <env_name>      Set up the virtual environment for the specified environment.
-        \\  activate <env_name>   Print instructions to activate the environment.
-        \\  help                  Show this help message.
+        \\  setup [env_name]     Set up a virtual environment. If env_name is omitted,
+        \\                       it will try to auto-detect based on hostname.
+        \\  activate [env_name]  Print instructions to activate an environment. If env_name
+        \\                       is omitted, it will try to auto-detect based on hostname.
+        \\  help                 Show this help message.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -568,17 +626,46 @@ pub fn main() anyerror!void {
         }
     }.func;
 
-    // Check if we have enough arguments for commands that require an environment name
-    if (mem.eql(u8, command, "setup") or mem.eql(u8, command, "activate")) {
-        if (args.len < 3) {
-            std.io.getStdErr().writer().print("Error: Missing environment name for '{s}' command\n", .{command}) catch {};
-            std.io.getStdErr().writer().print("Usage: zenv {s} <environment_name>\n", .{command}) catch {};
-            process.exit(1);
-        }
-    }
+    // Environment name auto-detection is now handled in the command implementations
+    // No validation needed here as both commands now support auto-detection
 
     if (mem.eql(u8, command, "setup")) {
-        const env_name = args[2];
+        var env_name: []const u8 = undefined;
+        var env_name_needs_free = false;
+        defer if (env_name_needs_free) allocator.free(env_name);
+
+        if (args.len >= 3) {
+            env_name = args[2];
+        } else {
+            var matching_envs = findMatchingEnvs(allocator, config_path) catch |err| {
+                handleError(err);
+                return error.CommandFailed;
+            };
+            defer {
+                for (matching_envs.items) |item| {
+                    allocator.free(item);
+                }
+                matching_envs.deinit();
+            }
+
+            if (matching_envs.items.len == 0) {
+                std.io.getStdErr().writer().print("Error: No environments found targeting your cluster '{s}'\n", .{try getClusterName(allocator)}) catch {};
+                std.io.getStdErr().writer().print("Please specify environment name: zenv setup <environment_name>\n", .{}) catch {};
+                process.exit(1);
+            } else if (matching_envs.items.len > 1) {
+                std.io.getStdErr().writer().print("Error: Multiple environments found targeting your cluster:\n", .{}) catch {};
+                for (matching_envs.items) |item| {
+                    std.io.getStdErr().writer().print("  - {s}\n", .{item}) catch {};
+                }
+                std.io.getStdErr().writer().print("Please specify which one to use: zenv setup <environment_name>\n", .{}) catch {};
+                process.exit(1);
+            } else {
+                env_name = try allocator.dupe(u8, matching_envs.items[0]);
+                env_name_needs_free = true;
+                std.debug.print("Auto-selected environment '{s}' based on your cluster\n", .{env_name});
+            }
+        }
+
         var active_config = loadAndMergeConfig(allocator, config_path, env_name) catch |err| {
             handleError(err);
             return error.CommandFailed;
@@ -588,7 +675,42 @@ pub fn main() anyerror!void {
             return error.CommandFailed;
         };
     } else if (mem.eql(u8, command, "activate")) {
-        const env_name = args[2];
+        var env_name: []const u8 = undefined;
+        var env_name_needs_free = false;
+        defer if (env_name_needs_free) allocator.free(env_name);
+
+        if (args.len >= 3) {
+            env_name = args[2];
+        } else {
+            var matching_envs = findMatchingEnvs(allocator, config_path) catch |err| {
+                handleError(err);
+                return error.CommandFailed;
+            };
+            defer {
+                for (matching_envs.items) |item| {
+                    allocator.free(item);
+                }
+                matching_envs.deinit();
+            }
+
+            if (matching_envs.items.len == 0) {
+                std.io.getStdErr().writer().print("Error: No environments found targeting your cluster '{s}'\n", .{try getClusterName(allocator)}) catch {};
+                std.io.getStdErr().writer().print("Please specify environment name: zenv activate <environment_name>\n", .{}) catch {};
+                process.exit(1);
+            } else if (matching_envs.items.len > 1) {
+                std.io.getStdErr().writer().print("Error: Multiple environments found targeting your cluster:\n", .{}) catch {};
+                for (matching_envs.items) |item| {
+                    std.io.getStdErr().writer().print("  - {s}\n", .{item}) catch {};
+                }
+                std.io.getStdErr().writer().print("Please specify which one to use: zenv activate <environment_name>\n", .{}) catch {};
+                process.exit(1);
+            } else {
+                env_name = try allocator.dupe(u8, matching_envs.items[0]);
+                env_name_needs_free = true;
+                std.debug.print("Auto-selected environment '{s}' based on your cluster\n", .{env_name});
+            }
+        }
+
         var active_config = loadAndMergeConfig(allocator, config_path, env_name) catch |err| {
             handleError(err);
             return error.CommandFailed;
