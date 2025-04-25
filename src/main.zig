@@ -1,0 +1,666 @@
+const std = @import("std");
+const fs = std.fs;
+const mem = std.mem;
+const process = std.process;
+const testing = std.testing;
+const Allocator = mem.Allocator;
+const json = std.json;
+
+const ActiveConfig = struct {
+    allocator: Allocator,
+    cluster_name: []const u8,
+    parent_envs_dir: []const u8,
+    requirements_file: []const u8,
+    python_executable: []const u8,
+    modules_to_load: std.ArrayList([]const u8),
+    custom_setup_commands: std.ArrayList([]const u8),
+    custom_activate_vars: std.StringHashMap([]const u8),
+    config_base_dir: []const u8, // Directory where zenv.json lives
+
+    fn deinitStringList(self: *ActiveConfig, list: *std.ArrayList([]const u8)) void {
+        for (list.items) |item| {
+            self.allocator.free(item);
+        }
+        list.deinit();
+    }
+
+    fn deinitStringMap(self: *ActiveConfig, map: *std.StringHashMap([]const u8)) void {
+        var iter = map.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        map.deinit();
+    }
+
+    fn deinit(self: *ActiveConfig) void {
+        self.allocator.free(self.cluster_name);
+        self.allocator.free(self.parent_envs_dir);
+        self.allocator.free(self.requirements_file);
+        self.allocator.free(self.python_executable);
+        self.deinitStringList(&self.modules_to_load);
+        self.deinitStringList(&self.custom_setup_commands);
+        self.deinitStringMap(&self.custom_activate_vars);
+        self.allocator.free(self.config_base_dir);
+    }
+};
+
+const ZenvError = error{
+    MissingHostname,
+    HostnameParseError,
+    ConfigFileNotFound,
+    ConfigFileReadError,
+    JsonParseError,
+    ConfigInvalid,
+    ClusterNotFound,
+    IoError,
+    ProcessError,
+    MissingPythonExecutable,
+    PathResolutionFailed,
+    OutOfMemory,
+};
+
+
+const ExecResult = struct {
+    term: std.process.Child.Term,
+    stdout: []const u8,
+    stderr: []const u8,
+};
+
+fn execAllowFail(allocator: Allocator, argv: []const []const u8, cwd: ?[]const u8, _: anytype) !ExecResult {
+    var result = ExecResult{
+        .term = undefined,
+        .stdout = "",
+        .stderr = "",
+    };
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    if (cwd) |dir| {
+        child.cwd = dir;
+    }
+
+    try child.spawn();
+
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
+    errdefer allocator.free(stdout);
+    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
+    errdefer allocator.free(stderr);
+
+    result.term = try child.wait();
+    result.stdout = stdout;
+    result.stderr = stderr;
+
+    return result;
+}
+
+fn runCommand(allocator: Allocator, args: []const []const u8, env_map: ?*const std.process.EnvMap) !void {
+    if (args.len == 0) {
+        std.debug.print("Warning: runCommand called with empty arguments.\n", .{});
+        return;
+    }
+    std.debug.print("Running command: {s}\n", .{args});
+    var child = std.process.Child.init(args, allocator);
+
+    // Don't manipulate environment directly, let the child inherit parent's environment
+    // This avoids alignment issues with the environment map
+    if (env_map) |map| {
+        // Only set specific environment variables when explicitly requested
+        child.env_map = map;
+    }
+
+    const term = child.spawnAndWait() catch |err| {
+        std.debug.print("Failed to spawn/wait for '{s}': {s}\n", .{ args[0], @errorName(err) });
+        return ZenvError.ProcessError;
+    };
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.debug.print("Command '{s}' exited with code {d}\n", .{ args[0], code });
+                return ZenvError.ProcessError;
+            }
+            std.debug.print("Command '{s}' finished successfully.\n", .{args[0]});
+        },
+        .Signal => |sig| {
+            std.debug.print("Command '{s}' terminated by signal {d}\n", .{ args[0], sig });
+            return ZenvError.ProcessError;
+        },
+        .Stopped => |sig| {
+            std.debug.print("Command '{s}' stopped by signal {d}\n", .{ args[0], sig });
+            return ZenvError.ProcessError;
+        },
+        else => {
+            std.debug.print("Command '{s}' terminated unexpectedly: {?}\n", .{ args[0], term });
+            return ZenvError.ProcessError;
+        },
+    }
+}
+
+fn getClusterName(allocator: Allocator) ![]const u8 {
+    const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
+        std.debug.print("Error reading HOSTNAME: {s}\n", .{@errorName(err)});
+        if (err == error.EnvironmentVariableNotFound) return ZenvError.MissingHostname;
+        return err; // Propagate other errors like OOM
+    };
+    // No need to defer free here, ownership transferred on success or error
+
+    // For hostname formats like jrlogin04.jureca, extract 'jureca'
+    // This handles both jrlogin04.jureca and login01.jureca.fz-juelich.de
+    if (mem.indexOfScalar(u8, hostname, '.')) |first_dot| {
+        // Check if there's a second dot
+        if (mem.indexOfScalarPos(u8, hostname, first_dot + 1, '.')) |second_dot| {
+            // Extract the part between first and second dot (e.g., 'jureca' from login01.jureca.fz-juelich.de)
+            return allocator.dupe(u8, hostname[first_dot + 1..second_dot]);
+        } else {
+            // Only one dot, extract the part after the dot (e.g., 'jureca' from jrlogin04.jureca)
+            return allocator.dupe(u8, hostname[first_dot + 1..]);
+        }
+    } else {
+        std.debug.print("Warning: HOSTNAME '{s}' does not contain '.', using full name as cluster name.\n", .{hostname});
+        return hostname;
+    }
+}
+
+fn loadAndMergeConfig(allocator: Allocator, config_path: []const u8) !ActiveConfig {
+    const config_base_dir = fs.path.dirname(config_path) orelse ".";
+
+    const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read config file '{s}': {s}\n", .{ config_path, @errorName(err) });
+        if (err == error.FileNotFound) return ZenvError.ConfigFileNotFound;
+        return ZenvError.ConfigFileReadError;
+    };
+    defer allocator.free(config_content);
+
+    var tree = json.parseFromSlice(json.Value, allocator, config_content, .{}) catch |err| {
+        std.debug.print("Failed to parse JSON in '{s}': {s}\n", .{ config_path, @errorName(err) });
+        return ZenvError.JsonParseError;
+    };
+    defer tree.deinit();
+
+    const root_value = tree.value;
+    if (root_value != .object) return ZenvError.ConfigInvalid;
+    const root_object = root_value.object;
+
+    const common_value = root_object.get("common") orelse return ZenvError.ConfigInvalid;
+    if (common_value != .object) return ZenvError.ConfigInvalid;
+    const common_object = common_value.object;
+
+    const sc_value = root_object.get("sc") orelse return ZenvError.ConfigInvalid;
+    if (sc_value != .object) return ZenvError.ConfigInvalid;
+    const sc_object = sc_value.object;
+
+    const cluster_name = try getClusterName(allocator);
+
+    const cluster_config_value = sc_object.get(cluster_name) orelse {
+        std.debug.print("Error: Configuration for cluster '{s}' not found in '{s}' under 'sc'.\n", .{ cluster_name, config_path });
+        allocator.free(cluster_name);
+        return ZenvError.ClusterNotFound;
+    };
+    if (cluster_config_value != .object) {
+        allocator.free(cluster_name);
+        return ZenvError.ConfigInvalid;
+    }
+    const cluster_config_object = cluster_config_value.object;
+
+    var active_config = ActiveConfig{
+        .allocator = allocator,
+        .cluster_name = cluster_name,
+        .parent_envs_dir = undefined,
+        .requirements_file = undefined,
+        .python_executable = undefined,
+        .modules_to_load = std.ArrayList([]const u8).init(allocator),
+        .custom_setup_commands = std.ArrayList([]const u8).init(allocator),
+        .custom_activate_vars = std.StringHashMap([]const u8).init(allocator),
+        .config_base_dir = undefined,
+    };
+    errdefer active_config.deinit();
+
+    active_config.config_base_dir = try allocator.dupe(u8, config_base_dir);
+
+    const getString = struct {
+        pub fn func(obj: json.ObjectMap, key: []const u8) ZenvError![]const u8 {
+            const val = obj.get(key) orelse return ZenvError.ConfigInvalid;
+            if (val != .string) return ZenvError.ConfigInvalid;
+            return val.string;
+        }
+    }.func;
+
+    const getOptionalString = struct {
+        pub fn func(obj: json.ObjectMap, key: []const u8) ZenvError!?[]const u8 {
+            if (obj.get(key)) |val| {
+                if (val == .string) return val.string;
+                if (val == .null) return null;
+                return ZenvError.ConfigInvalid;
+            }
+            return null;
+        }
+    }.func;
+
+    const fillStringArray = struct {
+        pub fn func(list: *std.ArrayList([]const u8), alloc: Allocator, obj: json.ObjectMap, key: []const u8) ZenvError!void {
+            if (obj.get(key)) |val| {
+                if (val != .array) return ZenvError.ConfigInvalid;
+                try list.ensureTotalCapacity(list.items.len + val.array.items.len);
+                for (val.array.items) |item| {
+                    if (item != .string) return ZenvError.ConfigInvalid;
+                    list.appendAssumeCapacity(try alloc.dupe(u8, item.string));
+                }
+            }
+        }
+    }.func;
+
+    const fillStringMap = struct {
+        pub fn func(map: *std.StringHashMap([]const u8), alloc: Allocator, obj: json.ObjectMap, key: []const u8, clobber: bool) ZenvError!void {
+            if (obj.get(key)) |val| {
+                if (val != .object) return ZenvError.ConfigInvalid;
+                var iter = val.object.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.value_ptr.* != .string) return ZenvError.ConfigInvalid;
+                    const map_key = try alloc.dupe(u8, entry.key_ptr.*);
+                    errdefer alloc.free(map_key);
+                    const map_val = try alloc.dupe(u8, entry.value_ptr.*.string);
+                    errdefer alloc.free(map_val);
+
+                    if (clobber) {
+                        const existing = map.get(map_key);
+                        try map.put(map_key, map_val);
+                        if (existing) |old| alloc.free(old);
+                    } else {
+                        if (!map.contains(map_key)) {
+                             try map.put(map_key, map_val);
+                        } else {
+                             std.debug.print("Warning: Duplicate key '{s}' in JSON map ignored (no clobber).\n", .{map_key});
+                             alloc.free(map_key);
+                             alloc.free(map_val);
+                        }
+                    }
+                }
+            }
+        }
+    }.func;
+
+    active_config.parent_envs_dir = try allocator.dupe(u8, try getString(common_object, "parent_envs_dir"));
+    active_config.requirements_file = try allocator.dupe(u8, try getString(common_object, "requirements_file"));
+    const common_python = try getOptionalString(common_object, "python_executable");
+    try fillStringArray(&active_config.modules_to_load, allocator, common_object, "modules_to_load");
+    try fillStringArray(&active_config.custom_setup_commands, allocator, common_object, "custom_setup_commands");
+    try fillStringMap(&active_config.custom_activate_vars, allocator, common_object, "custom_activate_vars", false);
+
+    const cluster_python = try getOptionalString(cluster_config_object, "python_executable");
+    try fillStringArray(&active_config.modules_to_load, allocator, cluster_config_object, "modules_to_load");
+    try fillStringArray(&active_config.custom_setup_commands, allocator, cluster_config_object, "custom_setup_commands");
+    try fillStringMap(&active_config.custom_activate_vars, allocator, cluster_config_object, "custom_activate_vars", true);
+
+
+    if (cluster_python) |pypath| {
+        active_config.python_executable = try allocator.dupe(u8, pypath);
+    } else if (common_python) |pypath| {
+        active_config.python_executable = try allocator.dupe(u8, pypath);
+    } else {
+        active_config.python_executable = try allocator.dupe(u8, "python3");
+    }
+
+    return active_config;
+}
+
+
+fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
+    const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
+    defer allocator.free(parent_dir_abs);
+    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.cluster_name });
+    defer allocator.free(venv_path_abs);
+    const req_path_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.requirements_file });
+    defer allocator.free(req_path_abs);
+
+    std.debug.print("Target venv path: {s}\n", .{venv_path_abs});
+    std.debug.print("Requirements path: {s}\n", .{req_path_abs});
+
+    fs.cwd().makePath(parent_dir_abs) catch |err| {
+        std.debug.print("Failed to create dir '{s}': {s}\n", .{ parent_dir_abs, @errorName(err) });
+        return err;
+    };
+    fs.cwd().makePath(venv_path_abs) catch |err| {
+        std.debug.print("Failed to create dir '{s}': {s}\n", .{ venv_path_abs, @errorName(err) });
+        return err;
+    };
+
+    if (config.modules_to_load.items.len > 0) {
+        std.debug.print("Loading modules: {s}\n", .{config.modules_to_load.items});
+
+        var cmd_parts = std.ArrayList(u8).init(allocator);
+        defer cmd_parts.deinit();
+
+        try cmd_parts.appendSlice("module load");
+        for (config.modules_to_load.items) |module_name| {
+            try cmd_parts.append(' ');
+            try cmd_parts.appendSlice(module_name);
+        }
+
+        const result = execAllowFail(allocator,
+            &[_][]const u8{ "sh", "-c", cmd_parts.items },
+            null,
+            .{}) catch |err| {
+            std.debug.print("Module load failed: {s}\n", .{@errorName(err)});
+            return ZenvError.ProcessError;
+        };
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+
+        if (result.term != .Exited or result.term.Exited != 0) {
+            std.debug.print("Module load failed with status: {any}\n", .{result.term});
+            if (result.stderr.len > 0) {
+                std.debug.print("Error: {s}\n", .{result.stderr});
+            }
+            return ZenvError.ProcessError;
+        }
+
+        std.debug.print("Modules loaded.\n", .{});
+    } else {
+        std.debug.print("No modules specified to load.\n", .{});
+    }
+
+    std.debug.print("Creating venv using Python: {s}\n", .{config.python_executable});
+    const venv_args = [_][]const u8{ config.python_executable, "-m", "venv", venv_path_abs };
+    try runCommand(allocator, &venv_args, null);
+    std.debug.print("Venv created at: {s}\n", .{venv_path_abs});
+
+    const pip_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "bin", "pip" });
+    defer allocator.free(pip_path);
+
+    std.debug.print("Checking if requirements file exists: {s}\n", .{req_path_abs});
+    const req_file_exists = (fs.cwd().access(req_path_abs, .{}) catch null) != null;
+    if (req_file_exists) {
+        std.debug.print("Installing requirements from: {s}\n", .{req_path_abs});
+        const pip_args = [_][]const u8{ pip_path, "install", "-r", req_path_abs };
+        try runCommand(allocator, &pip_args, null);
+        std.debug.print("Requirements installed.\n", .{});
+    } else {
+        std.debug.print("Requirements file '{s}' not found, skipping pip install.\n", .{req_path_abs});
+    }
+
+    if (config.custom_setup_commands.items.len > 0) {
+        std.debug.print("Running custom setup commands...\n", .{});
+        for (config.custom_setup_commands.items) |cmd_str| {
+            std.debug.print("Executing custom command: {s}\n", .{cmd_str});
+            var parts = std.ArrayList([]const u8).init(allocator);
+            errdefer parts.deinit();
+            var iter = mem.splitScalar(u8, cmd_str, ' ');
+            while (iter.next()) |part| {
+                if (part.len > 0) try parts.append(part);
+            }
+            if (parts.items.len > 0) {
+                try runCommand(allocator, parts.items, null);
+            }
+            parts.deinit();
+        }
+        std.debug.print("Custom setup commands finished.\n", .{});
+    }
+
+    std.debug.print("Creating activate.sh script...\n", .{});
+
+    var activate_content = std.ArrayList(u8).init(allocator);
+    defer activate_content.deinit();
+
+    try activate_content.appendSlice("#!/bin/bash\n\n");
+    try activate_content.appendSlice("# Generated by zenv for cluster: ");
+    try activate_content.appendSlice(config.cluster_name);
+    try activate_content.appendSlice("\n\n");
+
+    if (config.modules_to_load.items.len > 0) {
+        try activate_content.appendSlice("# Load required modules\n");
+        try activate_content.appendSlice("module purge 2>/dev/null\n");
+        for (config.modules_to_load.items) |module_name| {
+            try activate_content.appendSlice("module load ");
+            try activate_content.appendSlice(module_name);
+            try activate_content.appendSlice("\n");
+        }
+        try activate_content.appendSlice("\n");
+    }
+
+    try activate_content.appendSlice("# Activate the virtual environment\n");
+    try activate_content.appendSlice("SCRIPT_DIR=$(dirname \"${BASH_SOURCE[0]:-${(%):-%x}}\")\n");
+    try activate_content.appendSlice("VENV_DIR=$(realpath \"${SCRIPT_DIR}\")\n");
+    try activate_content.appendSlice("source \"${VENV_DIR}\"/bin/activate\n\n");
+
+    if (config.custom_activate_vars.count() > 0) {
+        try activate_content.appendSlice("# Set custom environment variables\n");
+        var iter = config.custom_activate_vars.iterator();
+        while (iter.next()) |entry| {
+            try activate_content.appendSlice("export ");
+            try activate_content.appendSlice(entry.key_ptr.*);
+            try activate_content.appendSlice("=\"");
+
+            var i: usize = 0;
+            while (i < entry.value_ptr.*.len) : (i += 1) {
+                const c = entry.value_ptr.*[i];
+                if (c == '"') {
+                    try activate_content.appendSlice("\\");
+                }
+                try activate_content.append(c);
+            }
+
+            try activate_content.appendSlice("\"\n");
+        }
+        try activate_content.appendSlice("\n");
+    }
+
+    try activate_content.appendSlice("# Reminder: This script must be sourced, not executed\n");
+    try activate_content.appendSlice("echo \"Environment activated for cluster: ");
+    try activate_content.appendSlice(config.cluster_name);
+    try activate_content.appendSlice("\"\n");
+
+    const activate_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
+    defer allocator.free(activate_path);
+
+    var activate_file = try fs.cwd().createFile(activate_path, .{ .mode = 0o755 });
+    defer activate_file.close();
+
+    try activate_file.writeAll(activate_content.items);
+
+    std.debug.print("Created activate.sh at: {s}\n", .{activate_path});
+    std.debug.print("Usage: source {s}\n", .{activate_path});
+
+    std.debug.print("Setup for cluster '{s}' complete.\n", .{config.cluster_name});
+}
+
+fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
+    const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
+    defer allocator.free(parent_dir_abs);
+
+    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.cluster_name });
+    defer allocator.free(venv_path_abs);
+
+    const activate_sh_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
+    defer allocator.free(activate_sh_path);
+
+    const activate_sh_exists = (fs.cwd().access(activate_sh_path, .{}) catch null) != null;
+
+    const err_writer = std.io.getStdErr().writer();
+
+    if (activate_sh_exists) {
+        try err_writer.print("To activate this environment, run:\n", .{});
+        try err_writer.print("source {s}\n", .{activate_sh_path});
+    } else {
+        try err_writer.print("No activation script found for cluster '{s}'\n", .{config.cluster_name});
+        try err_writer.print("Run 'zenv setup' first to create the virtual environment\n", .{});
+        return ZenvError.ConfigInvalid;
+    }
+}
+
+
+fn printUsage() void {
+    const usage = comptime
+        \\Usage: zenv <command>
+        \\
+        \\Commands:
+        \\  setup      Set up the virtual environment for the current cluster.
+        \\  activate   Print shell commands to activate the environment.
+        \\  help       Show this help message.
+        \\
+    ;
+    std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
+}
+
+pub fn main() anyerror!void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const args = try process.argsAlloc(allocator);
+
+    if (args.len < 2 or mem.eql(u8, args[1], "help") or mem.eql(u8, args[1], "--help")) {
+        printUsage();
+        process.exit(0);
+    }
+
+    const command = args[1];
+    const config_path = "zenv.json";
+
+    const handleError = struct {
+        pub fn func(err: anyerror) void {
+            const stderr = std.io.getStdErr().writer();
+            stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+            switch (@as(ZenvError, @errorCast(err))) {
+                ZenvError.ConfigFileNotFound => stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {},
+                ZenvError.ClusterNotFound => stderr.print(" -> Check HOSTNAME and ensure the cluster is defined under 'sc' in '{s}'.\n", .{config_path}) catch {},
+                ZenvError.JsonParseError => stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {},
+                ZenvError.ConfigInvalid => stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types.\n", .{config_path}) catch {},
+                ZenvError.ProcessError => stderr.print(" -> An external command failed. See output above for details.\n", .{}) catch {},
+                ZenvError.MissingHostname => stderr.print(" -> HOSTNAME environment variable not set or inaccessible.\n", .{}) catch {},
+                else => {
+                    stderr.print(" -> Unexpected error: {s}\n", .{@errorName(err)}) catch {};
+                },
+            }
+            process.exit(1);
+        }
+    }.func;
+
+    if (mem.eql(u8, command, "setup")) {
+        var active_config = loadAndMergeConfig(allocator, config_path) catch |err| {
+            handleError(err);
+            return error.CommandFailed;
+        };
+        doSetup(allocator, &active_config) catch |err| {
+            handleError(err);
+            return error.CommandFailed;
+        };
+    } else if (mem.eql(u8, command, "activate")) {
+        var active_config = loadAndMergeConfig(allocator, config_path) catch |err| {
+            handleError(err);
+            return error.CommandFailed;
+        };
+        doActivate(allocator, &active_config) catch |err| {
+            handleError(err);
+            return error.CommandFailed;
+        };
+    } else {
+        std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{command}) catch {};
+        printUsage();
+        process.exit(1);
+    }
+}
+
+
+test "getClusterName" {
+    const allocator = testing.allocator;
+    try std.process.setEnvVar("HOSTNAME", "login01.jureca.fz-juelich.de");
+    var cluster_name = try getClusterName(allocator);
+    defer allocator.free(cluster_name);
+    try testing.expectEqualStrings("jureca", cluster_name);
+
+    try std.process.setEnvVar("HOSTNAME", "jrlogin04.jureca");
+    cluster_name = try getClusterName(allocator);
+    defer allocator.free(cluster_name);
+    try testing.expectEqualStrings("jureca", cluster_name);
+
+    try std.process.setEnvVar("HOSTNAME", "booster-01");
+    cluster_name = try getClusterName(allocator);
+    defer allocator.free(cluster_name);
+    try testing.expectEqualStrings("booster-01", cluster_name);
+}
+
+test "JSON config parsing and merging" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mock_json_content = comptime
+        \\{
+        \\  "common": {
+        \\    "parent_envs_dir": "venvs",
+        \\    "requirements_file": "reqs.txt",
+        \\    "python_executable": "/usr/bin/python3.9",
+        \\    "custom_activate_vars": { "COMMON_VAR": "common_val", "ONLY_COMMON": "yes" }
+        \\  },
+        \\  "sc": {
+        \\    "testcluster": {
+        \\      "modules_to_load": ["gcc/11", "python/3.10"],
+        \\      "python_executable": "/opt/python/3.10/bin/python",
+        \\      "custom_activate_vars": { "CLUSTER_VAR": "cluster_val", "COMMON_VAR": "override_val" }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const tree = try json.parseFromSlice(json.Value, allocator, mock_json_content, .{});
+
+    const root_object = tree.value.object;
+    const common_object = root_object.get("common").?.object;
+    const sc_object = root_object.get("sc").?.object;
+    const cluster_object = sc_object.get("testcluster").?.object;
+
+    const mock_cluster_name = "testcluster";
+    var active_config = ActiveConfig{
+        .allocator = allocator,
+        .cluster_name = try allocator.dupe(u8, mock_cluster_name),
+        .parent_envs_dir = undefined,
+        .requirements_file = undefined,
+        .python_executable = undefined,
+        .modules_to_load = std.ArrayList([]const u8).init(allocator),
+        .custom_setup_commands = std.ArrayList([]const u8).init(allocator),
+        .custom_activate_vars = std.StringHashMap([]const u8).init(allocator),
+        .config_base_dir = try allocator.dupe(u8, "."),
+    };
+
+    const getString = main.getString;
+    const getOptionalString = main.getOptionalString;
+    const fillStringArray = main.fillStringArray;
+    const fillStringMap = main.fillStringMap;
+
+    active_config.parent_envs_dir = try allocator.dupe(u8, try getString(common_object, "parent_envs_dir"));
+    active_config.requirements_file = try allocator.dupe(u8, try getString(common_object, "requirements_file"));
+    const common_python = try getOptionalString(common_object, "python_executable");
+    try fillStringArray(&active_config.modules_to_load, allocator, common_object, "modules_to_load");
+    try fillStringArray(&active_config.custom_setup_commands, allocator, common_object, "custom_setup_commands");
+    try fillStringMap(&active_config.custom_activate_vars, allocator, common_object, "custom_activate_vars", false);
+
+    const cluster_python = try getOptionalString(cluster_object, "python_executable");
+    try fillStringArray(&active_config.modules_to_load, allocator, cluster_object, "modules_to_load");
+    try fillStringArray(&active_config.custom_setup_commands, allocator, cluster_object, "custom_setup_commands");
+    try fillStringMap(&active_config.custom_activate_vars, allocator, cluster_object, "custom_activate_vars", true);
+
+    if (cluster_python) |pypath| {
+        active_config.python_executable = try allocator.dupe(u8, pypath);
+    } else if (common_python) |pypath| {
+        active_config.python_executable = try allocator.dupe(u8, pypath);
+    } else {
+        active_config.python_executable = try allocator.dupe(u8, "python3");
+    }
+
+    try testing.expectEqualStrings("venvs", active_config.parent_envs_dir);
+    try testing.expectEqualStrings("reqs.txt", active_config.requirements_file);
+    try testing.expectEqualStrings("/opt/python/3.10/bin/python", active_config.python_executable);
+    try testing.expectEqual(@as(usize, 2), active_config.modules_to_load.items.len);
+    try testing.expectEqualStrings("gcc/11", active_config.modules_to_load.items[0]);
+    try testing.expectEqualStrings("python/3.10", active_config.modules_to_load.items[1]);
+    try testing.expectEqual(@as(usize, 3), active_config.custom_activate_vars.count());
+    try testing.expectEqualStrings("override_val", active_config.custom_activate_vars.get("COMMON_VAR").?);
+    try testing.expectEqualStrings("cluster_val", active_config.custom_activate_vars.get("CLUSTER_VAR").?);
+    try testing.expectEqualStrings("yes", active_config.custom_activate_vars.get("ONLY_COMMON").?);
+}

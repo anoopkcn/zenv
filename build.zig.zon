@@ -1,0 +1,17 @@
+.{
+    .name = .zenv, // Renaming for clarity (Enum Literal)
+    .version = "0.0.0",
+    .fingerprint = 0x29c2040f7262b616, // Keep existing fingerprint
+    .minimum_zig_version = "0.14.0", // Target Zig version
+
+    // No external dependencies needed for std.json
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "zenv.json", // Include the config file
+        // Add license/readme if desired
+    },
+}
