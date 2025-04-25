@@ -21,7 +21,8 @@ const ActiveConfig = struct {
     fn deinitStringList(self: *ActiveConfig, list: *std.ArrayList([]const u8)) void {
         for (list.items) |item| {
             self.allocator.free(item);
-        }
+            list.deinit();
+    }
         list.deinit();
     }
 
@@ -489,7 +490,6 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     std.debug.print("Setup for environment '{s}' (target: {s}) complete.\n", .{config.env_name, config.target_cluster});
 }
 
-// Finds environments in the config that target the current hostname
 fn findMatchingEnvs(allocator: Allocator, config_path: []const u8) !std.ArrayList([]const u8) {
     const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
         std.debug.print("Failed to read config file '{s}': {s}\n", .{ config_path, @errorName(err) });
@@ -508,11 +508,9 @@ fn findMatchingEnvs(allocator: Allocator, config_path: []const u8) !std.ArrayLis
     if (root_value != .object) return ZenvError.ConfigInvalid;
     const root_object = root_value.object;
 
-    // Get the current hostname-based cluster
     const current_cluster = try getClusterName(allocator);
     defer allocator.free(current_cluster);
 
-    // Find environments that target this cluster
     var matching_envs = std.ArrayList([]const u8).init(allocator);
     errdefer {
         for (matching_envs.items) |env_name| {
@@ -533,7 +531,6 @@ fn findMatchingEnvs(allocator: Allocator, config_path: []const u8) !std.ArrayLis
 
         const env_object = value.object;
 
-        // Check if this environment has a target field
         if (env_object.get("target")) |target_value| {
             if (target_value != .string) continue;
             const target = target_value.string;
@@ -550,6 +547,247 @@ fn findMatchingEnvs(allocator: Allocator, config_path: []const u8) !std.ArrayLis
     }
 
     return matching_envs;
+}
+// Define a struct type for environment info
+const EnvInfo = struct {
+    name: []const u8,
+    target: ?[]const u8,
+    matches_current: bool,
+};
+
+// List available environments in the config file
+fn doListConfiguredEnvs(allocator: Allocator, config_path: []const u8) !void {
+    const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read config file '{s}': {s}\n", .{ config_path, @errorName(err) });
+        if (err == error.FileNotFound) return ZenvError.ConfigFileNotFound;
+        return ZenvError.ConfigFileReadError;
+    };
+    defer allocator.free(config_content);
+
+    var tree = json.parseFromSlice(json.Value, allocator, config_content, .{}) catch |err| {
+        std.debug.print("Failed to parse JSON in '{s}': {s}\n", .{ config_path, @errorName(err) });
+        return ZenvError.JsonParseError;
+    };
+    defer tree.deinit();
+
+    const root_value = tree.value;
+    if (root_value != .object) return ZenvError.ConfigInvalid;
+    const root_object = root_value.object;
+
+    // Get the current hostname-based cluster for highlighting matching environments
+    const current_cluster = try getClusterName(allocator);
+    defer allocator.free(current_cluster);
+    
+    // Collect all environments and their targets
+    var envs = std.ArrayList(EnvInfo).init(allocator);
+    defer {
+        for (envs.items) |item| {
+            if (item.target) |target| {
+                allocator.free(target);
+            }
+        }
+        envs.deinit();
+    }
+    
+    var root_iter = root_object.iterator();
+    while (root_iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        
+        // Skip "common" and non-object entries
+        if (mem.eql(u8, key, "common") or value != .object) {
+            continue;
+        }
+        
+        const env_object = value.object;
+        var target: ?[]const u8 = null;
+        var matches_current = false;
+        
+        // Check if this environment has a target field
+        if (env_object.get("target")) |target_value| {
+            if (target_value == .string) {
+                target = try allocator.dupe(u8, target_value.string);
+                matches_current = mem.eql(u8, target_value.string, current_cluster);
+            }
+        }
+        
+        try envs.append(.{
+            .name = key,
+            .target = target,
+            .matches_current = matches_current,
+        });
+    }
+    
+    // Sort environments by name
+    std.sort.heap(EnvInfo, envs.items, {}, comptime struct {
+        pub fn lessThan(_: void, a: EnvInfo, b: EnvInfo) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+    
+    // Print environment list
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("\nAvailable environments in {s}:\n\n", .{config_path});
+    
+    // Count environments that match the current cluster
+    var matching_count: usize = 0;
+    for (envs.items) |item| {
+        if (item.matches_current) matching_count += 1;
+    }
+    
+    if (envs.items.len == 0) {
+        try stdout.print("No environments found.\n", .{});
+    } else {
+        // Header
+        try stdout.print("NAME\tTARGET\tMATCHES CURRENT\n", .{});
+        try stdout.print("----\t------\t--------------\n", .{});
+        
+        // Environment rows
+        for (envs.items) |item| {
+            try stdout.print("{s}\t", .{item.name});
+            
+            if (item.target) |target| {
+                try stdout.print("{s}\t", .{target});
+            } else {
+                try stdout.print("(any)\t", .{});
+            }
+            
+            if (item.matches_current) {
+                try stdout.print("YES\n", .{});
+            } else {
+                try stdout.print("no\n", .{});
+            }
+        }
+    }
+    
+    // Summary
+    try stdout.print("\nTotal: {d} environment(s)\n", .{envs.items.len});
+    if (matching_count > 0) {
+        try stdout.print("Found {d} environment(s) matching your current cluster '{s}'\n", .{matching_count, current_cluster});
+    } else {
+        try stdout.print("No environments match your current cluster '{s}'\n", .{current_cluster});
+    }
+    
+    // Usage hint
+    try stdout.print("\nTo set up an environment:\n  zenv setup [env_name]\n", .{});
+    try stdout.print("To activate an environment:\n  zenv activate [env_name]\n", .{});
+    try stdout.print("\nIf you omit the environment name, zenv will try to auto-detect\nbased on your current cluster name.\n", .{});
+}
+
+// List actual environment directories in parent_envs_dir
+fn doListExistingEnvs(allocator: Allocator, config_path: []const u8) !void {
+    // First read the configuration to get the parent_envs_dir path
+    const config_content = fs.cwd().readFileAlloc(allocator, config_path, 1 * 1024 * 1024) catch |err| {
+        std.debug.print("Failed to read config file '{s}': {s}\n", .{ config_path, @errorName(err) });
+        if (err == error.FileNotFound) return ZenvError.ConfigFileNotFound;
+        return ZenvError.ConfigFileReadError;
+    };
+    defer allocator.free(config_content);
+
+    var tree = json.parseFromSlice(json.Value, allocator, config_content, .{}) catch |err| {
+        std.debug.print("Failed to parse JSON in '{s}': {s}\n", .{ config_path, @errorName(err) });
+        return ZenvError.JsonParseError;
+    };
+    defer tree.deinit();
+
+    const root_value = tree.value;
+    if (root_value != .object) return ZenvError.ConfigInvalid;
+    const root_object = root_value.object;
+
+    const common_value = root_object.get("common") orelse return ZenvError.ConfigInvalid;
+    if (common_value != .object) return ZenvError.ConfigInvalid;
+    const common_object = common_value.object;
+
+    // Get parent_envs_dir from common section
+    const parent_envs_dir_value = common_object.get("parent_envs_dir") orelse return ZenvError.ConfigInvalid;
+    if (parent_envs_dir_value != .string) return ZenvError.ConfigInvalid;
+    const parent_envs_dir = parent_envs_dir_value.string;
+    
+    const config_base_dir = fs.path.dirname(config_path) orelse ".";
+
+    // We need to ensure we're using an absolute path
+    const cwd = try fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+    
+    const config_base_abs = if (fs.path.isAbsolute(config_base_dir)) 
+        try allocator.dupe(u8, config_base_dir)
+    else 
+        try fs.path.join(allocator, &[_][]const u8{cwd, config_base_dir});
+    defer allocator.free(config_base_abs);
+    
+    const parent_dir_abs = try fs.path.join(allocator, &[_][]const u8{config_base_abs, parent_envs_dir});
+    defer allocator.free(parent_dir_abs);
+
+    // Verify this is an absolute path
+    if (!fs.path.isAbsolute(parent_dir_abs)) {
+        std.debug.print("Error: Could not determine absolute path for '{s}'\n", .{parent_dir_abs});
+        return ZenvError.PathResolutionFailed;
+    }
+
+    // Now list all directories in parent_envs_dir
+    var dir = fs.openDirAbsolute(parent_dir_abs, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) {
+            std.debug.print("Environment directory '{s}' does not exist. Run 'zenv setup' first.\n", .{parent_dir_abs});
+            return ZenvError.IoError;
+        }
+        std.debug.print("Error opening directory '{s}': {s}\n", .{parent_dir_abs, @errorName(err)});
+        return ZenvError.IoError;
+    };
+    defer dir.close();
+
+    // Get list of all directories and check if they have an activate.sh script
+    var env_dirs = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (env_dirs.items) |item| {
+            allocator.free(item);
+        }
+        env_dirs.deinit();
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch |err| {
+        std.debug.print("Error reading directory: {s}\n", .{@errorName(err)});
+        return ZenvError.IoError;
+    }) |entry| {
+        if (entry.kind == .directory) {
+            const env_path = try fs.path.join(allocator, &[_][]const u8{parent_dir_abs, entry.name});
+            defer allocator.free(env_path);
+            
+            // Check if this directory has an activate.sh script
+            const activate_path = try fs.path.join(allocator, &[_][]const u8{env_path, "activate.sh"});
+            defer allocator.free(activate_path);
+            
+            const has_activate = (fs.cwd().access(activate_path, .{}) catch null) != null;
+            if (has_activate) {
+                try env_dirs.append(try allocator.dupe(u8, entry.name));
+            }
+        }
+    }
+
+    // Sort the environment names
+    std.sort.heap([]const u8, env_dirs.items, {}, comptime struct {
+        pub fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    // Print results
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("\nExisting environments in {s}:\n\n", .{parent_dir_abs});
+
+    if (env_dirs.items.len == 0) {
+        try stdout.print("No environments found. Run 'zenv setup' first.\n", .{});
+    } else {
+        for (env_dirs.items) |name| {
+            try stdout.print("- {s}\n", .{name});
+        }
+        try stdout.print("\nTotal: {d} environment(s)\n", .{env_dirs.items.len});
+    }
+
+    // Show hint
+    try stdout.print("\nUse 'zenv list --all' to see all available environments in the config.\n", .{});
+    try stdout.print("To set up an environment:\n  zenv setup [env_name]\n", .{});
+    try stdout.print("To activate an environment:\n  zenv activate [env_name]\n", .{});
 }
 fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
     const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
@@ -585,7 +823,9 @@ fn printUsage() void {
         \\                       it will try to auto-detect based on hostname.
         \\  activate [env_name]  Print instructions to activate an environment. If env_name
         \\                       is omitted, it will try to auto-detect based on hostname.
-        \\  help                 Show this help message.
+        \\  list                List existing environments that have been set up.
+        \\  list --all          List all available environments from the config file.
+        \\  help                Show this help message.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -719,6 +959,23 @@ pub fn main() anyerror!void {
             handleError(err);
             return error.CommandFailed;
         };
+    } else if (mem.eql(u8, command, "list")) {
+        // Check if --all flag is present
+        const show_all = args.len >= 3 and mem.eql(u8, args[2], "--all");
+        
+        if (show_all) {
+            // Show all available environments from config
+            doListConfiguredEnvs(allocator, config_path) catch |err| {
+                handleError(err);
+                return error.CommandFailed;
+            };
+        } else {
+            // Show only existing environments
+            doListExistingEnvs(allocator, config_path) catch |err| {
+                handleError(err);
+                return error.CommandFailed;
+            };
+        }
     } else {
         std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{command}) catch {};
         printUsage();
