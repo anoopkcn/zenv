@@ -820,9 +820,9 @@ fn printUsage() void {
         \\                       it will try to auto-detect based on hostname.
         \\  activate [env_name]  Print instructions to activate an environment. If env_name
         \\                       is omitted, it will try to auto-detect based on hostname.
-        \\  list                List existing environments that have been set up.
-        \\  list --all          List all available environments from the config file.
-        \\  help                Show this help message.
+        \\  list                 List existing environments that have been set up.
+        \\  list --all           List all available environments from the config file.
+        \\  help                 Show this help message.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
