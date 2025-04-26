@@ -15,10 +15,10 @@ const Command = enum {
     help,
     version,
     @"-v",
-    @"-V", // Common alias for version
+    @"-V",
     @"--version",
     @"--help",
-    unknown, // For unrecognized commands
+    unknown,
 
     fn fromString(s: []const u8) Command {
         return std.meta.stringToEnum(Command, s) orelse Command.unknown;
