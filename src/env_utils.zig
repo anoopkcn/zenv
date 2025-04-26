@@ -57,16 +57,33 @@ pub fn resolveEnvironmentName(
         std.log.info("No environment name specified, attempting auto-detection...", .{});
         const current_cluster = getClusterName(allocator) catch |err| {
              std.log.err("Failed to get cluster name for auto-detection: {s}", .{@errorName(err)});
+             // Use std.log.err for user-facing messages here instead of direct print
              if (err == ZenvError.MissingHostname) {
-                 std.io.getStdErr().writer().print(
-                     \\Error: Could not auto-detect environment. HOSTNAME not set.
-                     \\Please specify environment name: zenv {s} <environment_name>
-                 , .{command_name}) catch {};
+                 // Format the message separately
+                 const msg = std.fmt.allocPrint(allocator, 
+                    "Error: Could not auto-detect environment. HOSTNAME not set." ++
+                    " Please specify environment name: zenv {s} <environment_name>",
+                    .{command_name}
+                 ) catch |e| blk: {
+                     std.log.err("Failed to format MissingHostname error message: {s}", .{@errorName(e)});
+                     break :blk "<Failed to format error message>"; // Yield the literal
+                 };
+                 defer if (!std.mem.eql(u8, msg, "<Failed to format error message>")) allocator.free(msg);
+                 // Log the pre-formatted message
+                 std.log.err("{s}", .{msg}); 
              } else {
-                 std.io.getStdErr().writer().print(
-                      \\Error: Could not auto-detect environment due to error getting cluster name.
-                      \\Please specify environment name: zenv {s} <environment_name>
-                 , .{command_name}) catch {};
+                 // Format the message separately
+                 const msg = std.fmt.allocPrint(allocator,
+                    "Error: Could not auto-detect environment due to error getting cluster name." ++
+                    " Please specify environment name: zenv {s} <environment_name>",
+                    .{command_name}
+                 ) catch |e| blk: {
+                     std.log.err("Failed to format ClusterName error message: {s}", .{@errorName(e)});
+                     break :blk "<Failed to format error message>"; // Yield the literal
+                 };
+                 defer if (!std.mem.eql(u8, msg, "<Failed to format error message>")) allocator.free(msg);
+                 // Log the pre-formatted message
+                 std.log.err("{s}", .{msg});
              }
              return err; // Propagate the error
         };
@@ -87,22 +104,29 @@ pub fn resolveEnvironmentName(
         }
 
         if (matching_envs.items.len == 0) {
-            std.io.getStdErr().writer().print(
-                \\Error: Auto-detection failed. No environments found targeting your cluster '{s}'.
-                \\Please specify environment name: zenv {s} <environment_name>
-                \\Use 'zenv list --all' to see available environments.
-            , .{ current_cluster, command_name }) catch {};
+            // Format the error string first
+            const err_msg = std.fmt.allocPrint(allocator, 
+                "Error: Auto-detection failed. No environments found targeting your cluster '{s}'." ++
+                " Please specify environment name: zenv {s} <environment_name>" ++
+                " Use 'zenv list --all' to see available environments.",
+                .{ current_cluster, command_name }
+            ) catch |e| {
+                // Fallback log if formatting fails
+                std.log.err("Failed to format auto-detection error message: {s}", .{@errorName(e)});
+                return ZenvError.EnvironmentNotFound; 
+            };
+            defer allocator.free(err_msg);
+            // Log the pre-formatted string
+            std.log.err("{s}", .{err_msg}); 
             return ZenvError.EnvironmentNotFound;
         } else if (matching_envs.items.len > 1) {
-            std.io.getStdErr().writer().print(
-                \\Error: Auto-detection failed. Multiple environments found targeting your cluster '{s}':
-            , .{current_cluster}) catch {};
+            // Use std.log.err for this user-facing failure message
+            std.log.err("Error: Auto-detection failed. Multiple environments found targeting your cluster '{s}':", .{current_cluster});
             for (matching_envs.items) |item| {
-                std.io.getStdErr().writer().print("  - {s}\n", .{item}) catch {};
+                 // Keep printing the list items to stderr for clarity, but use log for the main error
+                 std.io.getStdErr().writer().print("  - {s}\n", .{item}) catch {};
             }
-            std.io.getStdErr().writer().print(
-                \\Please specify which one to use: zenv {s} <environment_name>
-            , .{command_name}) catch {};
+             std.log.err("Please specify which one to use: zenv {s} <environment_name>", .{command_name});
             return ZenvError.EnvironmentNotFound;
         } else {
             // Exactly one match found

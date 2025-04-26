@@ -52,7 +52,7 @@ pub fn runCommand(allocator: Allocator, args: []const []const u8, env_map: ?*con
         std.log.warn("runCommand called with empty arguments.", .{});
         return; // Or perhaps return an error?
     }
-    std.debug.print("Running command: {s}\n", .{args}); // Use std.log.debug for verbose output?
+    std.log.debug("Running command: {s}", .{args}); // Changed to std.log.debug
     var child = std.process.Child.init(args, allocator);
 
     // Inherit parent environment by default (current behavior)

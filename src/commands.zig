@@ -42,10 +42,200 @@ fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
 }
 
 fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
-    _ = allocator; // Use params to avoid unused errors
-    _ = config;
-    std.log.warn("doSetup temporarily disabled for debugging", .{});
-    return;
+    const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
+    defer allocator.free(parent_dir_abs);
+    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.env_name });
+    defer allocator.free(venv_path_abs);
+    const req_path_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.requirements_file });
+    defer allocator.free(req_path_abs);
+
+    std.log.info("Target venv path: {s}", .{venv_path_abs});
+    std.log.info("Requirements path: {s}", .{req_path_abs});
+
+    fs.cwd().makePath(parent_dir_abs) catch |err| {
+        std.log.err("Failed to create parent directory '{s}': {s}", .{ parent_dir_abs, @errorName(err) });
+        return err;
+    };
+    fs.cwd().makePath(venv_path_abs) catch |err| {
+        std.log.err("Failed to create venv directory '{s}': {s}", .{ venv_path_abs, @errorName(err) });
+        return err;
+    };
+
+    // --- Module Loading ---
+    if (config.modules_to_load.items.len > 0) {
+        std.log.info("Loading modules: {s}", .{config.modules_to_load.items});
+        var cmd_parts = std.ArrayList(u8).init(allocator);
+        defer cmd_parts.deinit();
+        try cmd_parts.appendSlice("module load");
+        for (config.modules_to_load.items) |module_name| {
+            try cmd_parts.append(' ');
+            try cmd_parts.appendSlice(module_name);
+        }
+        const result = process_utils.execAllowFail(allocator, &[_][]const u8{ "sh", "-c", cmd_parts.items }, null, .{}) catch |err| {
+            std.log.err("Failed to execute module load command: {s}", .{@errorName(err)});
+            return ZenvError.ProcessError;
+        };
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+        if (result.term != .Exited or result.term.Exited != 0) {
+            std.log.err("Module load command failed with status: {any}", .{result.term});
+            if (result.stderr.len > 0) {
+                std.log.err("Module load error output: {s}", .{result.stderr});
+            }
+            return ZenvError.ProcessError;
+        }
+        std.log.info("Modules loaded successfully.", .{});
+    } else {
+        std.log.info("No modules specified to load.", .{});
+    }
+
+    // --- Venv Creation ---
+    std.log.info("Creating venv using Python: {s}", .{config.python_executable});
+    const venv_args = [_][]const u8{ config.python_executable, "-m", "venv", venv_path_abs };
+    try process_utils.runCommand(allocator, &venv_args, null);
+    std.log.info("Venv created at: {s}", .{venv_path_abs});
+
+    // --- Dependency Installation ---
+    const pip_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "bin", "pip" });
+    defer allocator.free(pip_path);
+
+    const req_file_exists = (fs.cwd().access(req_path_abs, .{}) catch null) != null;
+    std.log.debug("Checking if requirements file exists ('{s}'): {}", .{ req_path_abs, req_file_exists }); // Use {} for bool
+
+    if (req_file_exists or config.dependencies.items.len > 0) {
+        if (config.dependencies.items.len > 0) {
+            std.log.info("Found {d} dependencies in config, combining with requirements file (if exists).", .{config.dependencies.items.len});
+            const all_deps_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "all_dependencies.txt" });
+            defer allocator.free(all_deps_path);
+
+            var deps_file = try fs.cwd().createFile(all_deps_path, .{});
+            // Use errdefer to ensure close even if writes fail
+            errdefer deps_file.close();
+            const writer = deps_file.writer();
+
+            if (req_file_exists) {
+                std.log.debug("Reading requirements file: {s}", .{req_path_abs});
+                // Explicitly type req_content as optional
+                const req_content: ?[]const u8 = fs.cwd().readFileAlloc(allocator, req_path_abs, 1 * 1024 * 1024) catch |err| blk: {
+                    std.log.warn("Could not read requirements file '{s}': {s}. Skipping its content.", .{ req_path_abs, @errorName(err) });
+                    // Yield null explicitly to match the variable type ?[]const u8
+                    break :blk null;
+                };
+                if (req_content) |content| {
+                    defer allocator.free(content);
+                    try writer.writeAll(content);
+                    // Ensure newline after req file content only if content exists
+                    try writer.writeAll("\n");
+                }
+            }
+            std.log.debug("Adding dependencies from zenv.json config.", .{});
+            for (config.dependencies.items) |dep| {
+                try writer.writeAll(dep);
+                try writer.writeAll("\n");
+            }
+            // Must close file before pip reads it
+            deps_file.close();
+
+            std.log.info("Installing combined dependencies from: {s}", .{all_deps_path});
+            const pip_args = [_][]const u8{ pip_path, "install", "-r", all_deps_path };
+            try process_utils.runCommand(allocator, &pip_args, null);
+
+        } else { // Only requirements file exists
+            std.log.info("Installing requirements from: {s}", .{req_path_abs});
+            const pip_args = [_][]const u8{ pip_path, "install", "-r", req_path_abs };
+            try process_utils.runCommand(allocator, &pip_args, null);
+        }
+        std.log.info("Dependencies installed.", .{});
+    } else {
+        std.log.info("Requirements file '{s}' not found and no dependencies in config, skipping pip install.", .{req_path_abs});
+    }
+
+    // --- Custom Setup Commands ---
+    if (config.custom_setup_commands.items.len > 0) {
+        std.log.info("Running custom setup commands...", .{});
+        for (config.custom_setup_commands.items) |cmd_str| {
+            std.log.debug("Executing custom command: {s}", .{cmd_str}); // Use log.debug
+            var parts = std.ArrayList([]const u8).init(allocator);
+            // Use errdefer for cleanup in case of error during loop
+            errdefer parts.deinit();
+            var iter = mem.splitScalar(u8, cmd_str, ' ');
+            while (iter.next()) |part| {
+                if (part.len > 0) try parts.append(part);
+            }
+            if (parts.items.len > 0) {
+                try process_utils.runCommand(allocator, parts.items, null);
+            }
+            // Deinit after loop finishes normally
+            parts.deinit();
+        }
+        std.log.info("Custom setup commands finished.", .{});
+    }
+
+    // --- Activate Script Generation ---
+    std.log.info("Creating activate.sh script...", .{});
+    const activate_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
+    defer allocator.free(activate_path);
+
+    var activate_file = try fs.cwd().createFile(activate_path, .{ .mode = 0o755 });
+    defer activate_file.close();
+    const writer = activate_file.writer();
+
+    try writer.print(
+        \\#!/bin/bash
+        \\# Generated by zenv for environment: {s} (target: {s})
+        \\
+    , .{ config.env_name, config.target_cluster });
+
+    if (config.modules_to_load.items.len > 0) {
+        try writer.print("# Load required modules\n", .{});
+        try writer.print("module purge 2>/dev/null\n", .{}); // Optional: Start clean
+        for (config.modules_to_load.items) |module_name| {
+            try writer.print("module load {s}\n", .{module_name});
+        }
+        try writer.print("\n", .{});
+    }
+
+    try writer.print(
+        \\# Activate the virtual environment
+        \\# Using robust method to find script directory
+        \\SCRIPT_DIR=$(cd -- "$(dirname -- "${{BASH_SOURCE[0]:-${{(%):-%x}}}}")" &> /dev/null && pwd)
+        \\VENV_DIR="${{SCRIPT_DIR}}"
+        \\source "${{VENV_DIR}}"/bin/activate
+        \\
+    , .{});
+
+    if (config.custom_activate_vars.count() > 0) {
+        try writer.print("# Set custom environment variables\n", .{});
+        var iter = config.custom_activate_vars.iterator();
+        while (iter.next()) |entry| {
+            // Basic shell escaping for the value
+            var escaped_value = std.ArrayList(u8).init(allocator);
+            defer escaped_value.deinit();
+            for (entry.value_ptr.*) |char| {
+                 switch (char) {
+                     '\'' => try escaped_value.appendSlice("'\\''"), // Replace ' with '\''
+                     else => try escaped_value.append(char),
+                 }
+            }
+            try writer.print("export {s}='{s}'\n", .{ entry.key_ptr.*, escaped_value.items });
+        }
+        try writer.print("\n", .{});
+    }
+
+    if (config.dependencies.items.len > 0) {
+        try writer.print("# This environment includes dependencies from zenv.json\n", .{});
+        // Optional: List dependencies in comments
+    }
+
+    try writer.print(
+        \\# Reminder: This script must be sourced, not executed
+        \\echo \"Environment activated: {s} (target: {s})\"
+    , .{ config.env_name, config.target_cluster });
+
+    std.log.info("Created activate.sh at: {s}", .{activate_path});
+    std.log.info("Usage: source {s}", .{activate_path});
 }
 
 fn doListConfiguredEnvs(allocator: Allocator, config: *const ZenvConfig) !void {
