@@ -1,4 +1,5 @@
 const std = @import("std");
+const options = @import("options");
 const fs = std.fs;
 const mem = std.mem;
 const process = std.process;
@@ -608,6 +609,7 @@ fn printUsage() void {
         \\                       is omitted, it will try to auto-detect based on hostname.
         \\  list                 List existing environments that have been set up.
         \\  list --all           List all available environments from the config file.
+        \\  version, -v, --version  Print the zenv version.
         \\  help                 Show this help message.
         \\
     ;
@@ -624,10 +626,24 @@ pub fn main() anyerror!void {
     const args = try process.argsAlloc(allocator);
     // No need to free args items individually as argsAlloc uses the allocator
 
-    if (args.len < 2 or mem.eql(u8, args[1], "help") or mem.eql(u8, args[1], "--help")) {
+    if (args.len < 2) {
+        printUsage();
+        process.exit(1); // No command given is an error
+    }
+
+    // Handle version and help flags first
+    if (mem.eql(u8, args[1], "help") or mem.eql(u8, args[1], "--help")) {
         printUsage();
         process.exit(0);
     }
+    if (mem.eql(u8, args[1], "version") or mem.eql(u8, args[1], "-v") or mem.eql(u8, args[1], "--version")) {
+        std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
+             std.debug.print("Error printing version: {s}\n", .{@errorName(err)}); // Escaped newline
+             process.exit(1);
+        };
+        process.exit(0);
+    }
+
 
     const command = args[1];
     const config_path = "zenv.json"; // Keep this fixed for now
