@@ -136,12 +136,12 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
             deps_file.close();
 
             std.log.info("Installing combined dependencies from: {s}", .{all_deps_path});
-            const pip_args = [_][]const u8{ pip_path, "install", "-r", all_deps_path };
+            const pip_args = [_][]const u8{ pip_path, "install", "--upgrade", "-r", all_deps_path };
             try process_utils.runCommand(allocator, &pip_args, null);
 
         } else { // Only requirements file exists
             std.log.info("Installing requirements from: {s}", .{req_path_abs});
-            const pip_args = [_][]const u8{ pip_path, "install", "-r", req_path_abs };
+            const pip_args = [_][]const u8{ pip_path, "install", "--upgrade", "-r", req_path_abs };
             try process_utils.runCommand(allocator, &pip_args, null);
         }
         std.log.info("Dependencies installed.", .{});
