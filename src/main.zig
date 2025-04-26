@@ -7,6 +7,24 @@ const testing = std.testing;
 const Allocator = mem.Allocator;
 const json = std.json;
 
+// Define the Command enum
+const Command = enum {
+    setup,
+    activate,
+    list,
+    help,
+    version,
+    @"-v",
+    @"-V", // Common alias for version
+    @"--version",
+    @"--help",
+    unknown, // For unrecognized commands
+
+    fn fromString(s: []const u8) Command {
+        return std.meta.stringToEnum(Command, s) orelse Command.unknown;
+    }
+};
+
 const ExecResult = struct {
     term: std.process.Child.Term,
     stdout: []const u8,
@@ -598,6 +616,17 @@ fn createActiveConfig(
     return active_config; // Success! Ownership transferred
 }
 
+fn printVersion() void {
+    // Access version from the build-time options module
+    std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
+        // Use std.log.err for errors, std.debug.print is less conventional for this
+        std.log.err("Error printing version: {s}", .{@errorName(err)});
+        // If called explicitly via 'zenv version', main will exit(0) anyway.
+        // If it fails during another command (unlikely), we just log the error.
+    };
+}
+
+
 fn printUsage() void {
     const usage = comptime
         \\Usage: zenv <command>
@@ -616,6 +645,76 @@ fn printUsage() void {
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
 }
 
+// --- Command Handler Functions ---
+
+// Error handling helper type for command handlers
+const CommandError = ZenvError || error{ ArgsError };
+
+fn handleSetupCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
+    const resolved_env_name = resolveEnvironmentName(allocator, config, args, "setup") catch |err| {
+        handleError(err);
+        return; // Exit function on error
+    };
+    // createActiveConfig takes ownership of resolved_env_name on success
+    var active_config = createActiveConfig(allocator, config, resolved_env_name) catch |err| {
+        handleError(err);
+        return;
+    };
+    defer active_config.deinit(); // Deinit active config when setup scope ends
+
+    doSetup(allocator, &active_config) catch |err| {
+        handleError(err);
+        return;
+    };
+    std.debug.print("Setup completed successfully for environment '{s}'.\n", .{active_config.env_name});
+}
+
+fn handleActivateCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
+    const resolved_env_name = resolveEnvironmentName(allocator, config, args, "activate") catch |err| {
+        handleError(err);
+        return;
+    };
+    // createActiveConfig takes ownership of resolved_env_name on success
+    var active_config = createActiveConfig(allocator, config, resolved_env_name) catch |err| {
+        handleError(err);
+        return;
+    };
+    defer active_config.deinit(); // Deinit active config when activate scope ends
+
+    // Note: doActivate primarily prints to stdout, errors are less common but handled
+    doActivate(allocator, &active_config) catch |err| {
+        handleError(err);
+        return;
+    };
+    // No success message here, as output is meant for sourcing
+}
+
+fn handleListCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
+    // Check for --all flag (allow variation in position, e.g., "list --all" or potentially "--all list")
+    var show_all = false;
+    // Start checking from index 1 (skip executable name) or 2 (skip command name)
+    for (args[1..]) |arg| {
+        if (mem.eql(u8, arg, "--all")) {
+            show_all = true;
+            break;
+        }
+    }
+
+    if (show_all) {
+        // Pass the parsed config to the list function
+        doListConfiguredEnvs(allocator, config) catch |err| {
+            handleError(err);
+            return;
+        };
+    } else {
+        // Pass the parsed config to the list function
+        doListExistingEnvs(allocator, config) catch |err| {
+            handleError(err);
+            return;
+        };
+    }
+}
+
 
 // Main function using the new structure
 pub fn main() anyerror!void {
@@ -624,28 +723,25 @@ pub fn main() anyerror!void {
     const allocator = arena.allocator();
 
     const args = try process.argsAlloc(allocator);
-    // No need to free args items individually as argsAlloc uses the allocator
+    // No need to free args items individually as ArenaAllocator handles it
 
-    if (args.len < 2) {
-        printUsage();
-        process.exit(1); // No command given is an error
+    // Determine the command
+    const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
+
+    // Handle version and help flags immediately
+    switch (command) {
+        .help, .@"--help" => {
+            printUsage();
+            process.exit(0);
+        },
+        .version, .@"-v", .@"-V", .@"--version" => {
+            printVersion(); // Call the extracted function
+            process.exit(0);
+        },
+        // Allow other commands to proceed
+        .setup, .activate, .list, .unknown => {},
     }
 
-    // Handle version and help flags first
-    if (mem.eql(u8, args[1], "help") or mem.eql(u8, args[1], "--help")) {
-        printUsage();
-        process.exit(0);
-    }
-    if (mem.eql(u8, args[1], "version") or mem.eql(u8, args[1], "-v") or mem.eql(u8, args[1], "--version")) {
-        std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
-             std.debug.print("Error printing version: {s}\n", .{@errorName(err)}); // Escaped newline
-             process.exit(1);
-        };
-        process.exit(0);
-    }
-
-
-    const command = args[1];
     const config_path = "zenv.json"; // Keep this fixed for now
 
     // Centralized error handler
@@ -679,53 +775,22 @@ pub fn main() anyerror!void {
     };
     defer config.deinit(); // Ensure config is cleaned up
 
-
     // --- Command Dispatch ---
-    if (mem.eql(u8, command, "setup")) {
-        const resolved_env_name = resolveEnvironmentName(allocator, &config, args, "setup") catch |err| {
-             handleError(err); return;
-        };
-        // createActiveConfig takes ownership of resolved_env_name on success
-        var active_config = createActiveConfig(allocator, &config, resolved_env_name) catch |err| {
-             handleError(err); return;
-        };
-        defer active_config.deinit(); // Deinit active config when setup scope ends
+    switch (command) {
+        .setup => handleSetupCommand(allocator, &config, args, &handleError),
+        .activate => handleActivateCommand(allocator, &config, args, &handleError),
+        .list => handleListCommand(allocator, &config, args, &handleError),
 
-        doSetup(allocator, &active_config) catch |err| {
-            handleError(err); return;
-        };
+        // Help and Version were handled earlier and exit
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable, // Should have exited already
 
-    } else if (mem.eql(u8, command, "activate")) {
-         const resolved_env_name = resolveEnvironmentName(allocator, &config, args, "activate") catch |err| {
-             handleError(err); return;
-        };
-        // createActiveConfig takes ownership of resolved_env_name on success
-        var active_config = createActiveConfig(allocator, &config, resolved_env_name) catch |err| {
-             handleError(err); return;
-        };
-        defer active_config.deinit(); // Deinit active config when activate scope ends
-
-        doActivate(allocator, &active_config) catch |err| {
-            handleError(err); return;
-        };
-
-    } else if (mem.eql(u8, command, "list")) {
-        const show_all = args.len >= 3 and mem.eql(u8, args[2], "--all");
-        if (show_all) {
-            // Pass the parsed config to the list function
-            doListConfiguredEnvs(allocator, &config) catch |err| {
-                handleError(err); return;
-            };
-        } else {
-            // Pass the parsed config to the list function
-            doListExistingEnvs(allocator, &config) catch |err| {
-                handleError(err); return;
-            };
-        }
-    } else {
-        std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{command}) catch {};
-        printUsage();
-        process.exit(1);
+        // Handle unknown commands
+        .unknown => {
+            // Use args[1] as it contains the original unrecognized command string
+            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args[1]}) catch {};
+            printUsage();
+            process.exit(1);
+        },
     }
 }
 
