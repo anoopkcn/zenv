@@ -6,32 +6,135 @@ const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
+const process_utils = @import("process_utils.zig");
 
-// Gets the logical cluster name from the HOSTNAME environment variable.
-pub fn getClusterName(allocator: Allocator) ![]const u8 {
-    const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
-        std.log.err("Error reading HOSTNAME: {s}", .{@errorName(err)});
-        if (err == error.EnvironmentVariableNotFound) return ZenvError.MissingHostname;
-        return err; // Propagate other errors like OOM
-    };
-    defer allocator.free(hostname); // Free the original hostname string after use
-
+// Helper function to parse cluster name from raw hostname (handles dot logic)
+// Returns an owned string.
+fn parseClusterFromHostname(allocator: Allocator, hostname: []const u8) ![]const u8 {
     // For hostname formats like jrlogin04.jureca, extract 'jureca'
     // Handles both jrlogin04.jureca and login01.jureca.fz-juelich.de
     if (mem.indexOfScalar(u8, hostname, '.')) |first_dot| {
         // Check if there's a second dot
         if (mem.indexOfScalarPos(u8, hostname, first_dot + 1, '.')) |second_dot| {
             // Extract the part between first and second dot
-            return allocator.dupe(u8, hostname[first_dot + 1..second_dot]);
+            return allocator.dupe(u8, hostname[first_dot + 1 .. second_dot]);
         } else {
             // Only one dot, extract the part after the dot
-            return allocator.dupe(u8, hostname[first_dot + 1..]);
+            return allocator.dupe(u8, hostname[first_dot + 1 ..]);
         }
     } else {
-        std.log.warn("HOSTNAME '{s}' does not contain '.', using full name as cluster name.", .{hostname});
-        // Return a duplicate since the original hostname is freed by the defer
+        std.log.warn("Hostname '{s}' does not contain '.', using full name as cluster name.", .{hostname});
+        // Return a duplicate of the full hostname
         return allocator.dupe(u8, hostname);
     }
+}
+
+// Gets the logical cluster name.
+// Tries HOSTNAME env var first, then falls back to the `hostname` command.
+pub fn getClusterName(allocator: Allocator) ![]const u8 {
+    var hostname_raw: ?[]const u8 = null;
+    var hostname_needs_freeing = false;
+    var stdout_to_free: ?[]const u8 = null;
+    var stderr_to_free: ?[]const u8 = null;
+
+    // Defer block ensures allocated memory is freed in all return paths
+    defer {
+        if (hostname_needs_freeing and hostname_raw != null) {
+            allocator.free(hostname_raw.?);
+        }
+        if (stdout_to_free) |s| allocator.free(s);
+        if (stderr_to_free) |s| allocator.free(s);
+    }
+
+    var hostname_from_env_tmp: ?[]const u8 = null; // Temporary holder
+
+    // Attempt to get the env var
+    const env_result = std.process.getEnvVarOwned(allocator, "HOSTNAME");
+
+    // Check the result
+    if (env_result) |h_env| {
+        // Success!
+        hostname_from_env_tmp = h_env;
+        hostname_needs_freeing = true; // Set flag early, it will be freed by defer if not used
+    } else |err| {
+        // Handle the error
+        if (err == error.EnvironmentVariableNotFound) {
+            std.log.debug("HOSTNAME not set, attempting 'hostname' command.", .{});
+            // Do nothing, hostname_from_env_tmp remains null
+        } else {
+            std.log.err("Error reading HOSTNAME: {s}", .{@errorName(err)});
+            // Make sure allocated memory is freed before returning error
+             if (hostname_needs_freeing and hostname_from_env_tmp != null) {
+                 allocator.free(hostname_from_env_tmp.?);
+             }
+            return err; // Propagate other errors like OOM
+        }
+    }
+
+    // Now check if hostname_from_env_tmp is set and non-empty
+    if (hostname_from_env_tmp) |h_env_val| {
+        if (h_env_val.len > 0) {
+            hostname_raw = h_env_val;
+            // hostname_needs_freeing is already true
+            std.log.debug("Using HOSTNAME from environment: {s}", .{hostname_raw.?});
+        } else {
+            // HOSTNAME is set but empty
+            allocator.free(h_env_val); // Free the empty string
+            hostname_needs_freeing = false; // It's freed now
+            // hostname_raw remains null
+            std.log.warn("HOSTNAME environment variable is set but empty. Attempting 'hostname' command.", .{});
+        }
+    } else {
+        // hostname_from_env_tmp was null (either not found or error handled)
+        // hostname_raw remains null
+    }
+
+    // If hostname_raw is still null, execute the 'hostname' command
+    if (hostname_raw == null) {
+        const argv = [_][]const u8{"hostname"};
+        const result = process_utils.execAllowFail(allocator, &argv, null, .{}) catch |err| {
+            std.log.err("Failed to execute 'hostname' command: {s}", .{@errorName(err)});
+            return ZenvError.ProcessError;
+        };
+
+        // Store command output buffers to be freed by the defer block
+        stdout_to_free = result.stdout;
+        stderr_to_free = result.stderr;
+
+        switch (result.term) {
+            .Exited => |code| {
+                if (code != 0) {
+                    // Use result.stderr for potentially useful error info
+                    std.log.err("'hostname' command failed with code {d}. Stderr: {s}", .{ code, result.stderr });
+                    return ZenvError.ProcessError;
+                }
+                std.log.debug("'hostname' command succeeded.", .{});
+            },
+            else => |term| {
+                std.log.err("'hostname' command terminated unexpectedly: {?}. Stderr: {s}", .{ term, result.stderr });
+                return ZenvError.ProcessError;
+            },
+        }
+
+        const trimmed_hostname = mem.trim(u8, result.stdout, &std.ascii.whitespace);
+        if (trimmed_hostname.len == 0) {
+            std.log.err("'hostname' command returned empty output after trimming.", .{});
+            return ZenvError.MissingHostname;
+        }
+        hostname_raw = trimmed_hostname; // Use the trimmed slice for parsing
+        hostname_needs_freeing = false; // Handled by stdout_to_free in defer
+        std.log.debug("Using hostname from command output: {s}", .{hostname_raw.?});
+    }
+
+    // At this point, hostname_raw MUST be non-null and contain the raw hostname
+    if (hostname_raw == null) {
+        // This should be unreachable
+        std.log.err("Internal logic error: hostname_raw is null after checks.", .{});
+        return ZenvError.MissingHostname;
+    }
+
+    // Parse the cluster name from the raw hostname (returns an owned string)
+    return try parseClusterFromHostname(allocator, hostname_raw.?);
 }
 
 // Attempts to resolve the environment name based on args or auto-detection by cluster.
