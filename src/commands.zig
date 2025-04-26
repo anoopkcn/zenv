@@ -225,11 +225,6 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
         // Optional: List dependencies in comments
     }
 
-    try writer.print("Reminder: This script must be sourced, not executed");
-    //     \\# Reminder: This script must be sourced, not executed
-    //     \\echo \"Environment activated: {s} \(target: {s}\)\"
-    // , .{ config.env_name, config.target_cluster });
-
     std.log.info("Created activate.sh at: {s}", .{activate_path});
     std.log.info("Usage: source {s}", .{activate_path});
 }
