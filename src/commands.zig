@@ -37,7 +37,7 @@ fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
     } else {
         try err_writer.print("No activation script found for environment '{s}'\n", .{config.env_name});
         try err_writer.print("Run 'zenv setup {s}' first to create the virtual environment\n", .{config.env_name});
-        return ZenvError.ConfigInvalid; // Or a more specific ActivationScriptNotFound error?
+        return ZenvError.ConfigInvalid;
     }
 }
 
@@ -61,7 +61,6 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
         return err;
     };
 
-    // --- Module Loading ---
     if (config.modules_to_load.items.len > 0) {
         std.log.info("Loading modules: {s}", .{config.modules_to_load.items});
         var cmd_parts = std.ArrayList(u8).init(allocator);
@@ -97,7 +96,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     try process_utils.runCommand(allocator, &venv_args, null);
     std.log.info("Venv created at: {s}", .{venv_path_abs});
 
-    // --- Dependency Installation ---
+    // --- Dependency installation using pip ---
     const pip_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "bin", "pip" });
     defer allocator.free(pip_path);
 
@@ -231,7 +230,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
 
     try writer.print(
         \\# Reminder: This script must be sourced, not executed
-        \\echo \"Environment activated: {s} (target: {s})\"
+        \\echo \"Environment activated: {s} \(target: {s}\)\"
     , .{ config.env_name, config.target_cluster });
 
     std.log.info("Created activate.sh at: {s}", .{activate_path});
