@@ -10,10 +10,7 @@ const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-// We need getClusterName for createActiveConfig
 const env_utils = @import("env_utils.zig");
-
-// --- Configuration Structs ---
 
 pub const ActiveConfig = struct {
     allocator: Allocator,
@@ -222,7 +219,7 @@ pub const ZenvConfig = struct {
             .dependencies = if (common_obj.get("dependencies")) |v| try parseStringArray(allocator, v) else .{},
         };
         // If environment parsing fails, ensure common_config is cleaned up
-        errdefer common_config.deinit(allocator); 
+        errdefer common_config.deinit(allocator);
 
         // Parse environments
         var environments_map = StringHashMapUnmanaged(EnvironmentConfig){};
@@ -313,7 +310,7 @@ pub fn createActiveConfig(
     env_name: []const u8, // Takes ownership on success
 ) ZenvError!ActiveConfig {
     // Ensure env_name is freed if any subsequent operation fails
-    errdefer allocator.free(env_name); 
+    errdefer allocator.free(env_name);
 
     const env_config = config.environments.get(env_name) orelse return ZenvError.EnvironmentNotFound;
     const common_config = config.common;
@@ -334,7 +331,7 @@ pub fn createActiveConfig(
         // No target specified, use current cluster name
         target_cluster_final = try env_utils.getClusterName(allocator);
     }
-    
+
     // Determine final python executable (env > common > default)
     var python_exec_final: []const u8 = undefined;
     // errdefer if (@ptrToInt(python_exec_final) != @ptrToInt(undefined)) allocator.free(python_exec_final); // REMOVED
@@ -372,8 +369,7 @@ pub fn createActiveConfig(
     // Merge activate vars (env overrides common)
     var common_iter = common_config.custom_activate_vars.iterator();
     while (common_iter.next()) |entry| {
-        // PutNoClobber ensures we don't overwrite if env has the same key later
-        try active_config.custom_activate_vars.putNoClobber(            
+        try active_config.custom_activate_vars.putNoClobber(
             try allocator.dupe(u8, entry.key_ptr.*),
             try allocator.dupe(u8, entry.value_ptr.*)
         );
@@ -381,12 +377,11 @@ pub fn createActiveConfig(
 
     var env_iter = env_config.custom_activate_vars.iterator();
     while (env_iter.next()) |entry| {
-        // Put will overwrite common value if key exists
         try active_config.custom_activate_vars.put(
             try allocator.dupe(u8, entry.key_ptr.*),
             try allocator.dupe(u8, entry.value_ptr.*)
         );
     }
 
-    return active_config; // Success! Ownership fully transferred
+    return active_config;
 }

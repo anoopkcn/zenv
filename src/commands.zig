@@ -90,7 +90,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
         std.log.info("No modules specified to load.", .{});
     }
 
-    // --- Venv Creation ---
+    // --- Venv Creation TODO: make a uv version ---
     std.log.info("Creating venv using Python: {s}", .{config.python_executable});
     const venv_args = [_][]const u8{ config.python_executable, "-m", "venv", venv_path_abs };
     try process_utils.runCommand(allocator, &venv_args, null);
@@ -101,7 +101,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
     defer allocator.free(pip_path);
 
     const req_file_exists = (fs.cwd().access(req_path_abs, .{}) catch null) != null;
-    std.log.debug("Checking if requirements file exists ('{s}'): {}", .{ req_path_abs, req_file_exists }); // Use {} for bool
+    std.log.debug("Checking if requirements file exists ('{s}'): {}", .{ req_path_abs, req_file_exists });
 
     if (req_file_exists or config.dependencies.items.len > 0) {
         if (config.dependencies.items.len > 0) {
@@ -110,16 +110,14 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
             defer allocator.free(all_deps_path);
 
             var deps_file = try fs.cwd().createFile(all_deps_path, .{});
-            // Use errdefer to ensure close even if writes fail
+
             errdefer deps_file.close();
             const writer = deps_file.writer();
 
             if (req_file_exists) {
                 std.log.debug("Reading requirements file: {s}", .{req_path_abs});
-                // Explicitly type req_content as optional
                 const req_content: ?[]const u8 = fs.cwd().readFileAlloc(allocator, req_path_abs, 1 * 1024 * 1024) catch |err| blk: {
                     std.log.warn("Could not read requirements file '{s}': {s}. Skipping its content.", .{ req_path_abs, @errorName(err) });
-                    // Yield null explicitly to match the variable type ?[]const u8
                     break :blk null;
                 };
                 if (req_content) |content| {
@@ -189,7 +187,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
 
     if (config.modules_to_load.items.len > 0) {
         try writer.print("# Load required modules\n", .{});
-        try writer.print("module purge 2>/dev/null\n", .{}); // Optional: Start clean
+        try writer.print("module purge 2>/dev/null\n", .{});
         for (config.modules_to_load.items) |module_name| {
             try writer.print("module load {s}\n", .{module_name});
         }
@@ -198,7 +196,6 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
 
     try writer.print(
         \\# Activate the virtual environment
-        \\# Using robust method to find script directory
         \\SCRIPT_DIR=$(cd -- "$(dirname -- "${{BASH_SOURCE[0]:-${{(%):-%x}}}}")" &> /dev/null && pwd)
         \\VENV_DIR="${{SCRIPT_DIR}}"
         \\source "${{VENV_DIR}}"/bin/activate
@@ -214,7 +211,7 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
             defer escaped_value.deinit();
             for (entry.value_ptr.*) |char| {
                  switch (char) {
-                     '\'' => try escaped_value.appendSlice("'\\''"), // Replace ' with '\''
+                     '\'' => try escaped_value.appendSlice("'\\''"),
                      else => try escaped_value.append(char),
                  }
             }
@@ -228,10 +225,10 @@ fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
         // Optional: List dependencies in comments
     }
 
-    try writer.print(
-        \\# Reminder: This script must be sourced, not executed
-        \\echo \"Environment activated: {s} \(target: {s}\)\"
-    , .{ config.env_name, config.target_cluster });
+    try writer.print("Reminder: This script must be sourced, not executed");
+    //     \\# Reminder: This script must be sourced, not executed
+    //     \\echo \"Environment activated: {s} \(target: {s}\)\"
+    // , .{ config.env_name, config.target_cluster });
 
     std.log.info("Created activate.sh at: {s}", .{activate_path});
     std.log.info("Usage: source {s}", .{activate_path});

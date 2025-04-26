@@ -2,11 +2,9 @@ const std = @import("std");
 const mem = std.mem;
 const process = std.process;
 const Allocator = mem.Allocator;
-// Import errors and config types
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-// We need ZenvConfig definition to check environments
-const config_module = @import("config.zig"); 
+const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
 
 // Gets the logical cluster name from the HOSTNAME environment variable.
@@ -60,7 +58,7 @@ pub fn resolveEnvironmentName(
              // Use std.log.err for user-facing messages here instead of direct print
              if (err == ZenvError.MissingHostname) {
                  // Format the message separately
-                 const msg = std.fmt.allocPrint(allocator, 
+                 const msg = std.fmt.allocPrint(allocator,
                     "Error: Could not auto-detect environment. HOSTNAME not set." ++
                     " Please specify environment name: zenv {s} <environment_name>",
                     .{command_name}
@@ -70,7 +68,7 @@ pub fn resolveEnvironmentName(
                  };
                  defer if (!std.mem.eql(u8, msg, "<Failed to format error message>")) allocator.free(msg);
                  // Log the pre-formatted message
-                 std.log.err("{s}", .{msg}); 
+                 std.log.err("{s}", .{msg});
              } else {
                  // Format the message separately
                  const msg = std.fmt.allocPrint(allocator,
@@ -105,7 +103,7 @@ pub fn resolveEnvironmentName(
 
         if (matching_envs.items.len == 0) {
             // Format the error string first
-            const err_msg = std.fmt.allocPrint(allocator, 
+            const err_msg = std.fmt.allocPrint(allocator,
                 "Error: Auto-detection failed. No environments found targeting your cluster '{s}'." ++
                 " Please specify environment name: zenv {s} <environment_name>" ++
                 " Use 'zenv list --all' to see available environments.",
@@ -113,11 +111,11 @@ pub fn resolveEnvironmentName(
             ) catch |e| {
                 // Fallback log if formatting fails
                 std.log.err("Failed to format auto-detection error message: {s}", .{@errorName(e)});
-                return ZenvError.EnvironmentNotFound; 
+                return ZenvError.EnvironmentNotFound;
             };
             defer allocator.free(err_msg);
             // Log the pre-formatted string
-            std.log.err("{s}", .{err_msg}); 
+            std.log.err("{s}", .{err_msg});
             return ZenvError.EnvironmentNotFound;
         } else if (matching_envs.items.len > 1) {
             // Use std.log.err for this user-facing failure message

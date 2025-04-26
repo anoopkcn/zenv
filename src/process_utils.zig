@@ -2,7 +2,6 @@ const std = @import("std");
 const mem = std.mem;
 const process = std.process;
 const Allocator = mem.Allocator;
-// Import the errors module
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 
@@ -12,9 +11,6 @@ pub const ExecResult = struct {
     stderr: []const u8,
 };
 
-// Executes a command, allows failure, captures stdout/stderr.
-// Note: The `_: anytype` parameter seems unused and can likely be removed.
-// Consider if it was intended for future use (e.g., logging context).
 pub fn execAllowFail(allocator: Allocator, argv: []const []const u8, cwd: ?[]const u8, _: anytype) !ExecResult {
     var result = ExecResult{
         .term = undefined,
@@ -33,7 +29,7 @@ pub fn execAllowFail(allocator: Allocator, argv: []const []const u8, cwd: ?[]con
 
     try child.spawn();
 
-    // Consider adding error handling for readToEndAlloc failure specifically
+    // TODO:: Consider adding error handling for readToEndAlloc failure specifically
     const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
     errdefer allocator.free(stdout);
     const stderr = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
@@ -61,7 +57,7 @@ pub fn runCommand(allocator: Allocator, args: []const []const u8, env_map: ?*con
     }
 
     // Consider if streaming stdout/stderr to parent is desired instead of ignoring
-    // child.stdout_behavior = .Inherit;
+    // child.stdout_behavidddor = .Inherit;
     // child.stderr_behavior = .Inherit;
 
     const term = child.spawnAndWait() catch |err| {
@@ -75,7 +71,7 @@ pub fn runCommand(allocator: Allocator, args: []const []const u8, env_map: ?*con
                 std.log.err("Command '{s}' exited with code {d}", .{ args[0], code });
                 return ZenvError.ProcessError;
             }
-            std.log.info("Command '{s}' finished successfully.", .{args[0]}); // Use std.log.info?
+            std.log.info("Command '{s}' finished successfully.", .{args[0]});
         },
         .Signal => |sig| {
             std.log.err("Command '{s}' terminated by signal {d}", .{ args[0], sig });
