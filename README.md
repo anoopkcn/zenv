@@ -145,10 +145,6 @@ Zenv maintains a global registry at `~/.zenv/registry.json` that allows you to a
 - Target machines
 - Optional descriptions
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
 ## License
 
 [MIT License
