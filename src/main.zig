@@ -164,7 +164,7 @@ pub fn main() anyerror!void {
     switch (command) {
         .setup => try commands.handleSetupCommand(allocator, &config, args_const, handleError),
         .activate => commands.handleActivateCommand(allocator, &config, args_const, handleError),
-        .list => commands.handleListCommand(allocator, &config, args_const, handleError),
+        .list => commands.handleListCommand(allocator, &config, args_const),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,

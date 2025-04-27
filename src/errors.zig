@@ -15,6 +15,7 @@ pub const ZenvError = error{
     EnvironmentVariableNotFound, // From getEnvVarOwned
     InvalidWtf8,                // From getEnvVarOwned
     ArgsError,                  // Added for command line argument issues
+    TargetMachineMismatch,      // Added for hostname validation issues
 };
 
 // Optional: Define a combined error type for command handlers
