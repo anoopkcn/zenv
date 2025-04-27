@@ -345,7 +345,8 @@ fn appendModuleCommandsToScript(
             try module_list_str.appendSlice(module_name);
         }
 
-        try writer.print("echo '==> Loading required modules'\necho 'Loading modules: {s}'\n", .{module_list_str.items});
+        try writer.print("  echo '==> Loading required modules'\n", .{});
+        try writer.print("  echo 'Loading modules: {s}'\n", .{module_list_str.items});
 
         for (env_config.modules.items) |module_name| {
             try writer.print("  module load {s}\n", .{module_name});
@@ -418,7 +419,7 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
     try appendModuleCommandsToScript(writer, allocator, env_config, false);
 
     // Virtual environment activation with absolute path
-    const venv_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/venv", .{ cwd_path, env_name });
+    const venv_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}", .{ cwd_path, env_name });
     defer allocator.free(venv_path);
     try writer.print(
         \\# Activate the Python virtual environment
@@ -578,7 +579,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         try appendModuleCommandsToScript(writer, allocator, env_config, true);
 
         // 3. Create virtual environment
-        const venv_dir = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/venv", .{ cwd_path, env_name });
+        const venv_dir = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}", .{ cwd_path, env_name });
         defer allocator.free(venv_dir);
         try writer.print(
             \\echo '==> Step 3: Creating Python virtual environment'

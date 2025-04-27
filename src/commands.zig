@@ -158,7 +158,7 @@ pub fn handleActivateCommand(
     };
 
     // Print virtual environment activation with absolute path
-    writer.print("source {s}/zenv/{s}/venv/bin/activate\n", .{ cwd_path, env_name }) catch |e| {
+    writer.print("source {s}/zenv/{s}/bin/activate\n", .{ cwd_path, env_name }) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
