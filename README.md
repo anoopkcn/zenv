@@ -1,12 +1,12 @@
 # zenv
-Zenv - A python environment manager for supercomputers
+Zenv - A virtual environment manager for supercomputers
 
-Zenv is a flexible python environment manager that simplifies the setup, activation, and management of project environments that has a module system.
+`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments that has a module system.
 
 ## Features
 
-- **Environment Setup**: Create Python virtual environments with specific dependencies with a single `zenv.json` file.
-- **Module Support**: Integrate with HPC module systems
+- **Environment Setup**: Creates a virtual environments with specific dependencies with a single `zenv.json` file.
+- **Module Support**: Integrate with HPC module systems, specified in the same `zenv.json`
 - **Machine-Specific Environments**: Configure environments for specific target machines
 - **Operations from any directory**: All environments are registered at `~/.zenv/registry.json` so operations like activation, lisitng and changing directories can be done from any directory location
 
@@ -17,7 +17,7 @@ Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
 Example for Linux x86_64 machine:
 ```bash
-curl -L "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.xz"
+curl -L "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.gz"
 ```
 
 Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)
