@@ -40,20 +40,24 @@ jobs:
         id: sha
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
       
-      - name: Delete existing tip release if it exists
+      - name: Delete existing tip releases
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if the release exists and delete it
-          RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/tip" \
-            | jq -r '.id // empty')
+          # Get all releases
+          RELEASES=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases")
           
-          if [ ! -z "$RELEASE_ID" ]; then
-            echo "Deleting existing release with ID: $RELEASE_ID"
-            curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
-          fi
+          # Find all releases with tag name 'tip' and delete them
+          echo "$RELEASES" | jq -r '.[] | select(.tag_name == "tip") | .id' | while read -r RELEASE_ID; do
+            if [ ! -z "$RELEASE_ID" ]; then
+              echo "Deleting existing release with ID: $RELEASE_ID"
+              curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+              # Small delay to ensure the API has time to process
+              sleep 2
+            fi
+          done
         continue-on-error: true
       
       - name: Create/Update tip release
