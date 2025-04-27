@@ -150,18 +150,47 @@ pub fn handleActivateCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv activate <env_name>\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv activate <env_name|env_id>\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
     
-    const env_name = args[2];
+    const identifier = args[2];
+    
+    // Check if this might be a partial ID (7+ characters)
+    const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
     
     // Look up environment in registry
-    const entry = registry.lookup(env_name) orelse {
-        std.io.getStdErr().writer().print("Error: Environment '{s}' not found in registry.\n", .{env_name}) catch {};
-        std.io.getStdErr().writer().print("Use 'zenv register {s}' to register this environment first.\n", .{env_name}) catch {};
+    const entry = registry.lookup(identifier) orelse {
+        // Special handling for ambiguous ID prefixes
+        if (is_potential_id_prefix) {
+            // Count how many environments have this ID prefix
+            var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
+            defer matching_envs.deinit();
+            var match_found = false;
+            
+            for (registry.entries.items) |reg_entry| {
+                if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
+                    match_found = true;
+                    matching_envs.append(reg_entry.env_name) catch continue;
+                }
+            }
+            
+            if (match_found and matching_envs.items.len > 1) {
+                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
+                for (matching_envs.items) |env_name| {
+                    std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
+                }
+                std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
+                handleErrorFn(error.AmbiguousIdentifier);
+                return;
+            }
+        }
+        
+        // Default error for no matches
+        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
+        std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     };
@@ -172,7 +201,7 @@ pub fn handleActivateCommand(
     const writer = std.io.getStdOut().writer();
 
     // Output the path to the activation script
-    writer.print("{s}/zenv/{s}/activate.sh\n", .{ project_dir, env_name }) catch |e| {
+    writer.print("{s}/zenv/{s}/activate.sh\n", .{ project_dir, entry.env_name }) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
@@ -221,13 +250,20 @@ pub fn handleListCommand(
             }
         }
 
-        // Print environment name and target machine
-        stdout.print("- {s} (Target: {s}", .{ env_name, target_machine }) catch {};
+        // Get short ID (first 7 characters)
+        const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
+        
+        // Print environment name, short ID, and target machine
+        stdout.print("- {s} (ID: {s}... Target: {s}", .{ env_name, short_id, target_machine }) catch {};
+        
         // Optionally print description
         if (entry.description) |desc| {
             stdout.print(" - {s}", .{desc}) catch {};
         }
         stdout.print(")\n  [Project: {s}]\n", .{entry.project_dir}) catch {};
+        
+        // Print full ID on a separate line for reference
+        stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
         count += 1;
     }
 

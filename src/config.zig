@@ -52,12 +52,14 @@ fn parseStringArray(allocator: Allocator, list: *ArrayList([]const u8), v: *cons
 
 // Registry entry for a single environment
 pub const RegistryEntry = struct {
+    id: []const u8, // SHA-1 unique identifier
     env_name: []const u8,
     project_dir: []const u8,
     description: ?[]const u8 = null,
     target_machine: []const u8,
     
     pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
+        allocator.free(self.id);
         allocator.free(self.env_name);
         allocator.free(self.project_dir);
         if (self.description) |desc| {
@@ -68,6 +70,37 @@ pub const RegistryEntry = struct {
 };
 
 // Global registry of environments
+/// Generates a SHA-1 based ID for an environment using its name, project directory, and target machine
+/// Adds a timestamp to ensure uniqueness even if the other parameters are identical
+fn generateSHA1ID(allocator: Allocator, env_name: []const u8, project_dir: []const u8, target_machine: []const u8) ![]const u8 {
+    // Create a SHA-1 hasher
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    
+    // Add uniqueness factors to the hash
+    sha1.update(env_name);
+    sha1.update(project_dir);
+    sha1.update(target_machine);
+    
+    // Add a timestamp for additional uniqueness
+    var timestamp_buf: [20]u8 = undefined;
+    const timestamp_str = try std.fmt.bufPrint(&timestamp_buf, "{d}", .{std.time.milliTimestamp()});
+    sha1.update(timestamp_str);
+    
+    // Finalize the hash
+    var hash: [20]u8 = undefined; // SHA-1 produces a 20-byte hash
+    sha1.final(&hash);
+    
+    // Convert to hex string (40 characters)
+    var hex_buf: [40]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    
+    for (hash, 0..) |byte, i| {
+        hex_buf[i * 2] = hex_chars[byte >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[byte & 15];
+    }
+    
+    return try allocator.dupe(u8, &hex_buf);
+}
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
     entries: std.ArrayList(RegistryEntry),
@@ -191,8 +224,25 @@ pub const EnvironmentRegistry = struct {
                     }
                 }
                 
+                // Check for ID or generate one if not present (backward compatibility)
+                var id_owned: []const u8 = undefined;
+                if (entry_obj.get("id")) |id_value| {
+                    if (id_value == .string) {
+                        id_owned = try allocator.dupe(u8, id_value.string);
+                    } else {
+                        // Generate a new ID if the existing one isn't a string
+                        id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machine.string);
+                        std.log.info("Generated new SHA-1 ID for environment with invalid ID type: {s}", .{env_name.string});
+                    }
+                } else {
+                    // No ID exists, generate one (for backward compatibility)
+                    id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machine.string);
+                    std.log.info("Generated new SHA-1 ID for existing environment: {s}", .{env_name.string});
+                }
+                
                 // Create entry
                 try registry.entries.append(.{
+                    .id = id_owned,
                     .env_name = try allocator.dupe(u8, env_name.string),
                     .project_dir = try allocator.dupe(u8, project_dir.string),
                     .description = description,
@@ -241,6 +291,7 @@ pub const EnvironmentRegistry = struct {
             var entry_obj = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
             
             // Add required fields
+            try entry_obj.object.put("id", std.json.Value{ .string = entry.id });
             try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
             try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
             try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machine });
@@ -273,7 +324,7 @@ pub const EnvironmentRegistry = struct {
         // Check if environment already exists
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
-                // Update existing entry
+                // Update existing entry (ID remains the same)
                 self.allocator.free(entry.project_dir);
                 entry.project_dir = try self.allocator.dupe(u8, project_dir);
                 
@@ -289,8 +340,12 @@ pub const EnvironmentRegistry = struct {
             }
         }
         
+        // Generate a SHA-1 ID for the new entry
+        const id = try generateSHA1ID(self.allocator, env_name, project_dir, target_machine);
+        
         // Add new entry
         try self.entries.append(.{
+            .id = id,
             .env_name = try self.allocator.dupe(u8, env_name),
             .project_dir = try self.allocator.dupe(u8, project_dir),
             .description = if (description) |desc| try self.allocator.dupe(u8, desc) else null,
@@ -312,12 +367,37 @@ pub const EnvironmentRegistry = struct {
     }
     
     // Look up an environment by name
-    pub fn lookup(self: *const EnvironmentRegistry, env_name: []const u8) ?RegistryEntry {
+    pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
+        // First try exact match (for names and full IDs)
         for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.env_name, env_name)) {
+            if (std.mem.eql(u8, entry.env_name, identifier) or std.mem.eql(u8, entry.id, identifier)) {
                 return entry;
             }
         }
+        
+        // If no exact match, try partial ID matching (if identifier is at least 7 chars)
+        // SHA-1 IDs are 40 chars, so 7 should be enough to be unique in most cases
+        if (identifier.len >= 7) {
+            var matching_entry: ?RegistryEntry = null;
+            var match_count: usize = 0;
+            
+            for (self.entries.items) |entry| {
+                // Check if the identifier is a prefix of entry's ID
+                if (entry.id.len >= identifier.len and std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
+                    matching_entry = entry;
+                    match_count += 1;
+                }
+            }
+            
+            // If exactly one match found, return it
+            if (match_count == 1) {
+                return matching_entry;
+            } else if (match_count > 1) {
+                // If multiple matches, log ambiguity but don't return anything
+                std.log.err("Ambiguous ID prefix '{s}' matches multiple environments", .{identifier});
+            }
+        }
+        
         return null;
     }
 };

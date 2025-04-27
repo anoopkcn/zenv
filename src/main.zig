@@ -32,7 +32,7 @@ fn printVersion() void {
 
 fn printUsage() void {
     const usage = comptime
-        \\Usage: zenv <command> [environment_name] [options]
+        \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
         \\
@@ -40,9 +40,10 @@ fn printUsage() void {
         \\  setup <env_name>       Set up the specified environment for the current machine.
         \\                         Creates a Python virtual environment in zenv/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
-        \\  activate <env_name>    Output the path to the activation script.
+        \\  activate <env_name|id> Output the path to the activation script.
+        \\                         You can use the environment name or its ID (full or partial).
         \\                         To activate the environment, use:
-        \\                         source $(zenv activate <env_name>)
+        \\                         source $(zenv activate <env_name|id>)
         \\  list                   List environments registered for the current machine.
         \\  list --all             List all registered environments.
         \\  register <env_name>    Register an environment in the global registry.
@@ -58,7 +59,7 @@ fn printUsage() void {
         \\Registry:
         \\  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
         \\  Setting up an environment will register that environment or register it with 'zenv register <env_name>'.
-        \\  Then you can activate it from anywhere with 'source $(zenv activate <env_name>)'.
+        \\  Then you can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};

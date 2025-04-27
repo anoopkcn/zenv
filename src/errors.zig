@@ -20,6 +20,7 @@ pub const ZenvError = error{
     InvalidWtf8, // From getEnvVarOwned
     ArgsError, // Added for command line argument issues
     TargetMachineMismatch, // Added for hostname validation issues
+    AmbiguousIdentifier, // Added for ambiguous ID prefixes
 };
 
 // Add a tagged union for error context
