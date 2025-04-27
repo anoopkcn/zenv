@@ -50,10 +50,8 @@ fn printUsage() void {
         \\  --force-deps           When used with setup command, installs all specified dependencies
         \\                         even if they are already provided by loaded modules.
         \\
-        \\Environment names (e.g., 'pytorch-gpu-jureca') are defined in zenv.json.
-        \\
         \\To activate an environment after setup:
-        \\  source /absolute/path/to/zenv/<env_name>/activate.sh
+        \\  source /path/to/zenv/<env_name>/activate.sh
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -98,7 +96,7 @@ pub fn main() anyerror!void {
     const handleError = struct {
         pub fn func(err: anyerror) void {
             const stderr = std.io.getStdErr().writer();
-            
+
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
                 switch (err) {
