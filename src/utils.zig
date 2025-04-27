@@ -8,6 +8,7 @@ const fs = std.fs;
 const process = std.process;
 const StringHashMap = std.StringHashMap;
 
+
 // ============================================================================
 // Dependency Parsing Utilities
 // ============================================================================
@@ -770,7 +771,7 @@ pub fn getAndValidateEnvironment(
         std.log.err("Missing environment name argument for command '{s}'", .{args[1]});
         // Create error context but use standard error for now
         // TODO: Update error handling to use contextualized errors
-        handleErrorFn(error.EnvironmentNotFound); 
+        handleErrorFn(error.EnvironmentNotFound);
         return null;
     }
     const env_name = args[2];
@@ -885,38 +886,38 @@ pub fn isConfigProvidedDependency(env_config: *const EnvironmentConfig, dep: []c
 // Get hostname from environment variable or command
 pub fn getHostname(allocator: Allocator) ![]const u8 {
     std.log.debug("Attempting to get hostname from environment variable", .{});
-    
+
     // Try from environment variable first (consistent with ZenvConfig method)
     const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
         std.log.debug("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
-        
+
         // Try HOST instead
         const host = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
             std.log.debug("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
-            
+
             // Default to command-based hostname
             std.log.debug("Getting hostname using command", .{});
             return getHostnameFromCommand(allocator);
         };
-        
+
         // Free and return null if it's an empty string
         if (host.len == 0) {
             allocator.free(host);
             std.log.debug("HOST environment variable is empty, getting using command", .{});
             return getHostnameFromCommand(allocator);
         }
-        
+
         std.log.debug("Got hostname from HOST: '{s}'", .{host});
         return host;
     };
-    
+
     // Free and return null if it's an empty string
     if (hostname.len == 0) {
         allocator.free(hostname);
         std.log.debug("HOSTNAME environment variable is empty, getting using command", .{});
         return getHostnameFromCommand(allocator);
     }
-    
+
     std.log.debug("Got hostname: '{s}'", .{hostname});
     return hostname;
 }

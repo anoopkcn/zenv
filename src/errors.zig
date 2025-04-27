@@ -44,17 +44,17 @@ pub const ErrorContext = union(enum) {
         exit_code: ?u8 = null,
     },
     none: void,
-    
+
     // Helper to create an empty context
     pub fn empty() ErrorContext {
         return .{ .none = {} };
     }
-    
+
     // Helper to create a config file context
     pub fn configFile(path: []const u8, line: ?usize) ErrorContext {
         return .{ .config_file = .{ .path = path, .line = line } };
     }
-    
+
     // Helper to create an environment context
     pub fn environmentName(name: []const u8) ErrorContext {
         return .{ .environment = .{ .name = name } };
@@ -73,7 +73,7 @@ pub const ZenvErrorWithContext = struct {
             .context = context,
         };
     }
-    
+
     // Format function to pretty-print the error
     pub fn format(
         self: ZenvErrorWithContext,
@@ -83,7 +83,7 @@ pub const ZenvErrorWithContext = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        
+
         try writer.print("Error: {s}", .{@errorName(self.err)});
         switch (self.context) {
             .config_file => |ctx| {

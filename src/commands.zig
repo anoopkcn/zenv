@@ -134,10 +134,10 @@ pub fn handleSetupCommand(
         handleErrorFn(err);
         return;
     };
-    
+
     try registry.register(env_name, cwd_path, env_config.description, env_config.target_machine);
     try registry.save();
-    
+
     std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
     std.log.info("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name});
 }
@@ -155,12 +155,12 @@ pub fn handleActivateCommand(
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
-    
+
     const identifier = args[2];
-    
+
     // Check if this might be a partial ID (7+ characters)
     const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
-    
+
     // Look up environment in registry
     const entry = registry.lookup(identifier) orelse {
         // Special handling for ambiguous ID prefixes
@@ -169,14 +169,14 @@ pub fn handleActivateCommand(
             var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
             defer matching_envs.deinit();
             var match_found = false;
-            
+
             for (registry.entries.items) |reg_entry| {
                 if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
                     match_found = true;
                     matching_envs.append(reg_entry.env_name) catch continue;
                 }
             }
-            
+
             if (match_found and matching_envs.items.len > 1) {
                 std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
                 for (matching_envs.items) |env_name| {
@@ -187,17 +187,17 @@ pub fn handleActivateCommand(
                 return;
             }
         }
-        
+
         // Default error for no matches
         std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
         std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     };
-    
+
     // Get project directory from registry entry
     const project_dir = entry.project_dir;
-    
+
     const writer = std.io.getStdOut().writer();
 
     // Output the path to the activation script
@@ -252,18 +252,18 @@ pub fn handleListCommand(
 
         // Get short ID (first 7 characters)
         const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
-        
+
         // Print environment name, short ID, and target machine
         stdout.print("- {s} (ID: {s}... Target: {s}", .{ env_name, short_id, target_machine }) catch {};
-        
+
         // Optionally print description
         if (entry.description) |desc| {
             stdout.print(" - {s}", .{desc}) catch {};
         }
         stdout.print(")\n  [Project: {s}]\n", .{entry.project_dir}) catch {};
-        
+
         // Print full ID on a separate line for reference
-        stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
+        // stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
         count += 1;
     }
 
@@ -297,12 +297,12 @@ pub fn handleRegisterCommand(
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
-    
+
     const env_name = args[2];
-    
+
     // Validate that the environment exists in the config
     const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
-    
+
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
@@ -310,21 +310,21 @@ pub fn handleRegisterCommand(
         handleErrorFn(err);
         return;
     };
-    
+
     // Register the environment in the global registry
     registry.register(env_name, cwd_path, env_config.description, env_config.target_machine) catch |err| {
         std.log.err("Failed to register environment: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return;
     };
-    
+
     // Save the registry
     registry.save() catch |err| {
         std.log.err("Failed to save registry: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return;
     };
-    
+
     std.io.getStdOut().writer().print("Environment '{s}' registered successfully.\n", .{env_name}) catch {};
     std.io.getStdOut().writer().print("You can now activate it from any directory with: source $(zenv activate {s})\n", .{env_name}) catch {};
 }
@@ -340,16 +340,16 @@ pub fn handleUnregisterCommand(
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
-    
+
     const env_name = args[2];
-    
+
     // Look up environment in registry first to check if it exists
     _ = registry.lookup(env_name) orelse {
         std.io.getStdErr().writer().print("Error: Environment '{s}' not found in registry.\n", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     };
-    
+
     // Remove the environment from the registry
     if (registry.unregister(env_name)) {
         // Save the registry
@@ -358,7 +358,7 @@ pub fn handleUnregisterCommand(
             handleErrorFn(err);
             return;
         };
-        
+
         std.io.getStdOut().writer().print("Environment '{s}' unregistered successfully.\n", .{env_name}) catch {};
     } else {
         std.io.getStdErr().writer().print("Error: Failed to unregister environment '{s}'.\n", .{env_name}) catch {};
