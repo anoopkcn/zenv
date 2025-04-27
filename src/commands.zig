@@ -4,229 +4,10 @@ const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
+const utils = @import("utils.zig");
 const process = std.process;
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
-
-
-// Common function to get and validate environment config
-fn getAndValidateEnvironment(
-    allocator: Allocator,
-    config: *const ZenvConfig,
-    args: [][]const u8,
-    handleErrorFn: fn (anyerror) void,
-) ?*const EnvironmentConfig {
-     if (args.len < 3) {
-         std.log.err("Missing environment name argument for command '{s}'", .{args[1]});
-         handleErrorFn(ZenvError.EnvironmentNotFound); // Or a new error like MissingArgument
-         return null;
-     }
-     const env_name = args[2];
-
-     const env_config = config.getEnvironment(env_name) orelse {
-         std.log.err("Environment '{s}' not found in configuration.", .{env_name});
-         handleErrorFn(ZenvError.EnvironmentNotFound);
-         return null;
-     };
-
-     // *** Crucial Validation ***
-     var hostname: []const u8 = undefined;
-     hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
-         handleErrorFn(err);
-         return null;
-     };
-     defer allocator.free(hostname); // Free hostname obtained from getHostname
-
-     // Check for hostname matching with improved logic
-     std.log.debug("Comparing hostname '{s}' with target machine '{s}'", .{hostname, env_config.target_machine});
-
-     // Enhanced hostname matching to handle different patterns
-     const hostname_matches = blk: {
-         // Check if hostname ends with ".target_machine" (domain-style matching)
-         const target = env_config.target_machine;
-         const domain_check = std.mem.concat(allocator, u8, &[_][]const u8{".", target}) catch {
-             // If concat fails, just do simple substring check
-             break :blk std.mem.indexOf(u8, hostname, target) != null;
-         };
-         defer allocator.free(domain_check);
-
-         // Try exact match first
-         if (std.mem.eql(u8, hostname, target)) {
-             break :blk true;
-         }
-
-         // Try domain suffix match (e.g. hostname ends with ".jureca")
-         if (hostname.len >= domain_check.len) {
-             const suffix = hostname[hostname.len - domain_check.len..];
-             if (std.mem.eql(u8, suffix, domain_check)) {
-                 break :blk true;
-             }
-         }
-
-         // Fallback to substring match
-         break :blk std.mem.indexOf(u8, hostname, target) != null;
-     };
-
-     if (!hostname_matches) {
-         std.log.err("Current machine ('{s}') does not match target machine ('{s}') specified for environment '{s}'.", .{
-             hostname,
-             env_config.target_machine,
-             env_name,
-         });
-         // Maybe add a new error ZenvError.TargetMachineMismatch
-         handleErrorFn(ZenvError.ClusterNotFound); // Re-using for now
-         return null;
-     }
-
-     return env_config;
-}
-
-
-// Parse dependencies from pyproject.toml file
-// Returns the number of dependencies found
-fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
-    std.log.info("Parsing pyproject.toml for dependencies...", .{});
-    
-    var count: usize = 0;
-    var in_dependencies_section = false;
-    var in_dependencies_array = false;
-    var bracket_depth: usize = 0;
-    
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        
-        // Skip empty lines and comments
-        if (trimmed.len == 0 or trimmed[0] == '#') {
-            continue;
-        }
-        
-        // Check for the dependencies section in different possible formats
-        if (!in_dependencies_section) {
-            // Match [project.dependencies] or [tool.poetry.dependencies]
-            if (std.mem.indexOf(u8, trimmed, "[project.dependencies]") != null or 
-                std.mem.indexOf(u8, trimmed, "[tool.poetry.dependencies]") != null) {
-                std.log.info("Found project dependencies section", .{});
-                in_dependencies_section = true;
-                continue;
-            }
-            
-            // Match dependencies = [ ... on a single line
-            if (std.mem.indexOf(u8, trimmed, "dependencies") != null and 
-                std.mem.indexOf(u8, trimmed, "=") != null and
-                std.mem.indexOf(u8, trimmed, "[") != null) {
-                std.log.info("Found dependencies array declaration", .{});
-                in_dependencies_section = true;
-                in_dependencies_array = true;
-                bracket_depth = 1;
-                
-                // If the line contains deps, process them
-                const opening_bracket = std.mem.indexOf(u8, trimmed, "[") orelse continue;
-                const line_after_bracket = trimmed[opening_bracket + 1..];
-                try parseDependenciesLine(allocator, line_after_bracket, deps_list, &count);
-                continue;
-            }
-            
-            // If we see another section after looking for dependencies, we've gone too far
-            if (std.mem.indexOf(u8, trimmed, "[") == 0 and 
-                std.mem.indexOf(u8, trimmed, "]") != null) {
-                continue; // Skip to next section
-            }
-        } 
-        // Already in dependencies section
-        else {
-            // Check if we've hit a new section
-            if (std.mem.indexOf(u8, trimmed, "[") == 0 and 
-                std.mem.indexOf(u8, trimmed, "]") != null) {
-                std.log.info("End of dependencies section", .{});
-                in_dependencies_section = false;
-                in_dependencies_array = false;
-                continue;
-            }
-            
-            // If we're in a dependencies array, look for the array elements
-            if (in_dependencies_array) {
-                // Update bracket depth
-                for (trimmed) |c| {
-                    if (c == '[') bracket_depth += 1;
-                    if (c == ']') {
-                        bracket_depth -= 1;
-                        if (bracket_depth == 0) {
-                            in_dependencies_array = false;
-                            break;
-                        }
-                    }
-                }
-                
-                try parseDependenciesLine(allocator, trimmed, deps_list, &count);
-            } 
-            // If we're in the dependencies section but haven't found the array yet
-            else if (std.mem.indexOf(u8, trimmed, "dependencies") != null and 
-                     std.mem.indexOf(u8, trimmed, "=") != null) {
-                std.log.info("Found dependencies array", .{});
-                in_dependencies_array = true;
-                
-                // Check if array starts on this line
-                if (std.mem.indexOf(u8, trimmed, "[") != null) {
-                    bracket_depth = 1;
-                    const opening_bracket = std.mem.indexOf(u8, trimmed, "[") orelse continue;
-                    const line_after_bracket = trimmed[opening_bracket + 1..];
-                    try parseDependenciesLine(allocator, line_after_bracket, deps_list, &count);
-                }
-            }
-            // If we're not in an array but in dependencies section, look for individual dependencies
-            else if (std.mem.indexOf(u8, trimmed, "=") != null) {
-                // This is for the format: package = "version" or package = {version="1.0"}
-                var parts = std.mem.splitScalar(u8, trimmed, '=');
-                if (parts.next()) |package_name| {
-                    const package = std.mem.trim(u8, package_name, " \t\r");
-                    if (package.len > 0) {
-                        // Create a valid pip-style dependency (keep version specifiers)
-                        const dep = try allocator.dupe(u8, package);
-                        std.log.info("  - TOML individual dependency: {s}", .{dep});
-                        try deps_list.append(dep);
-                        count += 1;
-                    }
-                }
-            }
-        }
-    }
-    
-    std.log.info("Found {d} dependencies in pyproject.toml", .{count});
-    return count;
-}
-
-// Helper function to parse a line containing potential dependencies
-fn parseDependenciesLine(allocator: Allocator, line: []const u8, deps_list: *std.ArrayList([]const u8), count: *usize) !void {
-    // Handle quoted strings in arrays: "package1", "package2"
-    var pos: usize = 0;
-    while (pos < line.len) {
-        // Find opening quote
-        const quote_start = std.mem.indexOfPos(u8, line, pos, "\"") orelse 
-                           std.mem.indexOfPos(u8, line, pos, "'") orelse 
-                           break;
-        const quote_char = line[quote_start];
-        pos = quote_start + 1;
-        
-        // Find closing quote
-        const quote_end = std.mem.indexOfPos(u8, line, pos, &[_]u8{quote_char}) orelse break;
-        
-        // Extract package name with version
-        if (quote_end > pos) {
-            const quoted_content = std.mem.trim(u8, line[pos..quote_end], " \t\r");
-            if (quoted_content.len > 0) {
-                // Keep the version specifier for pip compatibility
-                const dep = try allocator.dupe(u8, quoted_content);
-                std.log.info("  - TOML array dependency: {s}", .{dep});
-                try deps_list.append(dep);
-                count.* += 1;
-            }
-        }
-        
-        pos = quote_end + 1;
-    }
-}
-
 
 pub fn handleSetupCommand(
     allocator: Allocator,
@@ -234,7 +15,7 @@ pub fn handleSetupCommand(
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void, // Renamed for clarity
 ) anyerror!void {
-    const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
     const env_name = args[2]; // Safe now after check in getAndValidateEnvironment
 
     // Check for --force-deps flag
@@ -273,18 +54,16 @@ pub fn handleSetupCommand(
         // Log the absolute path for debugging
         var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
-            std.log.err("Failed to resolve absolute path for requirements file '{s}': {s}",
-                       .{req_file, @errorName(err)});
+            std.log.err("Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) });
             abs_path_buf[0] = 0; // Empty string in case of error
             return err;
         };
-        std.log.info("Reading dependencies from file: '{s}' (absolute path: '{s}')",
-                   .{req_file, abs_path});
+        std.log.info("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path });
 
         // Try to read the file
         std.log.info("Verifying file exists and is readable...", .{});
         const req_file_stat = fs.cwd().statFile(req_file) catch |err| {
-            std.log.err("Failed to stat file '{s}': {s}", .{req_file, @errorName(err)});
+            std.log.err("Failed to stat file '{s}': {s}", .{ req_file, @errorName(err) });
             handleErrorFn(ZenvError.PathResolutionFailed);
             return;
         };
@@ -292,7 +71,7 @@ pub fn handleSetupCommand(
 
         // Now read the file content
         const req_content = fs.cwd().readFileAlloc(allocator, req_file, 100 * 1024) catch |err| {
-            std.log.err("Failed to read file '{s}': {s}", .{req_file, @errorName(err)});
+            std.log.err("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) });
             handleErrorFn(ZenvError.PathResolutionFailed);
             return;
         };
@@ -302,13 +81,13 @@ pub fn handleSetupCommand(
 
         // Determine file type based on extension
         const is_toml = std.mem.endsWith(u8, req_file, ".toml");
-        
+
         var req_file_dep_count: usize = 0;
-        
+
         if (is_toml) {
             // Handle pyproject.toml file
             std.log.info("Detected TOML file format, parsing as pyproject.toml", .{});
-            req_file_dep_count = try parsePyprojectToml(allocator, req_content, &all_required_deps);
+            req_file_dep_count = try utils.parsePyprojectToml(allocator, req_content, &all_required_deps);
         } else {
             // Handle requirements.txt file (original behavior)
             std.log.info("Parsing as requirements.txt format", .{});
@@ -347,29 +126,16 @@ pub fn handleSetupCommand(
     std.log.info("Total combined dependencies: {d}", .{all_required_deps.items.len});
 
     // Create sc_venv directory if it doesn't exist
-    try createScVenvDir(allocator, env_name);
+    try utils.createScVenvDir(allocator, env_name);
 
     // Create and run a single setup script that handles all steps
     try setupEnvironment(allocator, env_config, env_name, all_required_deps.items, force_deps);
 
     // Create an activation script
-    try createActivationScript(allocator, env_config, env_name);
+    try utils.createActivationScript(allocator, env_config, env_name);
 
     std.log.info("Environment '{s}' setup complete.", .{env_name});
     // --- End Automation Logic ---
-}
-
-fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
-    std.log.info("Creating virtual environment directory for '{s}'...", .{env_name});
-
-    // Create base sc_venv directory if it doesn't exist
-    try fs.cwd().makePath("sc_venv");
-
-    // Create environment-specific directory
-    const env_dir_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}", .{env_name});
-    defer allocator.free(env_dir_path);
-
-    try fs.cwd().makePath(env_dir_path);
 }
 
 fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8, force_deps: bool) !void {
@@ -383,7 +149,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     const req_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/requirements.txt", .{env_name});
     defer allocator.free(req_rel_path);
 
-    const req_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, req_rel_path});
+    const req_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, req_rel_path });
     defer allocator.free(req_abs_path);
 
     // Display dependencies for debugging
@@ -393,7 +159,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
         std.log.info("Processing {d} dependencies before validation:", .{deps.len});
         for (deps, 0..) |dep, i| {
             if (dep.len > 0) {
-                std.log.info("  [{d}] '{s}'", .{i + 1, dep});
+                std.log.info("  [{d}] '{s}'", .{ i + 1, dep });
             } else {
                 std.log.warn("  [{d}] Empty dependency", .{i + 1});
             }
@@ -431,7 +197,8 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
             if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')) {
                 has_alpha = true;
             } else if (!((c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or
-                        c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']')) {
+                c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']'))
+            {
                 valid = false;
                 break;
             }
@@ -456,13 +223,12 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
         // Check if we've already seen this package
         const is_duplicate = seen_packages.get(package_name) != null;
         if (is_duplicate) {
-            std.log.warn("Skipping duplicate package '{s}' with value '{s}' (already included in dependencies)",
-                       .{package_name, dep});
+            std.log.warn("Skipping duplicate package '{s}' with value '{s}' (already included in dependencies)", .{ package_name, dep });
             continue;
         }
 
         // Accept this dependency as valid
-        std.log.info("Including dependency: '{s}' (package: '{s}')", .{dep, package_name});
+        std.log.info("Including dependency: '{s}' (package: '{s}')", .{ dep, package_name });
         try valid_deps.append(dep);
         try seen_packages.put(package_name, true);
     }
@@ -484,7 +250,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Flush and verify requirements file content
     try req_file.sync();
-    std.log.info("Created requirements file at: {s} with {d} validated dependencies", .{req_abs_path, valid_deps.items.len});
+    std.log.info("Created requirements file at: {s} with {d} validated dependencies", .{ req_abs_path, valid_deps.items.len });
 
     // Read and display the file for debugging
     const req_file_handle = try fs.cwd().openFile(req_rel_path, .{});
@@ -497,7 +263,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/setup_env.sh", .{env_name});
     defer allocator.free(script_rel_path);
 
-    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, script_rel_path});
+    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
     var script_content = std.ArrayList(u8).init(allocator);
@@ -505,7 +271,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Script header
     try script_content.appendSlice("#!/bin/sh\n");
-    try script_content.appendSlice("set -e\n");  // Exit on error
+    try script_content.appendSlice("set -e\n"); // Exit on error
     try script_content.writer().print("\n# Setup script for '{s}' environment\n\n", .{env_name});
 
     // Add module command check - skip module commands if not available
@@ -552,9 +318,9 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Step 3: Create virtual environment
     try script_content.appendSlice("echo '==> Step 3: Creating Python virtual environment'\n");
-    const venv_dir = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{cwd_path, env_name});
+    const venv_dir = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{ cwd_path, env_name });
     defer allocator.free(venv_dir);
-    try script_content.writer().print("{s} -m venv {s}\n\n", .{env_config.python_executable, venv_dir});
+    try script_content.writer().print("{s} -m venv {s}\n\n", .{ env_config.python_executable, venv_dir });
 
     // Step 4: Activate and install dependencies with module package filtering
     try script_content.appendSlice("echo '==> Step 4: Activating environment and installing dependencies'\n");
@@ -619,7 +385,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Step 6: Completion message
     try script_content.appendSlice("echo '==> Setup completed successfully!'\n");
-    const activate_abs_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/activate.sh", .{cwd_path, env_name});
+    const activate_abs_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/activate.sh", .{ cwd_path, env_name });
     defer allocator.free(activate_abs_path);
     try script_content.writer().print("echo 'To activate this environment, run: source {s}'\n", .{activate_abs_path});
 
@@ -627,11 +393,11 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     var script_file = try fs.cwd().createFile(script_rel_path, .{});
     defer script_file.close();
     try script_file.writeAll(script_content.items);
-    try script_file.chmod(0o755);  // Make executable
+    try script_file.chmod(0o755); // Make executable
 
     // Execute script
     std.log.info("Running setup script from {s}...", .{script_abs_path});
-    const argv = [_][]const u8{"/bin/sh", script_abs_path};
+    const argv = [_][]const u8{ "/bin/sh", script_abs_path };
     var child = std.process.Child.init(&argv, allocator);
     // Set stdout and stderr to inherit from parent process for real-time output
     child.stdout_behavior = .Inherit;
@@ -662,165 +428,71 @@ pub fn handleActivateCommand(
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
-     const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
-     const env_name = args[2];
-
-     // Get absolute path of current working directory
-     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-         std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
-         handleErrorFn(err);
-         return;
-     };
-
-     const stdout = std.io.getStdOut().writer();
-
-     stdout.print("# To activate environment '{s}', run the following commands:\n", .{env_name}) catch {};
-     stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
-     stdout.print("# Option 1: Use the activation script (recommended)\n", .{}) catch {};
-     stdout.print("source {s}/sc_venv/{s}/activate.sh\n\n", .{cwd_path, env_name}) catch {};
-
-     stdout.print("# Option 2: Manual activation\n", .{}) catch {};
-     // Suggest checking for module command before using it
-     stdout.print("if command -v module >/dev/null 2>&1; then\n", .{}) catch {};
-     // Suggest purging first for clean state
-     stdout.print("  module --force purge\n", .{}) catch {};
-
-     // Print module load commands with a clear list first
-     if (env_config.modules.items.len > 0) {
-         var modules_list = std.ArrayList(u8).init(allocator);
-         defer modules_list.deinit();
-
-         for (env_config.modules.items, 0..) |module_name, i| {
-             if (i > 0) {
-                 modules_list.appendSlice(", ") catch {};
-             }
-             modules_list.appendSlice(module_name) catch {};
-         }
-
-         stdout.print("  echo 'Loading modules: {s}'\n", .{modules_list.items}) catch {};
-
-         // Print individual load commands
-         for (env_config.modules.items) |module_name| {
-             stdout.print("  module load {s}\n", .{module_name}) catch {};
-         }
-     } else {
-         stdout.print("  echo 'No modules to load'\n", .{}) catch {};
-     }
-
-     stdout.print("else\n", .{}) catch {};
-     stdout.print("  echo 'Module command not available, skipping module operations'\n", .{}) catch {};
-     stdout.print("fi\n", .{}) catch {};
-
-     // Print virtual environment activation with absolute path
-     stdout.print("source {s}/sc_venv/{s}/venv/bin/activate\n", .{cwd_path, env_name}) catch {};
-
-     // Print custom environment variables
-     var vars_iter = env_config.custom_activate_vars.iterator();
-     while (vars_iter.next()) |entry| {
-         // Basic shell escaping (might need more robust escaping for complex values)
-         const escaped_value = entry.value_ptr.*; // TODO: Implement proper shell escaping if needed
-         stdout.print("export {s}='{s}'\n", .{entry.key_ptr.*, escaped_value}) catch {};
-     }
-     stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
-     if (env_config.description) |desc| {
-        stdout.print("# Description: {s}\n", .{desc}) catch {};
-     }
-     stdout.print("# Target Machine: {s}\n", .{env_config.target_machine}) catch {};
-}
-
-fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8) !void {
-    std.log.info("Creating activation script for '{s}'...", .{env_name});
+    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    const env_name = args[2];
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
+        std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
+        handleErrorFn(err);
+        return;
+    };
 
-    // Generate the activation script with absolute path
-    const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/activate.sh", .{env_name});
-    defer allocator.free(script_rel_path);
+    const stdout = std.io.getStdOut().writer();
 
-    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, script_rel_path});
-    defer allocator.free(script_abs_path);
+    stdout.print("# To activate environment '{s}', run the following commands:\n", .{env_name}) catch {};
+    stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
+    stdout.print("# Option 1: Use the activation script (recommended)\n", .{}) catch {};
+    stdout.print("source {s}/sc_venv/{s}/activate.sh\n\n", .{ cwd_path, env_name }) catch {};
 
-    var script_content = std.ArrayList(u8).init(allocator);
-    defer script_content.deinit();
+    stdout.print("# Option 2: Manual activation\n", .{}) catch {};
+    // Suggest checking for module command before using it
+    stdout.print("if command -v module >/dev/null 2>&1; then\n", .{}) catch {};
+    // Suggest purging first for clean state
+    stdout.print("  module --force purge\n", .{}) catch {};
 
-    try script_content.appendSlice("#!/bin/sh\n");
-    try script_content.writer().print("\n# This script activates the '{s}' environment\n\n", .{env_name});
-
-    // Module purge and loading
-    try script_content.appendSlice("# Check if module command exists\n");
-    try script_content.appendSlice("if command -v module >/dev/null 2>&1; then\n");
-    try script_content.appendSlice("  # Unload all modules\n");
-    try script_content.appendSlice("  module --force purge\n");
-
+    // Print module load commands with a clear list first
     if (env_config.modules.items.len > 0) {
-        try script_content.appendSlice("  # Load required modules\n");
-        try script_content.appendSlice("  echo 'Loading modules: ");
-        for (env_config.modules.items, 0..) |module_name, idx| {
-            if (idx > 0) {
-                try script_content.appendSlice(", ");
+        var modules_list = std.ArrayList(u8).init(allocator);
+        defer modules_list.deinit();
+
+        for (env_config.modules.items, 0..) |module_name, i| {
+            if (i > 0) {
+                modules_list.appendSlice(", ") catch {};
             }
-            try script_content.writer().print("{s}", .{module_name});
+            modules_list.appendSlice(module_name) catch {};
         }
-        try script_content.appendSlice("'\n");
 
+        stdout.print("  echo 'Loading modules: {s}'\n", .{modules_list.items}) catch {};
+
+        // Print individual load commands
         for (env_config.modules.items) |module_name| {
-            try script_content.writer().print("  module load {s}\n", .{module_name});
+            stdout.print("  module load {s}\n", .{module_name}) catch {};
         }
     } else {
-        try script_content.appendSlice("  echo 'No modules to load'\n");
-    }
-    try script_content.appendSlice("else\n");
-    try script_content.appendSlice("  echo '==> Module command not found, skipping module operations'\n");
-    try script_content.appendSlice("fi\n\n");
-
-    // Virtual environment activation with absolute path
-    try script_content.appendSlice("# Activate the Python virtual environment\n");
-    const venv_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{cwd_path, env_name});
-    defer allocator.free(venv_path);
-    try script_content.writer().print("source {s}/bin/activate\n\n", .{venv_path});
-
-    // Custom environment variables
-    if (env_config.custom_activate_vars.count() > 0) {
-        try script_content.appendSlice("# Set custom environment variables\n");
-        var vars_iter = env_config.custom_activate_vars.iterator();
-        while (vars_iter.next()) |entry| {
-            try script_content.writer().print("export {s}=\"{s}\"\n", .{entry.key_ptr.*, entry.value_ptr.*});
-        }
-        try script_content.appendSlice("\n");
+        stdout.print("  echo 'No modules to load'\n", .{}) catch {};
     }
 
-    // Print success message
-    if (env_config.description) |desc| {
-        try script_content.writer().print("echo \"Environment '{s}' activated: {s}\"\n", .{env_name, desc});
-    } else {
-        try script_content.writer().print("echo \"Environment '{s}' activated\"\n", .{env_name});
-    }
+    stdout.print("else\n", .{}) catch {};
+    stdout.print("  echo 'Module command not available, skipping module operations'\n", .{}) catch {};
+    stdout.print("fi\n", .{}) catch {};
 
-    // Create a function to deactivate
-    try script_content.appendSlice("\n# Add deactivate_all function to completely deactivate\n");
-    try script_content.appendSlice("deactivate_all() {\n");
-    try script_content.appendSlice("  # First run Python's deactivate\n");
-    try script_content.appendSlice("  deactivate\n");
-    try script_content.appendSlice("  # Then unset any custom environment variables\n");
+    // Print virtual environment activation with absolute path
+    stdout.print("source {s}/sc_venv/{s}/venv/bin/activate\n", .{ cwd_path, env_name }) catch {};
+
+    // Print custom environment variables
     var vars_iter = env_config.custom_activate_vars.iterator();
     while (vars_iter.next()) |entry| {
-        try script_content.writer().print("  unset {s}\n", .{entry.key_ptr.*});
+        // Basic shell escaping (might need more robust escaping for complex values)
+        const escaped_value = entry.value_ptr.*; // TODO: Implement proper shell escaping if needed
+        stdout.print("export {s}='{s}'\n", .{ entry.key_ptr.*, escaped_value }) catch {};
     }
-    try script_content.appendSlice("  # Unset this function\n");
-    try script_content.appendSlice("  unset -f deactivate_all\n");
-    try script_content.appendSlice("  echo \"Environment fully deactivated\"\n");
-    try script_content.appendSlice("}\n");
-
-    // Write script to file using relative path (it's created in the current directory context)
-    var script_file = try fs.cwd().createFile(script_rel_path, .{});
-    defer script_file.close();
-    try script_file.writeAll(script_content.items);
-    try script_file.chmod(0o755);  // Make executable
-
-    std.log.info("Activation script created at {s}", .{script_abs_path});
+    stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
+    if (env_config.description) |desc| {
+        stdout.print("# Description: {s}\n", .{desc}) catch {};
+    }
+    stdout.print("# Target Machine: {s}\n", .{env_config.target_machine}) catch {};
 }
 
 pub fn handleListCommand(
@@ -841,12 +513,11 @@ pub fn handleListCommand(
         current_hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
             std.log.warn("Could not determine current hostname for filtering: {s}", .{@errorName(err)});
             // Proceed to list all if hostname fails? Or error out? For now, list all.
-             handleErrorFn(err); // Report error
-             return; // Exit if hostname is required for filtering
+            handleErrorFn(err); // Report error
+            return; // Exit if hostname is required for filtering
         };
-       defer if (current_hostname) |h| allocator.free(h);
+        defer if (current_hostname) |h| allocator.free(h);
     }
-
 
     stdout.print("Available zenv environments:\n", .{}) catch {};
     stdout.print("----------------------------\n", .{}) catch {};
@@ -859,13 +530,13 @@ pub fn handleListCommand(
 
         // Filter by target machine if not '--all' and hostname was found
         if (!list_all and current_hostname != null) {
-             if (!std.mem.eql(u8, current_hostname.?, env_config.target_machine)) {
-                 continue; // Skip environment if target machine doesn't match
-             }
+            if (!std.mem.eql(u8, current_hostname.?, env_config.target_machine)) {
+                continue; // Skip environment if target machine doesn't match
+            }
         }
 
         // Print environment name and target machine
-        stdout.print("- {s} (Target: {s}", .{ env_name, env_config.target_machine}) catch {};
+        stdout.print("- {s} (Target: {s}", .{ env_name, env_config.target_machine }) catch {};
         // Optionally print description
         if (env_config.description) |desc| {
             stdout.print(" - {s}", .{desc}) catch {};
@@ -873,20 +544,20 @@ pub fn handleListCommand(
         stdout.print(")\n", .{}) catch {};
         count += 1;
     }
-     stdout.print("----------------------------\n", .{}) catch {};
-      if (count == 0) {
-          if (!list_all and current_hostname != null) {
-              stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all configured environments.\n", .{current_hostname.?}) catch {};
-          } else {
-              stdout.print("No environments found in the configuration file.\n", .{}) catch {};
-          }
-      } else {
-          if (!list_all and current_hostname != null) {
-              stdout.print("Found {d} environment(s) for the current machine ('{s}').\n", .{count, current_hostname.?}) catch {};
-          } else {
-              stdout.print("Found {d} environment(s) total.\n", .{count}) catch {};
-          }
-      }
+    stdout.print("----------------------------\n", .{}) catch {};
+    if (count == 0) {
+        if (!list_all and current_hostname != null) {
+            stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all configured environments.\n", .{current_hostname.?}) catch {};
+        } else {
+            stdout.print("No environments found in the configuration file.\n", .{}) catch {};
+        }
+    } else {
+        if (!list_all and current_hostname != null) {
+            stdout.print("Found {d} environment(s) for the current machine ('{s}').\n", .{ count, current_hostname.? }) catch {};
+        } else {
+            stdout.print("Found {d} environment(s) total.\n", .{count}) catch {};
+        }
+    }
 }
 
 // Helper function placeholder for shell escaping (replace with robust implementation)
