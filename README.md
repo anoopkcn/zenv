@@ -1,16 +1,23 @@
 # zenv
-Zenv - Environment Manager for supercomputing clusters
+Zenv - A python environment manager for supercomputers
 
-Zenv is a flexible environment manager that simplifies the setup, activation, and management of project environments.
+Zenv is a flexible python environment manager that simplifies the setup, activation, and management of project environments that has a module system.
 
 ## Features
 
-- **Environment Setup**: Create Python virtual environments with specific dependencies
+- **Environment Setup**: Create Python virtual environments with specific dependencies with a single `zenv.json` file.
 - **Module Support**: Integrate with HPC module systems
 - **Machine-Specific Environments**: Configure environments for specific target machines
+- **Operations from any directory**: All environments are registered at `~/.zenv/registry.json` so operations like activation, lisitng and changing directories can be done from any directory location
 
 ## Installation
 
+### Install a pre-built executable
+Get the latest [release](https://github.com/anoopkcn/zenv/releases)
+
+*Windows not supported*
+
+### Build from source
 ```bash
 # Clone the repository
 git clone https://github.com/anoopkcn/zenv.git
@@ -20,20 +27,25 @@ cd zenv
 zig build
 
 # Optional: Add to your PATH
-export PATH="$PATH:$(pwd)/zig-out/bin"
+export PATH="$PATH:path/to/zig-out/bin"
 ```
 
 ## Usage
 
 ### Creating an Environment
 
-Create a `zenv.json` configuration file in your project directory:
+Create a `zenv.json` configuration file in your project directory
 
+Example:
 ```json
 {
   "my_env": {
     "target_machine": "computer1",
     "description": "Basic environment for Computer1",
+    "modules":[
+      "Python"
+      "CUDA"
+    ]
     "dependencies": [
       "numpy",
       "scipy",
@@ -42,12 +54,7 @@ Create a `zenv.json` configuration file in your project directory:
   },
   "my_env2": {
     "target_machine": "computer2",
-    "description": "Basic environment for Jureca",
-    "dependencies": [
-      "numpy",
-      "scipy",
-      "matplotlib"
-    ]
+    ...
   }
 }
 ```
@@ -55,7 +62,7 @@ Create a `zenv.json` configuration file in your project directory:
 Then set up the environment:
 
 ```bash
-zenv setup my_env
+zenv setup <env_name>
 ```
 
 ### Listing Environments
@@ -64,6 +71,8 @@ List all environments registered for the current machine:
 
 ```bash
 zenv list
+# OR
+zenv list --all
 ```
 
 Example output:
@@ -71,17 +80,16 @@ Example output:
 Available zenv environments:
 - test (ID: e66460f... Target: computer1 - My PyTorch environment for Computer1)
   [Project: /path/to/project]
-  Full ID: e66460fc6eb7e1d133ca000d5e28abc66b16a3d0 (you can use the first 7+ characters)
-- my_env (ID: 4a422bf... Target: computer2 - Basic environment for Computer2)
+- my_env (ID: 4a422bf... Target: computer2)
   [Project: /path/to/project]
-  Full ID: 4a422bfd015982bc2569ebacb45bb590d7xyz561 (you can use the first 7+ characters)
 Found 2 environment(s) for the current machine ('jrlogin07.jureca').
 ```
 
 ### Activating Environments
 
-Activate an environment by name or ID:
+Activate an environment by name or ID
 
+Example:
 ```bash
 # Activate by name
 source $(zenv activate my_env)
@@ -97,6 +105,8 @@ source $(zenv activate 4a422bf)
 
 Register an environment in the global registry:
 
+*This is done automatically when you run `zenv setup <env_name>`*
+
 ```bash
 zenv register my_env
 ```
@@ -109,7 +119,7 @@ zenv unregister my_env
 
 ## Configuration Reference
 
-The `zenv.json` file supports the following structure:
+Tou can have multiple environment configurations in the same  `zenv.json` file and it supports the following structure:
 
 ```json
 {
