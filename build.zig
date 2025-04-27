@@ -78,6 +78,46 @@ fn getVersion(b: *std.Build) Version {
     }
 }
 
+// Target definitions for release builds
+const ReleaseTarget = struct {
+    query: std.Target.Query,
+    name: []const u8,
+    description: []const u8,
+};
+
+const release_targets = [_]ReleaseTarget{
+    .{
+        .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+        .name = "linux-x64",
+        .description = "Linux x86_64 (musl)",
+    },
+    .{
+        .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
+        .name = "linux-arm64",
+        .description = "Linux ARM64 (musl)",
+    },
+    .{
+        .query = .{ .cpu_arch = .x86_64, .os_tag = .macos },
+        .name = "macos-x64",
+        .description = "macOS x86_64",
+    },
+    .{
+        .query = .{ .cpu_arch = .aarch64, .os_tag = .macos },
+        .name = "macos-arm64",
+        .description = "macOS ARM64",
+    },
+    .{
+        .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu },
+        .name = "windows-x64",
+        .description = "Windows x86_64 (GNU)",
+    },
+    // Uncomment to add Windows ARM64 support
+    // .{
+    //     .query = .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .gnu },
+    //     .name = "windows-arm64",
+    //     .description = "Windows ARM64 (GNU)",
+    // },
+};
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -132,110 +172,133 @@ pub fn build(b: *std.Build) !void {
     const exe_step = b.step("exe", "Build the executable");
     exe_step.dependOn(b.getInstallStep());
 
-    // --- Release Step Setup ---
-    const release_step = b.step("release", "Create release builds for various targets");
+    // --- Individual Target Steps ---
     if (version == .tag) {
-        // Only allow release builds from tagged versions
-        setupReleaseStep(b, release_step, version_string);
+        // Add individual target-specific build steps
+        for (release_targets) |release_target| {
+            const target_step_small = b.step(
+                b.fmt("release-{s}-small", .{release_target.name}), 
+                b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
+            );
+            setupTargetReleaseWithOptimize(b, target_step_small, version_string, release_target.query, .ReleaseSmall);
+            
+            const target_step_fast = b.step(
+                b.fmt("release-{s}", .{release_target.name}), 
+                b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
+            );
+            setupTargetReleaseWithOptimize(b, target_step_fast, version_string, release_target.query, .ReleaseFast);
+        }
     } else {
-        // Prevent running 'zig build release' on non-tagged commits
-        release_step.dependOn(
-            &b.addFail("error: git tag missing or invalid (needed for release builds, e.g., v0.1.0)").step
-        );
+        // When not on a tag, add the fail message to each individual target step
+        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0)";
+        for (release_targets) |release_target| {
+            const target_step_small = b.step(
+                b.fmt("release-{s}-small", .{release_target.name}), 
+                b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
+            );
+            target_step_small.dependOn(&b.addFail(error_msg).step);
+            
+            const target_step_fast = b.step(
+                b.fmt("release-{s}", .{release_target.name}), 
+                b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
+            );
+            target_step_fast.dependOn(&b.addFail(error_msg).step);
+        }
+    }
+
+    // --- All Targets Release Step ---
+    const release_step = b.step("release", "Create release builds for all targets");
+    const release_small_step = b.step("release-small", "Create small release builds for all targets");
+    
+    if (version == .tag) {
+        // Set up release-all steps with different optimizations
+        for (release_targets) |release_target| {
+            setupTargetReleaseWithOptimize(b, release_step, version_string, release_target.query, .ReleaseFast);
+            setupTargetReleaseWithOptimize(b, release_small_step, version_string, release_target.query, .ReleaseSmall);
+        }
+    } else {
+        // Prevent running release builds on non-tagged commits
+        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0)";
+        release_step.dependOn(&b.addFail(error_msg).step);
+        release_small_step.dependOn(&b.addFail(error_msg).step);
     }
 }
 
-// Creates release artifacts for various targets
-// Inspired by https://github.com/kristoff-it/zine/blob/main/build.zig
-fn setupReleaseStep(
+// Creates release artifact for a single target with specified optimization
+fn setupTargetReleaseWithOptimize(
     b: *std.Build,
     release_step: *std.Build.Step,
     version_string: []const u8,
+    target_query: std.Target.Query,
+    comptime optimize: std.builtin.OptimizeMode,
 ) void {
-    // Define the targets to build for
-    const targets: []const std.Target.Query = &.{        
-        // Linux
-        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
-        // macOS (Nativemusl not applicable)
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-        // Windows
-        .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu }, // MinGW
-        // .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .gnu }, // Add if needed
+    const target = b.resolveTargetQuery(target_query);
+    const exe_name = "zenv";
+    const release_dir_path = b.pathJoin(&.{ "releases" });
+
+    // --- Create Target-Specific Options Module ---
+    const options_module_release = b.addOptions();
+    options_module_release.addOption([]const u8, "version", version_string);
+    const options_import = options_module_release.createModule();
+
+    // --- Build Executable for the Target ---
+    const exe_release = b.addExecutable(.{
+        .name = exe_name,
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_release.root_module.addImport("options", options_import);
+
+    // --- Package the Executable --- 
+    const triple = target.result.zigTriple(b.allocator) catch |err| {
+        std.log.err("Failed to get target triple: {s}", .{@errorName(err)});
+        return; // Skip this target if we can't get the triple
     };
 
-    const release_dir_path = b.pathJoin(&.{ "releases" }); // Relative to install prefix (zig-out)
-    // No top-level makePath here, let addInstallFileWithDir handle it implicitly if needed,
-    // or handle errors within the loop if required.
+    // Add optimization mode to the archive name for clarity
+    const opt_suffix = switch (optimize) {
+        .ReleaseSmall => "-small",
+        else => "",
+    };
 
-    for (targets) |t| {
-        const target = b.resolveTargetQuery(t);
-        const optimize = .ReleaseFast;
-        const exe_name = "zenv";
+    switch (target.result.os.tag) {
+        .windows => {
+            const archive_basename = b.fmt("{s}-{s}{s}.zip", .{exe_name, triple, opt_suffix});
+            const zip_cmd = b.addSystemCommand(&.{
+                "zip", 
+                "-j", // Junk paths (store only the file, not dir structure)
+                "-q", // Quiet
+                "-9", // Max compression
+            });
+            const archive_path = zip_cmd.addOutputFileArg(archive_basename);
+            zip_cmd.addFileArg(exe_release.getEmittedBin()); // Add the executable file
+            
+            release_step.dependOn(&b.addInstallFileWithDir(
+                archive_path,
+                .{ .custom = release_dir_path },
+                archive_basename,
+            ).step);
+        },
+        .macos, .linux => { // Assuming tar for Linux and macOS
+            const archive_basename = b.fmt("{s}-{s}{s}.tar.xz", .{exe_name, triple, opt_suffix});
+            const tar_cmd = b.addSystemCommand(&.{
+                "tar",
+                "-cJf", // Create, use xz compression, specify archive file
+            });
+            const archive_path = tar_cmd.addOutputFileArg(archive_basename);
+            tar_cmd.addArg("-C"); // Change directory before adding files
+            tar_cmd.addDirectoryArg(exe_release.getEmittedBinDirectory()); // Directory containing the exe
+            tar_cmd.addArg(exe_name); // Name of the file to add within the archive
 
-        // --- Create Target-Specific Options Module ---
-        // This ensures the correct version is baked into each target's executable
-        const options_module_release = b.addOptions();
-        options_module_release.addOption([]const u8, "version", version_string);
-        const options_import = options_module_release.createModule();
-
-        // --- Build Executable for the Target ---
-        const exe_release = b.addExecutable(.{
-            .name = exe_name,
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        exe_release.root_module.addImport("options", options_import);
-        // If zenv adds dependencies later, they need to be configured here
-        // similar to how zine does it (passing target, optimize etc.)
-
-        // --- Package the Executable --- 
-        // Get the target triple string (e.g., "x86_64-linux-musl")
-        const triple = target.result.zigTriple(b.allocator) catch |err| {
-            std.log.err("Failed to get target triple: {s}", .{@errorName(err)});
-            continue; // Skip this target if we can't get the triple
-        };
-
-        switch (target.result.os.tag) {
-            .windows => {
-                const archive_basename = b.fmt("{s}-{s}.zip", .{exe_name, triple});
-                const zip_cmd = b.addSystemCommand(&.{
-                    "zip", 
-                    "-j", // Junk paths (store only the file, not dir structure)
-                    "-q", // Quiet
-                    "-9", // Max compression
-                });
-                const archive_path = zip_cmd.addOutputFileArg(archive_basename);
-                zip_cmd.addFileArg(exe_release.getEmittedBin()); // Add the executable file
-                
-                release_step.dependOn(&b.addInstallFileWithDir(
-                    archive_path,
-                    .{ .custom = release_dir_path },
-                    archive_basename,
-                ).step);
-            },
-            .macos, .linux => { // Assuming tar for Linux and macOS
-                const archive_basename = b.fmt("{s}-{s}.tar.xz", .{exe_name, triple});
-                const tar_cmd = b.addSystemCommand(&.{
-                    "tar",
-                    "-cJf", // Create, use xz compression, specify archive file
-                });
-                const archive_path = tar_cmd.addOutputFileArg(archive_basename);
-                tar_cmd.addArg("-C"); // Change directory before adding files
-                tar_cmd.addDirectoryArg(exe_release.getEmittedBinDirectory()); // Directory containing the exe
-                tar_cmd.addArg(exe_name); // Name of the file to add within the archive
-
-                 release_step.dependOn(&b.addInstallFileWithDir(
-                    archive_path,
-                    .{ .custom = release_dir_path },
-                    archive_basename,
-                ).step);
-            },
-            else => {
-                 std.log.warn("Skipping packaging for unsupported OS target: {s}", .{triple});
-            },
-        }
+            release_step.dependOn(&b.addInstallFileWithDir(
+                archive_path,
+                .{ .custom = release_dir_path },
+                archive_basename,
+            ).step);
+        },
+        else => {
+            std.log.warn("Skipping packaging for unsupported OS target: {s}", .{triple});
+        },
     }
 }
