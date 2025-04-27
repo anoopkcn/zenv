@@ -82,6 +82,152 @@ fn getAndValidateEnvironment(
 }
 
 
+// Parse dependencies from pyproject.toml file
+// Returns the number of dependencies found
+fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
+    std.log.info("Parsing pyproject.toml for dependencies...", .{});
+    
+    var count: usize = 0;
+    var in_dependencies_section = false;
+    var in_dependencies_array = false;
+    var bracket_depth: usize = 0;
+    
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Skip empty lines and comments
+        if (trimmed.len == 0 or trimmed[0] == '#') {
+            continue;
+        }
+        
+        // Check for the dependencies section in different possible formats
+        if (!in_dependencies_section) {
+            // Match [project.dependencies] or [tool.poetry.dependencies]
+            if (std.mem.indexOf(u8, trimmed, "[project.dependencies]") != null or 
+                std.mem.indexOf(u8, trimmed, "[tool.poetry.dependencies]") != null) {
+                std.log.info("Found project dependencies section", .{});
+                in_dependencies_section = true;
+                continue;
+            }
+            
+            // Match dependencies = [ ... on a single line
+            if (std.mem.indexOf(u8, trimmed, "dependencies") != null and 
+                std.mem.indexOf(u8, trimmed, "=") != null and
+                std.mem.indexOf(u8, trimmed, "[") != null) {
+                std.log.info("Found dependencies array declaration", .{});
+                in_dependencies_section = true;
+                in_dependencies_array = true;
+                bracket_depth = 1;
+                
+                // If the line contains deps, process them
+                const opening_bracket = std.mem.indexOf(u8, trimmed, "[") orelse continue;
+                const line_after_bracket = trimmed[opening_bracket + 1..];
+                try parseDependenciesLine(allocator, line_after_bracket, deps_list, &count);
+                continue;
+            }
+            
+            // If we see another section after looking for dependencies, we've gone too far
+            if (std.mem.indexOf(u8, trimmed, "[") == 0 and 
+                std.mem.indexOf(u8, trimmed, "]") != null) {
+                continue; // Skip to next section
+            }
+        } 
+        // Already in dependencies section
+        else {
+            // Check if we've hit a new section
+            if (std.mem.indexOf(u8, trimmed, "[") == 0 and 
+                std.mem.indexOf(u8, trimmed, "]") != null) {
+                std.log.info("End of dependencies section", .{});
+                in_dependencies_section = false;
+                in_dependencies_array = false;
+                continue;
+            }
+            
+            // If we're in a dependencies array, look for the array elements
+            if (in_dependencies_array) {
+                // Update bracket depth
+                for (trimmed) |c| {
+                    if (c == '[') bracket_depth += 1;
+                    if (c == ']') {
+                        bracket_depth -= 1;
+                        if (bracket_depth == 0) {
+                            in_dependencies_array = false;
+                            break;
+                        }
+                    }
+                }
+                
+                try parseDependenciesLine(allocator, trimmed, deps_list, &count);
+            } 
+            // If we're in the dependencies section but haven't found the array yet
+            else if (std.mem.indexOf(u8, trimmed, "dependencies") != null and 
+                     std.mem.indexOf(u8, trimmed, "=") != null) {
+                std.log.info("Found dependencies array", .{});
+                in_dependencies_array = true;
+                
+                // Check if array starts on this line
+                if (std.mem.indexOf(u8, trimmed, "[") != null) {
+                    bracket_depth = 1;
+                    const opening_bracket = std.mem.indexOf(u8, trimmed, "[") orelse continue;
+                    const line_after_bracket = trimmed[opening_bracket + 1..];
+                    try parseDependenciesLine(allocator, line_after_bracket, deps_list, &count);
+                }
+            }
+            // If we're not in an array but in dependencies section, look for individual dependencies
+            else if (std.mem.indexOf(u8, trimmed, "=") != null) {
+                // This is for the format: package = "version" or package = {version="1.0"}
+                var parts = std.mem.splitScalar(u8, trimmed, '=');
+                if (parts.next()) |package_name| {
+                    const package = std.mem.trim(u8, package_name, " \t\r");
+                    if (package.len > 0) {
+                        // Create a valid pip-style dependency (keep version specifiers)
+                        const dep = try allocator.dupe(u8, package);
+                        std.log.info("  - TOML individual dependency: {s}", .{dep});
+                        try deps_list.append(dep);
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    std.log.info("Found {d} dependencies in pyproject.toml", .{count});
+    return count;
+}
+
+// Helper function to parse a line containing potential dependencies
+fn parseDependenciesLine(allocator: Allocator, line: []const u8, deps_list: *std.ArrayList([]const u8), count: *usize) !void {
+    // Handle quoted strings in arrays: "package1", "package2"
+    var pos: usize = 0;
+    while (pos < line.len) {
+        // Find opening quote
+        const quote_start = std.mem.indexOfPos(u8, line, pos, "\"") orelse 
+                           std.mem.indexOfPos(u8, line, pos, "'") orelse 
+                           break;
+        const quote_char = line[quote_start];
+        pos = quote_start + 1;
+        
+        // Find closing quote
+        const quote_end = std.mem.indexOfPos(u8, line, pos, &[_]u8{quote_char}) orelse break;
+        
+        // Extract package name with version
+        if (quote_end > pos) {
+            const quoted_content = std.mem.trim(u8, line[pos..quote_end], " \t\r");
+            if (quoted_content.len > 0) {
+                // Keep the version specifier for pip compatibility
+                const dep = try allocator.dupe(u8, quoted_content);
+                std.log.info("  - TOML array dependency: {s}", .{dep});
+                try deps_list.append(dep);
+                count.* += 1;
+            }
+        }
+        
+        pos = quote_end + 1;
+    }
+}
+
+
 pub fn handleSetupCommand(
     allocator: Allocator,
     config: *const ZenvConfig,
@@ -132,55 +278,67 @@ pub fn handleSetupCommand(
             abs_path_buf[0] = 0; // Empty string in case of error
             return err;
         };
-        std.log.info("Reading dependencies from requirements file: '{s}' (absolute path: '{s}')",
+        std.log.info("Reading dependencies from file: '{s}' (absolute path: '{s}')",
                    .{req_file, abs_path});
 
         // Try to read the file
-        std.log.info("Verifying requirements file exists and is readable...", .{});
+        std.log.info("Verifying file exists and is readable...", .{});
         const req_file_stat = fs.cwd().statFile(req_file) catch |err| {
-            std.log.err("Failed to stat requirements file '{s}': {s}", .{req_file, @errorName(err)});
+            std.log.err("Failed to stat file '{s}': {s}", .{req_file, @errorName(err)});
             handleErrorFn(ZenvError.PathResolutionFailed);
             return;
         };
-        std.log.info("Requirements file size: {d} bytes", .{req_file_stat.size});
+        std.log.info("File size: {d} bytes", .{req_file_stat.size});
 
         // Now read the file content
         const req_content = fs.cwd().readFileAlloc(allocator, req_file, 100 * 1024) catch |err| {
-            std.log.err("Failed to read requirements file '{s}': {s}", .{req_file, @errorName(err)});
+            std.log.err("Failed to read file '{s}': {s}", .{req_file, @errorName(err)});
             handleErrorFn(ZenvError.PathResolutionFailed);
             return;
         };
         defer allocator.free(req_content);
 
-        std.log.info("Successfully read requirements file ({d} bytes). Parsing dependencies...", .{req_content.len});
+        std.log.info("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len});
 
-        var lines = std.mem.splitScalar(u8, req_content, '\n');
+        // Determine file type based on extension
+        const is_toml = std.mem.endsWith(u8, req_file, ".toml");
+        
         var req_file_dep_count: usize = 0;
+        
+        if (is_toml) {
+            // Handle pyproject.toml file
+            std.log.info("Detected TOML file format, parsing as pyproject.toml", .{});
+            req_file_dep_count = try parsePyprojectToml(allocator, req_content, &all_required_deps);
+        } else {
+            // Handle requirements.txt file (original behavior)
+            std.log.info("Parsing as requirements.txt format", .{});
+            var lines = std.mem.splitScalar(u8, req_content, '\n');
 
-        while (lines.next()) |line| {
-            const trimmed_line = std.mem.trim(u8, line, " \t\r");
-            if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
-                // Skip empty lines and comments
-                std.log.debug("Skipping comment or empty line: '{s}'", .{trimmed_line});
-                continue;
+            while (lines.next()) |line| {
+                const trimmed_line = std.mem.trim(u8, line, " \t\r");
+                if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
+                    // Skip empty lines and comments
+                    std.log.debug("Skipping comment or empty line: '{s}'", .{trimmed_line});
+                    continue;
+                }
+
+                // Log each dependency being added
+                std.log.info("  - Requirements file dependency: {s}", .{trimmed_line});
+
+                // Create a duplicate of the trimmed line to ensure it persists
+                const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
+                errdefer allocator.free(trimmed_dupe);
+
+                // Add the dependency
+                try all_required_deps.append(trimmed_dupe);
+                req_file_dep_count += 1;
             }
-
-            // Log each dependency being added
-            std.log.info("  - Requirements file dependency: {s}", .{trimmed_line});
-
-            // Create a duplicate of the trimmed line to ensure it persists
-            const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
-            errdefer allocator.free(trimmed_dupe);
-
-            // Add the dependency
-            try all_required_deps.append(trimmed_dupe);
-            req_file_dep_count += 1;
         }
 
         if (req_file_dep_count > 0) {
-            std.log.info("Added {d} dependencies from requirements file", .{req_file_dep_count});
+            std.log.info("Added {d} dependencies from file", .{req_file_dep_count});
         } else {
-            std.log.warn("No valid dependencies found in requirements file", .{});
+            std.log.warn("No valid dependencies found in file", .{});
         }
     } else {
         std.log.info("No requirements file specified in configuration.", .{});
