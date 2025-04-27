@@ -349,8 +349,21 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     for (env_config.modules.items) |module_name| {
         try script_content.writer().print("  module load {s}\n", .{module_name});
     }
+
+    // Add code to detect packages provided by modules
+    try script_content.appendSlice("  echo '==> Checking Python packages provided by modules'\n");
+    try script_content.appendSlice("  MODULE_PACKAGES_FILE=$(mktemp)\n");
+    try script_content.appendSlice("  python3 -m pip list --format=freeze > $MODULE_PACKAGES_FILE 2>/dev/null || true\n");
+    try script_content.appendSlice("  if [ -s $MODULE_PACKAGES_FILE ]; then\n");
+    try script_content.appendSlice("    echo '==> Found packages from modules:'\n");
+    try script_content.appendSlice("    cat $MODULE_PACKAGES_FILE | sed 's/==.*//' | sort\n");
+    try script_content.appendSlice("  else\n");
+    try script_content.appendSlice("    echo '==> No Python packages detected from modules'\n");
+    try script_content.appendSlice("  fi\n");
+
     try script_content.appendSlice("else\n");
     try script_content.appendSlice("  echo '==> Module command not found, skipping module operations'\n");
+    try script_content.appendSlice("  MODULE_PACKAGES_FILE=\"\"\n");
     try script_content.appendSlice("fi\n\n");
 
     // Step 3: Create virtual environment
@@ -359,11 +372,50 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     defer allocator.free(venv_dir);
     try script_content.writer().print("{s} -m venv {s}\n\n", .{env_config.python_executable, venv_dir});
 
-    // Step 4: Activate and install dependencies
+    // Step 4: Activate and install dependencies with module package filtering
     try script_content.appendSlice("echo '==> Step 4: Activating environment and installing dependencies'\n");
     try script_content.writer().print("source {s}/bin/activate\n", .{venv_dir});
     try script_content.appendSlice("python -m pip install --upgrade pip\n");
-    try script_content.writer().print("python -m pip install -r {s}\n\n", .{req_abs_path});
+
+    // Add script to filter requirements.txt and exclude packages from modules
+    try script_content.appendSlice("# Filter requirements to exclude packages from modules\n");
+    try script_content.appendSlice("if [ -n \"$MODULE_PACKAGES_FILE\" ] && [ -s \"$MODULE_PACKAGES_FILE\" ]; then\n");
+    try script_content.appendSlice("  echo '==> Filtering requirements to exclude packages from modules'\n");
+    try script_content.appendSlice("  FILTERED_REQUIREMENTS=$(mktemp)\n");
+    try script_content.appendSlice("  EXCLUDED_PACKAGES=\"\"\n");
+    try script_content.writer().print("  while IFS= read -r line || [ -n \"$line\" ]; do\n", .{});
+    try script_content.appendSlice("    # Skip empty lines and comments\n");
+    try script_content.appendSlice("    if [[ -z \"$line\" || \"$line\" == \"#\"* ]]; then\n");
+    try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
+    try script_content.appendSlice("      continue\n");
+    try script_content.appendSlice("    fi\n");
+    try script_content.appendSlice("    # Extract package name (remove version specifiers)\n");
+    try script_content.appendSlice("    package_name=$(echo \"$line\" | sed -E 's/([a-zA-Z0-9_\\-\\.]+)(.*)/\\1/g' | tr '[:upper:]' '[:lower:]')\n");
+    try script_content.appendSlice("    # Check if package is in MODULE_PACKAGES_FILE (case insensitive)\n");
+    try script_content.appendSlice("    if grep -i -q \"^$package_name==\" \"$MODULE_PACKAGES_FILE\" || grep -i -q \"^$package_name \" \"$MODULE_PACKAGES_FILE\"; then\n");
+    try script_content.appendSlice("      echo \"==> Excluding $line (provided by loaded modules)\"\n");
+    try script_content.appendSlice("      EXCLUDED_PACKAGES=\"$EXCLUDED_PACKAGES$package_name\n\"\n");
+    try script_content.appendSlice("    else\n");
+    try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
+    try script_content.appendSlice("    fi\n");
+    try script_content.writer().print("  done < {s}\n", .{req_abs_path});
+    try script_content.appendSlice("  echo '==> Installing filtered requirements'\n");
+    try script_content.appendSlice("  if [ -s \"$FILTERED_REQUIREMENTS\" ]; then\n");
+    try script_content.appendSlice("    python -m pip install -r \"$FILTERED_REQUIREMENTS\"\n");
+    try script_content.appendSlice("  else\n");
+    try script_content.appendSlice("    echo '==> No additional packages to install (all provided by modules)'\n");
+    try script_content.appendSlice("  fi\n");
+    try script_content.appendSlice("  # Report excluded packages\n");
+    try script_content.appendSlice("  if [ -n \"$EXCLUDED_PACKAGES\" ]; then\n");
+    try script_content.appendSlice("    echo -e '\n==> Summary of packages excluded (since they are provided by modules):'\n");
+    try script_content.appendSlice("    echo -e \"$EXCLUDED_PACKAGES\" | sort | uniq\n");
+    try script_content.appendSlice("  fi\n");
+    try script_content.appendSlice("  # Cleanup temp files\n");
+    try script_content.appendSlice("  rm -f \"$FILTERED_REQUIREMENTS\" \"$MODULE_PACKAGES_FILE\"\n");
+    try script_content.appendSlice("else\n");
+    try script_content.appendSlice("  # No module packages detected, install requirements as is\n");
+    try script_content.writer().print("  python -m pip install -r {s}\n", .{req_abs_path});
+    try script_content.appendSlice("fi\n\n");
 
     // Step 5: Run custom commands if any
     if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
