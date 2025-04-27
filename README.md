@@ -19,6 +19,10 @@ Example for Linux x86_64 machine:
 ```bash
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.gz"
 ```
+and
+```bash
+tar -xvf zenv-x86_64-linux-musl.tar.gz
+```
 
 Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)
 
@@ -58,10 +62,6 @@ Example:
       "scipy",
       "matplotlib"
     ]
-  },
-  "my_env2": {
-    "target_machine": "computer2",
-    ...
   }
 }
 ```
@@ -148,6 +148,10 @@ Tou can have multiple environment configurations in the same  `zenv.json` file a
     "setup_commands": [
       "echo 'Running custom setup commands'"
     ]
+  },
+  "<another_env_name>":{
+    "target_machine": "<anothor_machine_identifier>",
+    ...
   }
 }
 ```
