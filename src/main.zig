@@ -1,7 +1,5 @@
-// zenv/src/main.zig (Relevant parts)
-
 const std = @import("std");
-const options = @import("options"); // Assuming this still exists for version
+const options = @import("options");
 const process = std.process;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
@@ -10,7 +8,6 @@ const commands = @import("commands.zig");
 const Allocator = std.mem.Allocator;
 
 
-// ... Command enum definition ... (no changes needed here)
 const Command = enum {
     setup,
     activate,
@@ -28,7 +25,6 @@ const Command = enum {
     }
 };
 
-// ... printVersion ... (no changes needed)
 fn printVersion() void {
     std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
         std.log.err("Error printing version: {s}", .{@errorName(err)});
@@ -37,7 +33,6 @@ fn printVersion() void {
 
 
 fn printUsage() void {
-    // Updated Usage message
     const usage = comptime
         \\Usage: zenv <command> [environment_name] [--all]
         \\
@@ -101,12 +96,10 @@ pub fn main() anyerror!void {
 
     const config_path = "zenv.json"; // Keep config path definition
 
-    // Define error handler
     const handleError = struct {
         pub fn func(err: anyerror) void {
             const stderr = std.io.getStdErr().writer();
             if (@errorReturnTrace()) |trace| {
-                 // Check if it's a known ZenvError type
                  switch (err) {
                      ZenvError.ConfigFileNotFound => {
                          stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
@@ -173,7 +166,6 @@ pub fn main() anyerror!void {
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,
 
         .unknown => {
-            // Use args_const[1] as it's guaranteed to exist if command is unknown
              std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};
              printUsage();
              process.exit(1);
