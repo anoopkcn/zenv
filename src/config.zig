@@ -18,110 +18,108 @@ fn parseRequiredString(v: *const Json.Value, field_name: []const u8, env_name: [
 
 // Helper function to parse an optional string field
 fn parseOptionalString(v: *const Json.Value, field_name: []const u8, env_name: []const u8) !?[]const u8 {
-     if (v.* == .null) return null; // Dereference pointer
-     if (v.* != .string) { // Dereference pointer
-         std.log.err("Expected string or null for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
-         return ZenvError.ConfigInvalid;
-     }
-     return v.string;
+    if (v.* == .null) return null; // Dereference pointer
+    if (v.* != .string) { // Dereference pointer
+        std.log.err("Expected string or null for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
+        return ZenvError.ConfigInvalid;
+    }
+    return v.string;
 }
 
- // Helper function to parse a string array field
- // Removed unused allocator parameter
+// Helper function to parse a string array field
+// Removed unused allocator parameter
 fn parseStringArray(list: *ArrayList([]const u8), v: *const Json.Value, field_name: []const u8, env_name: []const u8) !void {
     if (v.* != .array) { // Dereference pointer
-         std.log.err("Expected array for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
-         return ZenvError.ConfigInvalid;
-     }
-     // ensureTotalCapacity uses the list's allocator implicitly
-     try list.ensureTotalCapacity(v.array.items.len);
-     for (v.array.items) |item_val| { // Use a different var name
-         const item = &item_val; // Take address if needed by called funcs, or use directly
-         if (item.* != .string) { // Dereference pointer
-             std.log.err("Expected string elements in array '{s}' for environment '{s}'", .{ field_name, env_name });
-             return ZenvError.ConfigInvalid;
-         }
-         // Append slice directly, assuming lifetime is managed by value_tree
-         // Use try allocator.dupe(u8, item.string) if copying is needed
-         list.appendAssumeCapacity(item.string);
-     }
+        std.log.err("Expected array for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
+        return ZenvError.ConfigInvalid;
+    }
+    // ensureTotalCapacity uses the list's allocator implicitly
+    try list.ensureTotalCapacity(v.array.items.len);
+    for (v.array.items) |item_val| { // Use a different var name
+        const item = &item_val; // Take address if needed by called funcs, or use directly
+        if (item.* != .string) { // Dereference pointer
+            std.log.err("Expected string elements in array '{s}' for environment '{s}'", .{ field_name, env_name });
+            return ZenvError.ConfigInvalid;
+        }
+        // Append slice directly, assuming lifetime is managed by value_tree
+        // Use try allocator.dupe(u8, item.string) if copying is needed
+        list.appendAssumeCapacity(item.string);
+    }
 }
 
 // Helper function to parse an optional string array field
 fn parseOptionalStringArray(list_ptr: *?ArrayList([]const u8), v: *const Json.Value, field_name: []const u8, env_name: []const u8, allocator: Allocator) !void {
     if (v.* == .null) { // Dereference pointer
-         list_ptr.* = null; // Explicitly set to null
-         return;
-     }
-     if (v.* != .array) { // Dereference pointer
-         std.log.err("Expected array or null for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
-         return ZenvError.ConfigInvalid;
-     }
-     // If it's an array, initialize the optional list if it's null
-     if (list_ptr.* == null) {
-         list_ptr.* = ArrayList([]const u8).init(allocator);
-     }
-     var list = list_ptr.*.?; // Get the initialized list
-     // ensureTotalCapacity uses the list's allocator implicitly
-     try list.ensureTotalCapacity(v.array.items.len);
-     for (v.array.items) |item_val| { // Use different var name
-         const item = &item_val; // Take address if needed by called funcs, or use directly
-         if (item.* != .string) { // Dereference pointer
-             std.log.err("Expected string elements in array '{s}' for environment '{s}'", .{ field_name, env_name });
-              // Clean up partially filled list if needed
-             if (list_ptr.*) |*l| l.deinit();
-             list_ptr.* = null;
-             return ZenvError.ConfigInvalid;
-         }
-         // Append slice directly
-         // Use try allocator.dupe(u8, item.string) if copying is needed
-         list.appendAssumeCapacity(item.string);
-     }
+        list_ptr.* = null; // Explicitly set to null
+        return;
+    }
+    if (v.* != .array) { // Dereference pointer
+        std.log.err("Expected array or null for field '{s}' in environment '{s}', found {s}", .{ field_name, env_name, @tagName(v.*) });
+        return ZenvError.ConfigInvalid;
+    }
+    // If it's an array, initialize the optional list if it's null
+    if (list_ptr.* == null) {
+        list_ptr.* = ArrayList([]const u8).init(allocator);
+    }
+    var list = list_ptr.*.?; // Get the initialized list
+    // ensureTotalCapacity uses the list's allocator implicitly
+    try list.ensureTotalCapacity(v.array.items.len);
+    for (v.array.items) |item_val| { // Use different var name
+        const item = &item_val; // Take address if needed by called funcs, or use directly
+        if (item.* != .string) { // Dereference pointer
+            std.log.err("Expected string elements in array '{s}' for environment '{s}'", .{ field_name, env_name });
+            // Clean up partially filled list if needed
+            if (list_ptr.*) |*l| l.deinit();
+            list_ptr.* = null;
+            return ZenvError.ConfigInvalid;
+        }
+        // Append slice directly
+        // Use try allocator.dupe(u8, item.string) if copying is needed
+        list.appendAssumeCapacity(item.string);
+    }
 }
 
 // Helper function to get hostname using the `hostname` command
 fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
-        std.log.debug("Executing 'hostname' command", .{});
-        const argv = [_][]const u8{"hostname"};
-        var child = std.process.Child.init(&argv, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe; // Capture stderr as well
-        try child.spawn();
+    std.log.debug("Executing 'hostname' command", .{});
+    const argv = [_][]const u8{"hostname"};
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe; // Capture stderr as well
+    try child.spawn();
 
-        const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
-            catch |err| {
-                 std.log.err("Failed to read stdout from `hostname` command: {s}", .{@errorName(err)});
-                 _ = child.wait() catch {}; // Ensure child process is waited on
-                 return ZenvError.ProcessError;
-             };
-        errdefer allocator.free(stdout);
-
-         const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
-            catch |err| {
-                std.log.err("Failed to read stderr from `hostname` command: {s}", .{@errorName(err)});
-                 _ = child.wait() catch {};
-                return ZenvError.ProcessError;
-            };
-        defer allocator.free(stderr);
-
-
-        const term = try child.wait();
-
-        if (term != .Exited or term.Exited != 0) {
-            std.log.err("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr });
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
+        catch |err| {
+            std.log.err("Failed to read stdout from `hostname` command: {s}", .{@errorName(err)});
+            _ = child.wait() catch {}; // Ensure child process is waited on
             return ZenvError.ProcessError;
-        }
+        };
+    errdefer allocator.free(stdout);
 
-         const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
-        if (trimmed_hostname.len == 0) {
-             std.log.err("`hostname` command returned empty output.", .{});
-             return ZenvError.MissingHostname;
-        }
-        std.log.debug("Got hostname from command: '{s}'", .{trimmed_hostname});
-        // Return a duplicate of the trimmed hostname
-        return allocator.dupe(u8, trimmed_hostname);
+    const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
+        catch |err| {
+            std.log.err("Failed to read stderr from `hostname` command: {s}", .{@errorName(err)});
+            _ = child.wait() catch {};
+            return ZenvError.ProcessError;
+        };
+    defer allocator.free(stderr);
+
+    const term = try child.wait();
+
+    if (term != .Exited or term.Exited != 0) {
+        std.log.err("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr });
+        return ZenvError.ProcessError;
+    }
+
+    const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
+    if (trimmed_hostname.len == 0) {
+        std.log.err("`hostname` command returned empty output.", .{});
+        return ZenvError.MissingHostname;
+    }
+    std.log.debug("Got hostname from command: '{s}'", .{trimmed_hostname});
+    // Return a duplicate of the trimmed hostname
+    return allocator.dupe(u8, trimmed_hostname);
 }
-
 
 // Represents the configuration for a single named environment
 pub const EnvironmentConfig = struct {
@@ -159,7 +157,6 @@ pub const EnvironmentConfig = struct {
         // if (self.description) |d| allocator.free(d);
         // if (self.requirements_file) |f| allocator.free(f);
 
-
         // Deinitialize ArrayLists
         // Items are slices, no need to free individually if not duped
         // If using allocator.dupe in parsing, uncomment the inner free calls:
@@ -171,10 +168,10 @@ pub const EnvironmentConfig = struct {
         // Deinitialize HashMap
         var iter = self.custom_activate_vars.iterator();
         while (iter.next()) |entry| {
-             // Free keys/values only if duped during parsing
-             // allocator.free(entry.key_ptr.*);
-             // allocator.free(entry.value_ptr.*);
-             _ = entry; // Avoid unused var warning if not freeing
+            // Free keys/values only if duped during parsing
+            // allocator.free(entry.key_ptr.*);
+            // allocator.free(entry.value_ptr.*);
+            _ = entry; // Avoid unused var warning if not freeing
         }
         self.custom_activate_vars.deinit();
 
@@ -222,7 +219,6 @@ pub const ZenvConfig = struct {
         // because EnvironmentConfig currently holds slices into the value_tree's data.
         // If EnvironmentConfig owned copies (using allocator.dupe), this defer could be here.
 
-
         const root = value_tree.value;
         if (root != .object) { // Check union variant tag (lowercase)
             std.log.err("Expected root JSON element to be an Object in '{s}'", .{config_path});
@@ -235,8 +231,7 @@ pub const ZenvConfig = struct {
             .environments = StringHashMap(EnvironmentConfig).init(allocator),
             .value_tree = value_tree, // Store the tree to manage its lifetime
         };
-         errdefer config.deinit(); // Ensure cleanup on error during parsing loop
-
+        errdefer config.deinit(); // Ensure cleanup on error during parsing loop
 
         var env_map_iter = root.object.iterator(); // Access the iterator via the .object payload
         while (env_map_iter.next()) |entry| {
@@ -250,7 +245,7 @@ pub const ZenvConfig = struct {
             const env_obj = env_obj_ptr.object; // Get the actual object map
 
             var env_config = EnvironmentConfig.init(allocator);
-             // If parsing this entry fails, ensure its partially allocated fields are cleaned up
+            // If parsing this entry fails, ensure its partially allocated fields are cleaned up
             errdefer env_config.deinit(); // Use updated deinit
 
             var env_data_iter = env_obj.iterator(); // Iterate the inner object map
@@ -261,42 +256,71 @@ pub const ZenvConfig = struct {
                 const value_ptr = field.value_ptr; // Value is already pointer
 
                 if (std.mem.eql(u8, key, "target_machine")) {
-                     env_config.target_machine = parseRequiredString(value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
-                     // Removed: if (env_config.target_machine == undefined) success = false;
+                    env_config.target_machine = parseRequiredString(value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
+                    // Removed: if (env_config.target_machine == undefined) success = false;
                 } else if (std.mem.eql(u8, key, "description")) {
-                    env_config.description = parseOptionalString(value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    env_config.description = parseOptionalString(value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                 } else if (std.mem.eql(u8, key, "modules")) {
                     // Pass allocator explicitly if parseStringArray needs it, otherwise remove
                     // Assuming parseStringArray was corrected to not need allocator:
-                    parseStringArray(&env_config.modules, value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    parseStringArray(&env_config.modules, value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                 } else if (std.mem.eql(u8, key, "requirements_file")) {
-                    env_config.requirements_file = parseOptionalString(value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    env_config.requirements_file = parseOptionalString(value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                 } else if (std.mem.eql(u8, key, "dependencies")) {
-                     // Assuming parseStringArray was corrected to not need allocator:
-                    parseStringArray(&env_config.dependencies, value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    // Assuming parseStringArray was corrected to not need allocator:
+                    parseStringArray(&env_config.dependencies, value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                 } else if (std.mem.eql(u8, key, "python_executable")) {
-                    env_config.python_executable = parseRequiredString(value_ptr, key, env_name) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    env_config.python_executable = parseRequiredString(value_ptr, key, env_name) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                     // Removed: if (env_config.python_executable == undefined) success = false;
                 } else if (std.mem.eql(u8, key, "custom_activate_vars")) {
                     if (value_ptr.* != .object) { // Dereference pointer
-                         std.log.err("Expected object for field 'custom_activate_vars' in environment '{s}'", .{env_name});
-                         success = false; continue;
+                        std.log.err("Expected object for field 'custom_activate_vars' in environment '{s}'", .{env_name});
+                        success = false;
+                        continue;
                     }
                     var vars_iter = value_ptr.object.iterator(); // Iterate inner object
-                     while (vars_iter.next()) |var_entry| {
-                         const var_key = var_entry.key_ptr.*; // Use pointer
-                         const var_value_ptr = var_entry.value_ptr; // Value is already pointer
-                         if (var_value_ptr.* != .string) { // Dereference pointer
-                             std.log.warn("Skipping non-string value for activation variable '{s}' in environment '{s}'", .{ var_key, env_name });
-                             continue;
-                         }
-                         // Store slices directly. Use allocator.dupe if copies are needed.
-                         // Use try without catch; errdefer in parse() handles cleanup on OOM.
-                         try env_config.custom_activate_vars.put(var_key, var_value_ptr.string);
-                     }
-                     // Removed unnecessary check: if (!success) continue;
+                    while (vars_iter.next()) |var_entry| {
+                        const var_key = var_entry.key_ptr.*; // Use pointer
+                        const var_value_ptr = var_entry.value_ptr; // Value is already pointer
+                        if (var_value_ptr.* != .string) { // Dereference pointer
+                            std.log.warn("Skipping non-string value for activation variable '{s}' in environment '{s}'", .{ var_key, env_name });
+                            continue;
+                        }
+                        // Store slices directly. Use allocator.dupe if copies are needed.
+                        // Use try without catch; errdefer in parse() handles cleanup on OOM.
+                        try env_config.custom_activate_vars.put(var_key, var_value_ptr.string);
+                    }
+                    // Removed unnecessary check: if (!success) continue;
                 } else if (std.mem.eql(u8, key, "setup_commands")) {
-                    parseOptionalStringArray(&env_config.setup_commands, value_ptr, key, env_name, allocator) catch |e| { std.log.debug("Parse error on field '{s}': {s}", .{key, @errorName(e)}); success = false; continue; };
+                    parseOptionalStringArray(&env_config.setup_commands, value_ptr, key, env_name, allocator) catch |e| {
+                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        success = false;
+                        continue;
+                    };
                 } else {
                     std.log.warn("Ignoring unknown field '{s}' in environment '{s}'", .{ key, env_name });
                 }
@@ -323,16 +347,13 @@ pub const ZenvConfig = struct {
         // Check if any environments were successfully parsed
         // Note: Changed the condition slightly to handle empty root object gracefully
         if (config.environments.count() == 0 and root == .object and root.object.count() > 0) {
-             std.log.err("No valid environment configurations found in '{s}'", .{config_path});
-             // config.deinit() will be called by the higher level defer or errdefer
-             return ZenvError.ConfigInvalid;
+            std.log.err("No valid environment configurations found in '{s}'", .{config_path});
+            // config.deinit() will be called by the higher level defer or errdefer
+            return ZenvError.ConfigInvalid;
         }
-
 
         return config;
     }
-
-
 
     // Deinitialize the entire config structure
     pub fn deinit(self: *ZenvConfig) void {
@@ -355,29 +376,26 @@ pub const ZenvConfig = struct {
         return self.environments.getPtr(env_name);
     }
 
-     // Helper to get the current machine's hostname
-     pub fn getHostname(allocator: Allocator) ![]const u8 {
-         // Using getEnvVarOwned requires freeing the result later
-         std.log.debug("Attempting to get hostname from environment variable", .{});
-         const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
-              if (err == error.EnvironmentVariableNotFound) {
-                 // Fallback to `hostname` command if HOSTNAME env var is not set
-                 std.log.debug("HOSTNAME not set, attempting 'hostname' command.", .{});
-                 return getHostnameFromCommand(allocator);
-              }
-             std.log.err("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
-             return ZenvError.MissingHostname;
-         };
-         // If HOSTNAME is empty, also fallback
-         if (hostname.len == 0) {
-              std.log.warn("HOSTNAME environment variable is empty, attempting 'hostname' command.", .{});
-              allocator.free(hostname); // Free the empty string
-              return getHostnameFromCommand(allocator);
-         }
-         std.log.debug("Got hostname: '{s}'", .{hostname});
-         return hostname;
-     }
-
-
-
+    // Helper to get the current machine's hostname
+    pub fn getHostname(allocator: Allocator) ![]const u8 {
+        // Using getEnvVarOwned requires freeing the result later
+        std.log.debug("Attempting to get hostname from environment variable", .{});
+        const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
+            if (err == error.EnvironmentVariableNotFound) {
+                // Fallback to `hostname` command if HOSTNAME env var is not set
+                std.log.debug("HOSTNAME not set, attempting 'hostname' command.", .{});
+                return getHostnameFromCommand(allocator);
+            }
+            std.log.err("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
+            return ZenvError.MissingHostname;
+        };
+        // If HOSTNAME is empty, also fallback
+        if (hostname.len == 0) {
+            std.log.warn("HOSTNAME environment variable is empty, attempting 'hostname' command.", .{});
+            allocator.free(hostname); // Free the empty string
+            return getHostnameFromCommand(allocator);
+        }
+        std.log.debug("Got hostname: '{s}'", .{hostname});
+        return hostname;
+    }
 };

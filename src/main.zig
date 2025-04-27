@@ -7,7 +7,6 @@ const config_module = @import("config.zig");
 const commands = @import("commands.zig");
 const Allocator = std.mem.Allocator;
 
-
 const Command = enum {
     setup,
     activate,
@@ -30,7 +29,6 @@ fn printVersion() void {
         std.log.err("Error printing version: {s}", .{@errorName(err)});
     };
 }
-
 
 fn printUsage() void {
     const usage = comptime
@@ -62,7 +60,6 @@ fn printUsage() void {
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
 }
-
 
 pub fn main() anyerror!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -104,52 +101,51 @@ pub fn main() anyerror!void {
         pub fn func(err: anyerror) void {
             const stderr = std.io.getStdErr().writer();
             if (@errorReturnTrace()) |trace| {
-                 switch (err) {
-                     ZenvError.ConfigFileNotFound => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
-                     },
-                     ZenvError.ClusterNotFound => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
-                     },
-                     ZenvError.EnvironmentNotFound => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Environment name not found in configuration or argument missing.\n", .{}) catch {};
-                     },
-                     ZenvError.JsonParseError => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {};
-                     },
-                     ZenvError.ConfigInvalid => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
-                     },
-                     ZenvError.ProcessError => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> An external command (module/pip/sh) failed. See output above for details.\n", .{}) catch {};
-                     },
-                     ZenvError.MissingHostname => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
-                     },
-                     ZenvError.PathResolutionFailed => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
-                     },
-                     else => {
-                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                         stderr.print(" -> Unexpected error.\n", .{}) catch {};
-                         std.debug.dumpStackTrace(trace.*);
-                     }
-                 }
+                switch (err) {
+                    ZenvError.ConfigFileNotFound => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
+                    },
+                    ZenvError.ClusterNotFound => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
+                    },
+                    ZenvError.EnvironmentNotFound => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Environment name not found in configuration or argument missing.\n", .{}) catch {};
+                    },
+                    ZenvError.JsonParseError => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {};
+                    },
+                    ZenvError.ConfigInvalid => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
+                    },
+                    ZenvError.ProcessError => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> An external command (module/pip/sh) failed. See output above for details.\n", .{}) catch {};
+                    },
+                    ZenvError.MissingHostname => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
+                    },
+                    ZenvError.PathResolutionFailed => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
+                    },
+                    else => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Unexpected error.\n", .{}) catch {};
+                        std.debug.dumpStackTrace(trace.*);
+                    },
+                }
             } else {
-                 stderr.print("Error: {s} (no trace available)\n", .{@errorName(err)}) catch {};
+                stderr.print("Error: {s} (no trace available)\n", .{@errorName(err)}) catch {};
             }
             process.exit(1);
         }
     }.func;
-
 
     // Parse configuration
     var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
@@ -170,9 +166,9 @@ pub fn main() anyerror!void {
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,
 
         .unknown => {
-             std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};
-             printUsage();
-             process.exit(1);
+            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};
+            printUsage();
+            process.exit(1);
         },
     }
 }
