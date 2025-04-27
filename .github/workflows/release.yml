@@ -1,0 +1,35 @@
+name: Release Zenv
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on tags that match v1.0.0 format
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+      
+      - name: Set up Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0  # Use latest stable Zig version
+
+      - name: Build for all targets
+        run: zig build release
+        # No need for -Dforce-release as we're triggering on tag
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./zig-out/releases/*.tar.xz  # Add all release archives
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
