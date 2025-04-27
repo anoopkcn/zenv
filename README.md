@@ -120,7 +120,7 @@ The `zenv.json` file supports the following structure:
       "<module1>",
       "<module2>",
     ],
-    "requirements_file": "<path_to_requirements_txt_or_pyproject_toml>",
+    "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
     "dependencies": [
       "<package_name>[==version]"
     ],
