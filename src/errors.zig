@@ -7,6 +7,8 @@ pub const ZenvError = error{
     ConfigFileReadError,
     JsonParseError,
     ConfigInvalid,
+    RegistryError,
+    EnvironmentNotRegistered,
     ClusterNotFound,
     EnvironmentNotFound,
     IoError,

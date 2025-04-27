@@ -50,6 +50,278 @@ fn parseStringArray(allocator: Allocator, list: *ArrayList([]const u8), v: *cons
     }
 }
 
+// Registry entry for a single environment
+pub const RegistryEntry = struct {
+    env_name: []const u8,
+    project_dir: []const u8,
+    description: ?[]const u8 = null,
+    target_machine: []const u8,
+    
+    pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
+        allocator.free(self.env_name);
+        allocator.free(self.project_dir);
+        if (self.description) |desc| {
+            allocator.free(desc);
+        }
+        allocator.free(self.target_machine);
+    }
+};
+
+// Global registry of environments
+pub const EnvironmentRegistry = struct {
+    allocator: Allocator,
+    entries: std.ArrayList(RegistryEntry),
+    
+    pub fn init(allocator: Allocator) EnvironmentRegistry {
+        return .{
+            .allocator = allocator,
+            .entries = std.ArrayList(RegistryEntry).init(allocator),
+        };
+    }
+    
+    pub fn deinit(self: *EnvironmentRegistry) void {
+        for (self.entries.items) |*entry| {
+            entry.deinit(self.allocator);
+        }
+        self.entries.deinit();
+    }
+    
+    // Load registry from file, creating it if it doesn't exist
+    pub fn load(allocator: Allocator) !EnvironmentRegistry {
+        var registry = EnvironmentRegistry.init(allocator);
+        errdefer registry.deinit();
+        
+        // Determine home directory
+        const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
+            std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer allocator.free(home_dir);
+        
+        // Ensure .zenv directory exists
+        const zenv_dir_path = try std.fmt.allocPrint(allocator, "{s}/.zenv", .{home_dir});
+        defer allocator.free(zenv_dir_path);
+        
+        std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
+            if (err != error.PathAlreadyExists) {
+                std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
+                return err;
+            }
+        };
+        
+        // Construct registry file path
+        const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
+        defer allocator.free(registry_path);
+        
+        // Try to open the registry file
+        const file = std.fs.openFileAbsolute(registry_path, .{}) catch |err| {
+            if (err == error.FileNotFound) {
+                // Registry doesn't exist yet, create an empty one
+                try registry.save();
+                return registry;
+            }
+            std.log.err("Failed to open registry file: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer file.close();
+        
+        // Read file contents
+        const file_content = file.readToEndAlloc(allocator, 1 * 1024 * 1024) catch |err| {
+            std.log.err("Failed to read registry file: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer allocator.free(file_content);
+        
+        // Parse JSON
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, file_content, .{}) catch |err| {
+            std.log.err("Failed to parse registry JSON: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer parsed.deinit();
+        
+        // Process entries
+        const root = parsed.value;
+        if (root.object.get("environments")) |environments| {
+            if (environments != .array) {
+                std.log.err("Expected 'environments' to be an array, found {s}", .{@tagName(environments)});
+                return error.InvalidRegistryFormat;
+            }
+            
+            for (environments.array.items) |entry_value| {
+                if (entry_value != .object) {
+                    std.log.err("Expected environment entry to be an object", .{});
+                    continue;
+                }
+                
+                const entry_obj = entry_value.object;
+                
+                // Extract required fields
+                const env_name = entry_obj.get("name") orelse {
+                    std.log.err("Missing 'name' field in environment entry", .{});
+                    continue;
+                };
+                if (env_name != .string) {
+                    std.log.err("Expected 'name' to be a string", .{});
+                    continue;
+                }
+                
+                const project_dir = entry_obj.get("project_dir") orelse {
+                    std.log.err("Missing 'project_dir' field in environment entry", .{});
+                    continue;
+                };
+                if (project_dir != .string) {
+                    std.log.err("Expected 'project_dir' to be a string", .{});
+                    continue;
+                }
+                
+                const target_machine = entry_obj.get("target_machine") orelse {
+                    std.log.err("Missing 'target_machine' field in environment entry", .{});
+                    continue;
+                };
+                if (target_machine != .string) {
+                    std.log.err("Expected 'target_machine' to be a string", .{});
+                    continue;
+                }
+                
+                // Extract optional description field
+                var description: ?[]const u8 = null;
+                if (entry_obj.get("description")) |desc_value| {
+                    if (desc_value == .string) {
+                        description = try allocator.dupe(u8, desc_value.string);
+                    }
+                }
+                
+                // Create entry
+                try registry.entries.append(.{
+                    .env_name = try allocator.dupe(u8, env_name.string),
+                    .project_dir = try allocator.dupe(u8, project_dir.string),
+                    .description = description,
+                    .target_machine = try allocator.dupe(u8, target_machine.string),
+                });
+            }
+        }
+        
+        return registry;
+    }
+    
+    // Save registry to file
+    pub fn save(self: *const EnvironmentRegistry) !void {
+        // Determine home directory
+        const home_dir = std.process.getEnvVarOwned(self.allocator, "HOME") catch |err| {
+            std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer self.allocator.free(home_dir);
+        
+        // Ensure .zenv directory exists
+        const zenv_dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.zenv", .{home_dir});
+        defer self.allocator.free(zenv_dir_path);
+        
+        std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
+            if (err != error.PathAlreadyExists) {
+                std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
+                return err;
+            }
+        };
+        
+        // Construct registry file path
+        const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
+        defer self.allocator.free(registry_path);
+        
+        // Create root object with environments array
+        var root = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+        defer root.object.deinit();
+        
+        // Create environments array
+        var environments = std.json.Value{ .array = std.json.Array.init(self.allocator) };
+        defer environments.array.deinit();
+        
+        // Add each entry to the environments array
+        for (self.entries.items) |entry| {
+            var entry_obj = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+            
+            // Add required fields
+            try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
+            try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
+            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machine });
+            
+            // Add optional description field
+            if (entry.description) |desc| {
+                try entry_obj.object.put("description", std.json.Value{ .string = desc });
+            }
+            
+            // Add to environments array
+            try environments.array.append(entry_obj);
+        }
+        
+        // Add environments array to root object
+        try root.object.put("environments", environments);
+        
+        // Convert to JSON string
+        const json_string = try std.json.stringifyAlloc(self.allocator, root, .{ .whitespace = .indent_2 });
+        defer self.allocator.free(json_string);
+        
+        // Write to file
+        const file = try std.fs.createFileAbsolute(registry_path, .{});
+        defer file.close();
+        
+        try file.writeAll(json_string);
+    }
+    
+    // Register a new environment
+    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, description: ?[]const u8, target_machine: []const u8) !void {
+        // Check if environment already exists
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.env_name, env_name)) {
+                // Update existing entry
+                self.allocator.free(entry.project_dir);
+                entry.project_dir = try self.allocator.dupe(u8, project_dir);
+                
+                if (entry.description) |desc| {
+                    self.allocator.free(desc);
+                }
+                entry.description = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
+                
+                self.allocator.free(entry.target_machine);
+                entry.target_machine = try self.allocator.dupe(u8, target_machine);
+                
+                return;
+            }
+        }
+        
+        // Add new entry
+        try self.entries.append(.{
+            .env_name = try self.allocator.dupe(u8, env_name),
+            .project_dir = try self.allocator.dupe(u8, project_dir),
+            .description = if (description) |desc| try self.allocator.dupe(u8, desc) else null,
+            .target_machine = try self.allocator.dupe(u8, target_machine),
+        });
+    }
+    
+    // Unregister an environment
+    pub fn unregister(self: *EnvironmentRegistry, env_name: []const u8) bool {
+        for (self.entries.items, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.env_name, env_name)) {
+                // Free memory for the removed entry
+                var removed_entry = self.entries.orderedRemove(i);
+                removed_entry.deinit(self.allocator);
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    // Look up an environment by name
+    pub fn lookup(self: *const EnvironmentRegistry, env_name: []const u8) ?RegistryEntry {
+        for (self.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.env_name, env_name)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+};
+
 // Add required field validation at compile-time
 const REQUIRED_ENV_FIELDS = [_][]const u8{
     "target_machine", 

@@ -881,3 +881,91 @@ pub fn isConfigProvidedDependency(env_config: *const EnvironmentConfig, dep: []c
     }
     return false;
 }
+
+// Get hostname from environment variable or command
+pub fn getHostname(allocator: Allocator) ![]const u8 {
+    std.log.debug("Attempting to get hostname from environment variable", .{});
+    
+    // Try from environment variable first (consistent with ZenvConfig method)
+    const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
+        std.log.debug("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
+        
+        // Try HOST instead
+        const host = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
+            std.log.debug("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
+            
+            // Default to command-based hostname
+            std.log.debug("Getting hostname using command", .{});
+            return getHostnameFromCommand(allocator);
+        };
+        
+        // Free and return null if it's an empty string
+        if (host.len == 0) {
+            allocator.free(host);
+            std.log.debug("HOST environment variable is empty, getting using command", .{});
+            return getHostnameFromCommand(allocator);
+        }
+        
+        std.log.debug("Got hostname from HOST: '{s}'", .{host});
+        return host;
+    };
+    
+    // Free and return null if it's an empty string
+    if (hostname.len == 0) {
+        allocator.free(hostname);
+        std.log.debug("HOSTNAME environment variable is empty, getting using command", .{});
+        return getHostnameFromCommand(allocator);
+    }
+    
+    std.log.debug("Got hostname: '{s}'", .{hostname});
+    return hostname;
+}
+
+// Simple check for hostname matching target machine
+pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
+    // Simple substring check for now, can be enhanced later
+    return std.mem.indexOf(u8, hostname, target_machine) != null or
+           std.mem.indexOf(u8, target_machine, hostname) != null;
+}
+
+// Helper function to get hostname using the `hostname` command
+pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
+    std.log.debug("Executing 'hostname' command", .{});
+    const argv = [_][]const u8{"hostname"};
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe; // Capture stderr as well
+    try child.spawn();
+
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
+        catch |err| {
+            std.log.err("Failed to read stdout from `hostname` command: {s}", .{@errorName(err)});
+            _ = child.wait() catch {}; // Ensure child process is waited on
+            return error.ProcessError;
+        };
+    errdefer allocator.free(stdout);
+
+    const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
+        catch |err| {
+            std.log.err("Failed to read stderr from `hostname` command: {s}", .{@errorName(err)});
+            _ = child.wait() catch {};
+            return error.ProcessError;
+        };
+    defer allocator.free(stderr);
+
+    const term = try child.wait();
+
+    if (term != .Exited or term.Exited != 0) {
+        std.log.err("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr });
+        return error.ProcessError;
+    }
+
+    const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
+    if (trimmed_hostname.len == 0) {
+        std.log.err("`hostname` command returned empty output.", .{});
+        return error.MissingHostname;
+    }
+    std.log.debug("Got hostname from command: '{s}'", .{trimmed_hostname});
+    // Return a duplicate of the trimmed hostname
+    return allocator.dupe(u8, trimmed_hostname);
+}

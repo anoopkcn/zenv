@@ -9,6 +9,8 @@ const Command = enum {
     setup,
     activate,
     list,
+    register,
+    unregister,
     help,
     version,
     @"-v",
@@ -41,14 +43,22 @@ fn printUsage() void {
         \\  activate <env_name>    Output the path to the activation script.
         \\                         To activate the environment, use:
         \\                         source $(zenv activate <env_name>)
-        \\  list                   List environments configured for the current machine.
-        \\  list --all             List all environments defined in the configuration file.
+        \\  list                   List environments registered for the current machine.
+        \\  list --all             List all registered environments.
+        \\  register <env_name>    Register an environment in the global registry.
+        \\                         Registers the current directory as the project directory.
+        \\  unregister <env_name>  Remove an environment from the global registry.
         \\  version, -v, --version Print the zenv version.
         \\  help, --help           Show this help message.
         \\
         \\Options:
         \\  --force-deps           When used with setup command, installs all specified dependencies
         \\                         even if they are already provided by loaded modules.
+        \\
+        \\Registry:
+        \\  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
+        \\  Setting up an environment will register that environment or register it with 'zenv register <env_name>'.
+        \\  Then you can activate it from anywhere with 'source $(zenv activate <env_name>)'.
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -85,10 +95,10 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .unknown => {},
+        .setup, .activate, .list, .register, .unregister, .unknown => {},
     }
 
-    const config_path = "zenv.json"; // Keep config path definition
+    const config_path = "zenv.json"; // Keep config path definition for backward compatibility
 
     const handleError = struct {
         pub fn func(err: anyerror) void {
@@ -129,6 +139,10 @@ pub fn main() anyerror!void {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
                     },
+                    error.RegistryError => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Failed to access the environment registry. Check permissions for ~/.zenv directory.\n", .{}) catch {};
+                    },
                     else => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Unexpected error.\n", .{}) catch {};
@@ -142,20 +156,36 @@ pub fn main() anyerror!void {
         }
     }.func;
 
-    // Parse configuration
-    var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
-        handleError(err);
-        return; // Exit after handling error
+    // Load the environment registry first, as we'll need it for all commands
+    var registry = config_module.EnvironmentRegistry.load(allocator) catch |err| {
+        std.log.err("Failed to load environment registry: {s}", .{@errorName(err)});
+        handleError(error.RegistryError);
+        return;
     };
-    defer config.deinit(); // Ensure config memory is cleaned up
+    defer registry.deinit();
+
+    // Parse configuration if we're in a project directory with zenv.json
+    // We'll only need this for setup and registering new environments
+    var config: ?config_module.ZenvConfig = null;
+    defer if (config != null) config.?.deinit();
+
+    // Only try to load the config file for setup and register commands
+    if (command == .setup or command == .register) {
+        config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
+            handleError(err);
+            return; // Exit after handling error
+        };
+    }
 
     defer process.argsFree(allocator, args_owned); // Defer freeing the original mutable args
 
-    // Dispatch to command handlers (using args_const)
+    // Dispatch to command handlers
     switch (command) {
-        .setup => try commands.handleSetupCommand(allocator, &config, args_const, handleError),
-        .activate => commands.handleActivateCommand(allocator, &config, args_const, handleError),
-        .list => commands.handleListCommand(allocator, &config, args_const),
+        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args_const, handleError),
+        .activate => commands.handleActivateCommand(&registry, args_const, handleError),
+        .list => commands.handleListCommand(allocator, &registry, args_const),
+        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
+        .unregister => commands.handleUnregisterCommand(&registry, args_const, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,

@@ -2,6 +2,7 @@ const std = @import("std");
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
+const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("errors.zig");
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
@@ -9,6 +10,7 @@ const Allocator = std.mem.Allocator;
 pub fn handleSetupCommand(
     allocator: Allocator,
     config: *const ZenvConfig,
+    registry: *EnvironmentRegistry,
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void,
 ) anyerror!void {
@@ -125,34 +127,52 @@ pub fn handleSetupCommand(
     // 4. Create the final activation script (using a separate utility)
     try utils.createActivationScript(allocator, env_config, env_name);
 
-    std.log.info("Environment '{s}' setup complete.", .{env_name});
-}
-
-// setupEnvironment moved to utils.zig
-
-pub fn handleActivateCommand(
-    allocator: Allocator,
-    config: *const ZenvConfig,
-    args: [][]const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
-    // We only use env_config for validation, not for output
-    _ = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
-    const env_name = args[2];
-
-    // Get absolute path of current working directory
+    // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
         std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return;
     };
+    
+    try registry.register(env_name, cwd_path, env_config.description, env_config.target_machine);
+    try registry.save();
+    
+    std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
+    std.log.info("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name});
+}
 
-    const writer = std.io.getStdOut().writer(); // Use constant for clarity
+// setupEnvironment moved to utils.zig
 
-    // Simply output the path to the activation script
-    // Ensure there's a newline at the end to avoid shell prompt appearing on the same line
-    writer.print("{s}/zenv/{s}/activate.sh\n", .{ cwd_path, env_name }) catch |e| {
+pub fn handleActivateCommand(
+    registry: *const EnvironmentRegistry,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv activate <env_name>\n", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+    
+    const env_name = args[2];
+    
+    // Look up environment in registry
+    const entry = registry.lookup(env_name) orelse {
+        std.io.getStdErr().writer().print("Error: Environment '{s}' not found in registry.\n", .{env_name}) catch {};
+        std.io.getStdErr().writer().print("Use 'zenv register {s}' to register this environment first.\n", .{env_name}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+        return;
+    };
+    
+    // Get project directory from registry entry
+    const project_dir = entry.project_dir;
+    
+    const writer = std.io.getStdOut().writer();
+
+    // Output the path to the activation script
+    writer.print("{s}/zenv/{s}/activate.sh\n", .{ project_dir, env_name }) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
@@ -160,7 +180,7 @@ pub fn handleActivateCommand(
 
 pub fn handleListCommand(
     allocator: Allocator,
-    config: *const ZenvConfig,
+    registry: *const EnvironmentRegistry,
     args: [][]const u8,
 ) void {
     const stdout = std.io.getStdOut().writer();
@@ -171,11 +191,13 @@ pub fn handleListCommand(
     var use_hostname_filter = !list_all; // New variable to track if we should use hostname filter
 
     if (use_hostname_filter) {
-        current_hostname = config.getHostname() catch |err| {
+        // Get hostname directly without ZenvConfig
+        current_hostname = utils.getHostname(allocator) catch |err| {
             std.log.warn("Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)});
             // Don't apply hostname filter if we can't get the hostname
             use_hostname_filter = false;
-            return;
+            current_hostname = null;
+            return; // Return early to prevent accessing null hostname
         };
         if (current_hostname != null) {
             hostname_allocd = true; // Mark that we need to free it
@@ -186,47 +208,124 @@ pub fn handleListCommand(
 
     stdout.print("Available zenv environments:\n", .{}) catch {};
 
-    var iter = config.environments.iterator();
     var count: usize = 0;
-    while (iter.next()) |entry| {
-        const env_name = entry.key_ptr.*;
-        const env_config = entry.value_ptr.*;
+    for (registry.entries.items) |entry| {
+        const env_name = entry.env_name;
+        const target_machine = entry.target_machine;
 
         // Filter by target machine if requested and hostname was successfully obtained
         if (use_hostname_filter and current_hostname != null) {
-            // Use the same enhanced matching logic as getAndValidateEnvironment for consistency
-            // Use the pure hostname validation function
-            const hostname_matches = utils.validateEnvironmentForMachine(env_config, current_hostname.?);
-
-            if (!hostname_matches) {
+            // Simple target machine check - could be enhanced with the same logic as in config
+            if (!utils.checkHostnameMatch(current_hostname.?, target_machine)) {
                 continue; // Skip this environment
             }
         }
 
         // Print environment name and target machine
-        stdout.print("- {s} (Target: {s}", .{ env_name, env_config.target_machine }) catch {};
+        stdout.print("- {s} (Target: {s}", .{ env_name, target_machine }) catch {};
         // Optionally print description
-        if (env_config.description) |desc| {
+        if (entry.description) |desc| {
             stdout.print(" - {s}", .{desc}) catch {};
         }
-        stdout.print(")\n", .{}) catch {};
+        stdout.print(")\n  [Project: {s}]\n", .{entry.project_dir}) catch {};
         count += 1;
     }
 
     // Print summary message
     if (count == 0) {
         if (!list_all and current_hostname != null) {
-            stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all configured environments.\n", .{current_hostname.?}) catch {};
+            stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all registered environments.\n", .{current_hostname.?}) catch {};
         } else if (!list_all and current_hostname == null) {
             stdout.print("No environments found. (Could not determine current hostname for filtering).\n", .{}) catch {};
         } else { // Listing all or hostname failed
-            stdout.print("No environments found in the configuration file.\n", .{}) catch {};
+            stdout.print("No environments found in the registry. Use 'zenv register <env_name>' to register environments.\n", .{}) catch {};
         }
     } else {
         if (!list_all and current_hostname != null) {
             stdout.print("Found {d} environment(s) for the current machine ('{s}').\n", .{ count, current_hostname.? }) catch {};
         } else { // Listing all or hostname failed
-            stdout.print("Found {d} total environment(s).\n", .{count}) catch {};
+            stdout.print("Found {d} total registered environment(s).\n", .{count}) catch {};
         }
+    }
+}
+pub fn handleRegisterCommand(
+    allocator: Allocator,
+    config: *const ZenvConfig,
+    registry: *EnvironmentRegistry,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv register <env_name>\n", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+    
+    const env_name = args[2];
+    
+    // Validate that the environment exists in the config
+    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    
+    // Get absolute path of current working directory
+    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
+        std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
+        handleErrorFn(err);
+        return;
+    };
+    
+    // Register the environment in the global registry
+    registry.register(env_name, cwd_path, env_config.description, env_config.target_machine) catch |err| {
+        std.log.err("Failed to register environment: {s}", .{@errorName(err)});
+        handleErrorFn(err);
+        return;
+    };
+    
+    // Save the registry
+    registry.save() catch |err| {
+        std.log.err("Failed to save registry: {s}", .{@errorName(err)});
+        handleErrorFn(err);
+        return;
+    };
+    
+    std.io.getStdOut().writer().print("Environment '{s}' registered successfully.\n", .{env_name}) catch {};
+    std.io.getStdOut().writer().print("You can now activate it from any directory with: source $(zenv activate {s})\n", .{env_name}) catch {};
+}
+
+pub fn handleUnregisterCommand(
+    registry: *EnvironmentRegistry,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv unregister <env_name>\n", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+    
+    const env_name = args[2];
+    
+    // Look up environment in registry first to check if it exists
+    _ = registry.lookup(env_name) orelse {
+        std.io.getStdErr().writer().print("Error: Environment '{s}' not found in registry.\n", .{env_name}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+        return;
+    };
+    
+    // Remove the environment from the registry
+    if (registry.unregister(env_name)) {
+        // Save the registry
+        registry.save() catch |err| {
+            std.log.err("Failed to save registry: {s}", .{@errorName(err)});
+            handleErrorFn(err);
+            return;
+        };
+        
+        std.io.getStdOut().writer().print("Environment '{s}' unregistered successfully.\n", .{env_name}) catch {};
+    } else {
+        std.io.getStdErr().writer().print("Error: Failed to unregister environment '{s}'.\n", .{env_name}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
     }
 }
