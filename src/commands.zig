@@ -104,7 +104,7 @@ pub fn handleSetupCommand(
     std.log.info("Total combined dependencies before validation: {d}", .{all_required_deps.items.len});
 
     // 2. Create zenv base directory structure
-    try utils.createScVenvDir(allocator, env_name);
+    try utils.createVenvDir(allocator, env_name);
 
     // 3. Perform the main environment setup using the utility function
     //    This now includes dependency validation, script generation, and execution.

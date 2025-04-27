@@ -292,7 +292,7 @@ pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, 
 // ============================================================================
 
 // Create a virtual environment directory structure (zenv/env_name)
-pub fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
+pub fn createVenvDir(allocator: Allocator, env_name: []const u8) !void {
     std.log.info("Creating virtual environment directory structure for '{s}'...", .{env_name});
 
     // Create base zenv directory if it doesn't exist
