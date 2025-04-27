@@ -11,6 +11,7 @@ const Command = enum {
     list,
     register,
     unregister,
+    cd,
     help,
     version,
     @"-v",
@@ -44,6 +45,10 @@ fn printUsage() void {
         \\                         You can use the environment name or its ID (full or partial).
         \\                         To activate the environment, use:
         \\                         source $(zenv activate <env_name|id>)
+        \\  cd <env_name|id>       Output the project directory path.
+        \\                         You can use the environment name or its ID (full or partial).
+        \\                         To change to the project directory, use:
+        \\                         cd $(zenv cd <env_name|id>)
         \\  list                   List environments registered for the current machine.
         \\  list --all             List all registered environments.
         \\  register <env_name>    Register an environment in the global registry.
@@ -96,7 +101,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .unregister, .unknown => {},
+        .setup, .activate, .list, .register, .unregister, .cd, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -187,6 +192,7 @@ pub fn main() anyerror!void {
         .list => commands.handleListCommand(allocator, &registry, args_const),
         .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
         .unregister => commands.handleUnregisterCommand(&registry, args_const, handleError),
+        .cd => commands.handleCdCommand(&registry, args_const, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,
