@@ -126,6 +126,8 @@ pub fn build(b: *std.Build) !void {
     // Add release-safe option for building with assertions enabled
     const release_safe = b.option(bool, "release-safe", "Build with ReleaseSafe mode (optimized but with assertions)") orelse false;
     const small_release = b.option(bool, "small-release", "Build with ReleaseSmall mode (optimize for binary size)") orelse false;
+    // Add option to force releases even without a tag
+    const force_release = b.option(bool, "force-release", "Allow release builds without git tags") orelse false;
     
     // Determine effective optimization level
     const effective_optimize = if (small_release) 
@@ -173,9 +175,27 @@ pub fn build(b: *std.Build) !void {
     exe_step.dependOn(b.getInstallStep());
 
     // --- Individual Target Steps ---
-    if (version == .tag) {
+    if (version == .tag or force_release) {
         // Add individual target-specific build steps
         for (release_targets) |release_target| {
+            // For Windows targets, add a warning message instead of the build
+            if (release_target.query.os_tag == .windows) {
+                const warning_msg = b.fmt("Windows builds are currently not supported due to cross-compilation issues with fchmod", .{});
+                
+                const target_step_small = b.step(
+                    b.fmt("release-{s}-small", .{release_target.name}), 
+                    b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
+                );
+                target_step_small.dependOn(&b.addFail(warning_msg).step);
+                
+                const target_step_fast = b.step(
+                    b.fmt("release-{s}", .{release_target.name}), 
+                    b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
+                );
+                target_step_fast.dependOn(&b.addFail(warning_msg).step);
+                continue;
+            }
+            
             const target_step_small = b.step(
                 b.fmt("release-{s}-small", .{release_target.name}), 
                 b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
@@ -190,7 +210,7 @@ pub fn build(b: *std.Build) !void {
         }
     } else {
         // When not on a tag, add the fail message to each individual target step
-        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0)";
+        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.";
         for (release_targets) |release_target| {
             const target_step_small = b.step(
                 b.fmt("release-{s}-small", .{release_target.name}), 
@@ -210,18 +230,52 @@ pub fn build(b: *std.Build) !void {
     const release_step = b.step("release", "Create release builds for all targets");
     const release_small_step = b.step("release-small", "Create small release builds for all targets");
     
-    if (version == .tag) {
+    if (version == .tag or force_release) {
         // Set up release-all steps with different optimizations
         for (release_targets) |release_target| {
+            // Skip Windows targets if there are cross-compilation issues
+            if (release_target.query.os_tag == .windows) {
+                const skip_msg = b.fmt("Skipping {s} due to cross-compilation issues", .{release_target.description});
+                std.log.info("{s}", .{skip_msg});
+                continue;
+            }
+            
             setupTargetReleaseWithOptimize(b, release_step, version_string, release_target.query, .ReleaseFast);
             setupTargetReleaseWithOptimize(b, release_small_step, version_string, release_target.query, .ReleaseSmall);
         }
     } else {
         // Prevent running release builds on non-tagged commits
-        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0)";
+        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.";
         release_step.dependOn(&b.addFail(error_msg).step);
         release_small_step.dependOn(&b.addFail(error_msg).step);
     }
+}
+
+// Creates a simplified version of the target triple for file naming
+fn simplifyTripleName(target: std.Target) []const u8 {
+    const allocator = std.heap.page_allocator;
+    
+    // Format based on architecture, OS, and possibly ABI
+    const arch = @tagName(target.cpu.arch);
+    const os = @tagName(target.os.tag);
+    
+    // For Linux with musl, include the ABI
+    if (target.os.tag == .linux and target.abi == .musl) {
+        return std.fmt.allocPrint(allocator, "{s}-{s}-musl", .{arch, os}) catch "unknown";
+    }
+    
+    // For macOS, just use arch-macos
+    if (target.os.tag == .macos) {
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
+    }
+    
+    // Windows would be arch-windows if we supported it
+    if (target.os.tag == .windows) {
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
+    }
+    
+    // Default case - just combine arch and OS
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
 }
 
 // Creates release artifact for a single target with specified optimization
@@ -256,6 +310,9 @@ fn setupTargetReleaseWithOptimize(
         return; // Skip this target if we can't get the triple
     };
 
+    // Create a simplified name for the archive
+    const simplified_triple = simplifyTripleName(target.result);
+    
     // Add optimization mode to the archive name for clarity
     const opt_suffix = switch (optimize) {
         .ReleaseSmall => "-small",
@@ -264,7 +321,7 @@ fn setupTargetReleaseWithOptimize(
 
     switch (target.result.os.tag) {
         .windows => {
-            const archive_basename = b.fmt("{s}-{s}{s}.zip", .{exe_name, triple, opt_suffix});
+            const archive_basename = b.fmt("{s}-{s}{s}.zip", .{exe_name, simplified_triple, opt_suffix});
             const zip_cmd = b.addSystemCommand(&.{
                 "zip", 
                 "-j", // Junk paths (store only the file, not dir structure)
@@ -281,7 +338,7 @@ fn setupTargetReleaseWithOptimize(
             ).step);
         },
         .macos, .linux => { // Assuming tar for Linux and macOS
-            const archive_basename = b.fmt("{s}-{s}{s}.tar.xz", .{exe_name, triple, opt_suffix});
+            const archive_basename = b.fmt("{s}-{s}{s}.tar.xz", .{exe_name, simplified_triple, opt_suffix});
             const tar_cmd = b.addSystemCommand(&.{
                 "tar",
                 "-cJf", // Create, use xz compression, specify archive file
