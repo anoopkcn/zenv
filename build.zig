@@ -280,10 +280,11 @@ fn setupTargetReleaseWithOptimize(
 
     switch (target.result.os.tag) {
         .macos, .linux => { // Assuming tar for Linux and macOS
-            const archive_basename = b.fmt("{s}-{s}{s}.tar.xz", .{exe_name, simplified_triple, opt_suffix});
+            // Create a more compatible archive format
+            const archive_basename = b.fmt("{s}-{s}{s}.tar.gz", .{exe_name, simplified_triple, opt_suffix});
             const tar_cmd = b.addSystemCommand(&.{
                 "tar",
-                "-cJf", // Create, use xz compression, specify archive file
+                "-czf", // Create, use gzip compression (more universal than xz)
             });
             const archive_path = tar_cmd.addOutputFileArg(archive_basename);
             tar_cmd.addArg("-C"); // Change directory before adding files

@@ -17,7 +17,7 @@ Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
 Example for Linux x86_64 machine:
 ```bash
-wget https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.xz
+curl -L "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.xz"
 ```
 
 Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)

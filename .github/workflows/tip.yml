@@ -67,6 +67,6 @@ jobs:
             
             **Note:** This release contains the latest code from the main branch and may be unstable.
             For stable releases, please use the versioned releases instead.
-          files: ./zig-out/releases/*.tar.xz
+          files: ./zig-out/releases/*.tar.gz  # Updated extension to match new archive format
           draft: false
           prerelease: true

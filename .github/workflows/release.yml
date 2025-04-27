@@ -29,7 +29,7 @@ jobs:
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
-          files: ./zig-out/releases/*.tar.xz  # Add all release archives
+          files: ./zig-out/releases/*.tar.gz  # Updated extension to match new archive format
           draft: false
           prerelease: false
           generate_release_notes: true
