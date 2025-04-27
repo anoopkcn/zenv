@@ -70,10 +70,10 @@ Example output:
 ```
 Available zenv environments:
 - test (ID: e66460f... Target: computer1 - My PyTorch environment for Computer1)
-  [Project: /p/project1/hai_matbind/chandran1/zenv/test]
+  [Project: /path/to/zenv/test]
   Full ID: e66460fc6eb7e1d133ca000d5e28abc66b16a3d0 (you can use the first 7+ characters)
-- my_env (ID: 4a422bf... Target: computer1 - Basic environment for Computer1)
-  [Project: /p/project1/hai_matbind/chandran1/zenv/test]
+- my_env (ID: 4a422bf... Target: computer2 - Basic environment for Computer2)
+  [Project: /path/to/zenv/my_env]
   Full ID: 4a422bfd015982bc2569ebacb45bb590d7xyz561 (you can use the first 7+ characters)
 Found 2 environment(s) for the current machine ('jrlogin07.jureca').
 ```
