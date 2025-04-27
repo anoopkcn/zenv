@@ -1,445 +1,604 @@
 const std = @import("std");
-const fs = std.fs;
-const mem = std.mem;
-const Allocator = mem.Allocator;
-
-const errors = @import("errors.zig");
-const ZenvError = errors.ZenvError;
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
-const ActiveConfig = config_module.ActiveConfig;
-const env_utils = @import("env_utils.zig");
-const process_utils = @import("process_utils.zig");
+const EnvironmentConfig = config_module.EnvironmentConfig;
+const errors = @import("errors.zig");
+const ZenvError = errors.ZenvError;
+const process = std.process;
+const fs = std.fs;
+const Allocator = std.mem.Allocator;
 
-const EnvInfo = struct {
-    name: []const u8,
-    target: ?[]const u8,
-    matches_current: bool,
-};
 
-fn doActivate(allocator: Allocator, config: *const ActiveConfig) !void {
-    const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
-    defer allocator.free(parent_dir_abs);
+// Common function to get and validate environment config
+fn getAndValidateEnvironment(
+    allocator: Allocator,
+    config: *const ZenvConfig,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) ?*const EnvironmentConfig {
+     if (args.len < 3) {
+         std.log.err("Missing environment name argument for command '{s}'", .{args[1]});
+         handleErrorFn(ZenvError.EnvironmentNotFound); // Or a new error like MissingArgument
+         return null;
+     }
+     const env_name = args[2];
 
-    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.env_name });
-    defer allocator.free(venv_path_abs);
+     const env_config = config.getEnvironment(env_name) orelse {
+         std.log.err("Environment '{s}' not found in configuration.", .{env_name});
+         handleErrorFn(ZenvError.EnvironmentNotFound);
+         return null;
+     };
 
-    const activate_sh_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
-    defer allocator.free(activate_sh_path);
+     // *** Crucial Validation ***
+     var hostname: []const u8 = undefined;
+     hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
+         handleErrorFn(err);
+         return null;
+     };
+     defer allocator.free(hostname); // Free hostname obtained from getHostname
 
-    const activate_sh_exists = (fs.cwd().access(activate_sh_path, .{}) catch null) != null;
+     // Check for hostname matching with improved logic
+     std.log.debug("Comparing hostname '{s}' with target machine '{s}'", .{hostname, env_config.target_machine});
 
-    const err_writer = std.io.getStdErr().writer();
+     // Enhanced hostname matching to handle different patterns
+     const hostname_matches = blk: {
+         // Check if hostname ends with ".target_machine" (domain-style matching)
+         const target = env_config.target_machine;
+         const domain_check = std.mem.concat(allocator, u8, &[_][]const u8{".", target}) catch {
+             // If concat fails, just do simple substring check
+             break :blk std.mem.indexOf(u8, hostname, target) != null;
+         };
+         defer allocator.free(domain_check);
 
-    if (activate_sh_exists) {
-        const out_writer = std.io.getStdOut().writer();
-        try out_writer.print("source {s}\n", .{activate_sh_path});
-    } else {
-        try err_writer.print("No activation script found for environment '{s}'\n", .{config.env_name});
-        try err_writer.print("Run 'zenv setup {s}' first to create the virtual environment\n", .{config.env_name});
-        return ZenvError.ConfigInvalid;
-    }
+         // Try exact match first
+         if (std.mem.eql(u8, hostname, target)) {
+             break :blk true;
+         }
+
+         // Try domain suffix match (e.g. hostname ends with ".jureca")
+         if (hostname.len >= domain_check.len) {
+             const suffix = hostname[hostname.len - domain_check.len..];
+             if (std.mem.eql(u8, suffix, domain_check)) {
+                 break :blk true;
+             }
+         }
+
+         // Fallback to substring match
+         break :blk std.mem.indexOf(u8, hostname, target) != null;
+     };
+
+     if (!hostname_matches) {
+         std.log.err("Current machine ('{s}') does not match target machine ('{s}') specified for environment '{s}'.", .{
+             hostname,
+             env_config.target_machine,
+             env_name,
+         });
+         // Maybe add a new error ZenvError.TargetMachineMismatch
+         handleErrorFn(ZenvError.ClusterNotFound); // Re-using for now
+         return null;
+     }
+
+     return env_config;
 }
 
-fn doSetup(allocator: Allocator, config: *const ActiveConfig) !void {
-    const parent_dir_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.parent_envs_dir });
-    defer allocator.free(parent_dir_abs);
-    const venv_path_abs = try fs.path.join(allocator, &[_][]const u8{ parent_dir_abs, config.env_name });
-    defer allocator.free(venv_path_abs);
-    const req_path_abs = try fs.path.resolve(allocator, &[_][]const u8{ config.config_base_dir, config.requirements_file });
-    defer allocator.free(req_path_abs);
 
-    std.log.info("Target venv path: {s}", .{venv_path_abs});
-    std.log.info("Requirements path: {s}", .{req_path_abs});
+pub fn handleSetupCommand(
+    allocator: Allocator,
+    config: *const ZenvConfig,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void, // Renamed for clarity
+) anyerror!void {
+    const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    const env_name = args[2]; // Safe now after check in getAndValidateEnvironment
 
-    fs.cwd().makePath(parent_dir_abs) catch |err| {
-        std.log.err("Failed to create parent directory '{s}': {s}", .{ parent_dir_abs, @errorName(err) });
-        return err;
-    };
-    fs.cwd().makePath(venv_path_abs) catch |err| {
-        std.log.err("Failed to create venv directory '{s}': {s}", .{ venv_path_abs, @errorName(err) });
-        return err;
-    };
+    std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, env_config.target_machine });
 
-    if (config.modules_to_load.items.len > 0) {
-        std.log.info("Loading modules: {s}", .{config.modules_to_load.items});
-        var cmd_parts = std.ArrayList(u8).init(allocator);
-        defer cmd_parts.deinit();
-        try cmd_parts.appendSlice("module load");
-        for (config.modules_to_load.items) |module_name| {
-            try cmd_parts.append(' ');
-            try cmd_parts.appendSlice(module_name);
+    // --- Automation Logic ---
+    // 1. Combine Dependencies:
+    //    - Start with env_config.dependencies.items
+    //    - If env_config.requirements_file != null, read that file and add its lines.
+    //    - Store the combined list (e.g., in an ArrayList).
+    var all_required_deps = std.ArrayList([]const u8).init(allocator);
+    defer all_required_deps.deinit(); // Assuming items are references or freed elsewhere
+
+    // First add all dependencies from the config
+    if (env_config.dependencies.items.len > 0) {
+        std.log.info("Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len});
+        for (env_config.dependencies.items) |dep| {
+            std.log.info("  - Config dependency: {s}", .{dep});
+            try all_required_deps.append(dep); // Let error propagate
         }
-        const result = process_utils.execAllowFail(allocator, &[_][]const u8{ "sh", "-c", cmd_parts.items }, null, .{}) catch |err| {
-            std.log.err("Failed to execute module load command: {s}", .{@errorName(err)});
-            return ZenvError.ProcessError;
+    } else {
+        std.log.info("No dependencies specified in configuration.", .{});
+    }
+    
+    // Then add dependencies from requirements file if it exists
+    if (env_config.requirements_file) |req_file| {
+        // Log the absolute path for debugging
+        var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
+            std.log.err("Failed to resolve absolute path for requirements file '{s}': {s}", 
+                       .{req_file, @errorName(err)});
+            abs_path_buf[0] = 0; // Empty string in case of error
+            return err;
         };
-        defer {
-            allocator.free(result.stdout);
-            allocator.free(result.stderr);
-        }
-        if (result.term != .Exited or result.term.Exited != 0) {
-            std.log.err("Module load command failed with status: {any}", .{result.term});
-            if (result.stderr.len > 0) {
-                std.log.err("Module load error output: {s}", .{result.stderr});
-            }
-            return ZenvError.ProcessError;
-        }
-        std.log.info("Modules loaded successfully.", .{});
-    } else {
-        std.log.info("No modules specified to load.", .{});
-    }
-
-    // --- Venv Creation TODO: make a uv version ---
-    std.log.info("Creating venv using Python: {s}", .{config.python_executable});
-    const venv_args = [_][]const u8{ config.python_executable, "-m", "venv", venv_path_abs };
-    try process_utils.runCommand(allocator, &venv_args, null);
-    std.log.info("Venv created at: {s}", .{venv_path_abs});
-
-    // --- Dependency installation using pip ---
-    const pip_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "bin", "pip" });
-    defer allocator.free(pip_path);
-
-    const req_file_exists = (fs.cwd().access(req_path_abs, .{}) catch null) != null;
-    std.log.debug("Checking if requirements file exists ('{s}'): {}", .{ req_path_abs, req_file_exists });
-
-    if (req_file_exists or config.dependencies.items.len > 0) {
-        if (config.dependencies.items.len > 0) {
-            std.log.info("Found {d} dependencies in config, combining with requirements file (if exists).", .{config.dependencies.items.len});
-            const all_deps_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "all_dependencies.txt" });
-            defer allocator.free(all_deps_path);
-
-            var deps_file = try fs.cwd().createFile(all_deps_path, .{});
-
-            errdefer deps_file.close();
-            const writer = deps_file.writer();
-
-            if (req_file_exists) {
-                std.log.debug("Reading requirements file: {s}", .{req_path_abs});
-                const req_content: ?[]const u8 = fs.cwd().readFileAlloc(allocator, req_path_abs, 1 * 1024 * 1024) catch |err| blk: {
-                    std.log.warn("Could not read requirements file '{s}': {s}. Skipping its content.", .{ req_path_abs, @errorName(err) });
-                    break :blk null;
-                };
-                if (req_content) |content| {
-                    defer allocator.free(content);
-                    try writer.writeAll(content);
-                    // Ensure newline after req file content only if content exists
-                    try writer.writeAll("\n");
-                }
-            }
-            std.log.debug("Adding dependencies from zenv.json config.", .{});
-            for (config.dependencies.items) |dep| {
-                try writer.writeAll(dep);
-                try writer.writeAll("\n");
-            }
-            // Must close file before pip reads it
-            deps_file.close();
-
-            std.log.info("Installing combined dependencies from: {s}", .{all_deps_path});
-            const pip_args = [_][]const u8{ pip_path, "install", "--upgrade", "-r", all_deps_path };
-            try process_utils.runCommand(allocator, &pip_args, null);
-
-        } else { // Only requirements file exists
-            std.log.info("Installing requirements from: {s}", .{req_path_abs});
-            const pip_args = [_][]const u8{ pip_path, "install", "--upgrade", "-r", req_path_abs };
-            try process_utils.runCommand(allocator, &pip_args, null);
-        }
-        std.log.info("Dependencies installed.", .{});
-    } else {
-        std.log.info("Requirements file '{s}' not found and no dependencies in config, skipping pip install.", .{req_path_abs});
-    }
-
-    // --- Custom Setup Commands ---
-    if (config.custom_setup_commands.items.len > 0) {
-        std.log.info("Running custom setup commands...", .{});
-        for (config.custom_setup_commands.items) |cmd_str| {
-            std.log.debug("Executing custom command: {s}", .{cmd_str}); // Use log.debug
-            var parts = std.ArrayList([]const u8).init(allocator);
-            // Use errdefer for cleanup in case of error during loop
-            errdefer parts.deinit();
-            var iter = mem.splitScalar(u8, cmd_str, ' ');
-            while (iter.next()) |part| {
-                if (part.len > 0) try parts.append(part);
-            }
-            if (parts.items.len > 0) {
-                try process_utils.runCommand(allocator, parts.items, null);
-            }
-            // Deinit after loop finishes normally
-            parts.deinit();
-        }
-        std.log.info("Custom setup commands finished.", .{});
-    }
-
-    // --- Activate Script Generation ---
-    std.log.info("Creating activate.sh script...", .{});
-    const activate_path = try fs.path.join(allocator, &[_][]const u8{ venv_path_abs, "activate.sh" });
-    defer allocator.free(activate_path);
-
-    var activate_file = try fs.cwd().createFile(activate_path, .{ .mode = 0o755 });
-    defer activate_file.close();
-    const writer = activate_file.writer();
-
-    try writer.print(
-        \\#!/bin/bash
-        \\# Generated by zenv for environment: {s} (target: {s})
-        \\
-    , .{ config.env_name, config.target_cluster });
-
-    if (config.modules_to_load.items.len > 0) {
-        try writer.print("# Load required modules\n", .{});
-        try writer.print("module purge 2>/dev/null\n", .{});
-        for (config.modules_to_load.items) |module_name| {
-            try writer.print("module load {s}\n", .{module_name});
-        }
-        try writer.print("\n", .{});
-    }
-
-    try writer.print(
-        \\# Activate the virtual environment
-        \\SCRIPT_DIR=$(cd -- "$(dirname -- "${{BASH_SOURCE[0]:-${{(%):-%x}}}}")" &> /dev/null && pwd)
-        \\VENV_DIR="${{SCRIPT_DIR}}"
-        \\source "${{VENV_DIR}}"/bin/activate
-        \\
-    , .{});
-
-    if (config.custom_activate_vars.count() > 0) {
-        try writer.print("# Set custom environment variables\n", .{});
-        var iter = config.custom_activate_vars.iterator();
-        while (iter.next()) |entry| {
-            // Basic shell escaping for the value
-            var escaped_value = std.ArrayList(u8).init(allocator);
-            defer escaped_value.deinit();
-            for (entry.value_ptr.*) |char| {
-                 switch (char) {
-                     '\'' => try escaped_value.appendSlice("'\\''"),
-                     else => try escaped_value.append(char),
-                 }
-            }
-            try writer.print("export {s}='{s}'\n", .{ entry.key_ptr.*, escaped_value.items });
-        }
-        try writer.print("\n", .{});
-    }
-
-    if (config.dependencies.items.len > 0) {
-        try writer.print("# This environment includes dependencies from zenv.json\n", .{});
-        // Optional: List dependencies in comments
-    }
-
-    std.log.info("Created activate.sh at: {s}", .{activate_path});
-    std.log.info("Usage: source {s}", .{activate_path});
-}
-
-fn doListConfiguredEnvs(allocator: Allocator, config: *const ZenvConfig) !void {
-    const current_cluster = env_utils.getClusterName(allocator) catch |err| {
-        std.log.warn("Could not get cluster name for list comparison: {s}. Assuming no matches.", .{@errorName(err)});
-        if (err == ZenvError.MissingHostname) return ZenvError.MissingHostname;
-        return err;
-    };
-    defer allocator.free(current_cluster);
-
-    var envs = std.ArrayList(EnvInfo).init(allocator);
-    defer {
-        for (envs.items) |item| {
-            if (item.target) |target| allocator.free(target);
-        }
-        envs.deinit();
-    }
-
-    var env_iter = config.environments.iterator();
-    while (env_iter.next()) |entry| {
-        const env_name = entry.key_ptr.*;
-        const env_cfg = entry.value_ptr.*;
-        var target_dupe: ?[]const u8 = null;
-        var matches_current = false;
-        if (env_cfg.target) |target| {
-            target_dupe = try allocator.dupe(u8, target);
-            matches_current = mem.eql(u8, target, current_cluster);
-        }
-        try envs.append(.{
-            .name = env_name,
-            .target = target_dupe,
-            .matches_current = matches_current,
-        });
-    }
-
-    std.sort.heap(EnvInfo, envs.items, {}, struct {
-        pub fn lessThan(_: void, a: EnvInfo, b: EnvInfo) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lessThan);
-
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("\nAvailable environments in {s}:\n\n", .{config.config_base_dir});
-    var matching_count: usize = 0;
-    for (envs.items) |item| {
-        if (item.matches_current) matching_count += 1;
-    }
-
-    if (envs.items.len == 0) {
-        try stdout.print("No environments found in configuration.\n", .{});
-    } else {
-        try stdout.print("NAME\tTARGET\tMATCHES CURRENT\n", .{});
-        try stdout.print("----\t------\t--------------\n", .{});
-        for (envs.items) |item| {
-            try stdout.print("{s}\t{s}\t{s}\n", .{
-                item.name,
-                item.target orelse "(any)",
-                if (item.matches_current) "YES" else "no",
-            });
-        }
-    }
-
-    try stdout.print("\nTotal: {d} environment(s) defined in config.\n", .{envs.items.len});
-    if (matching_count > 0) {
-        try stdout.print("Found {d} environment(s) matching your current cluster '{s}'\n", .{matching_count, current_cluster});
-    } else {
-        try stdout.print("No environments explicitly target your current cluster '{s}'\n", .{current_cluster});
-    }
-}
-
-fn doListExistingEnvs(allocator: Allocator, config: *const ZenvConfig) !void {
-    const parent_dir_abs = blk: {
-        const parent_envs_dir_rel = config.common.parent_envs_dir;
-        const config_base_dir = config.config_base_dir;
-        const parent_dir_maybe_rel = fs.path.join(allocator, &[_][]const u8{ config_base_dir, parent_envs_dir_rel }) catch |err| {
-             std.log.err("Failed to join path for parent env dir: {s}", .{@errorName(err)});
-             return ZenvError.PathResolutionFailed;
-        };
-        defer allocator.free(parent_dir_maybe_rel);
-        break :blk fs.cwd().realpathAlloc(allocator, parent_dir_maybe_rel) catch |err| {
-            if (err == error.FileNotFound or err == error.PathNotFound) {
-                 break :blk null;
-            }
-             std.log.err("Failed to resolve real path for parent env dir '{s}': {s}", .{ parent_dir_maybe_rel, @errorName(err)});
-             return ZenvError.PathResolutionFailed;
-        };
-    } orelse {
-        std.io.getStdOut().writer().print("Environment parent directory not found. No existing environments.\n", .{}) catch {};
-        return; // Not an application error
-    };
-    defer allocator.free(parent_dir_abs);
-
-    std.log.debug("Looking for existing environments in absolute path: {s}", .{parent_dir_abs});
-
-    var dir = fs.openDirAbsolute(parent_dir_abs, .{ .iterate = true }) catch |err| {
-        std.log.err("Error opening directory '{s}': {s}", .{parent_dir_abs, @errorName(err)});
-        if (err == error.FileNotFound or err == error.PathNotFound) {
-             std.io.getStdOut().writer().print(
-                \\Environment directory '{s}' does not exist or is not accessible.
-                \\No existing environments found.
-            , .{parent_dir_abs}) catch {};
+        std.log.info("Reading dependencies from requirements file: '{s}' (absolute path: '{s}')", 
+                   .{req_file, abs_path});
+        
+        // Try to read the file
+        std.log.info("Verifying requirements file exists and is readable...", .{});
+        const req_file_stat = fs.cwd().statFile(req_file) catch |err| {
+            std.log.err("Failed to stat requirements file '{s}': {s}", .{req_file, @errorName(err)});
+            handleErrorFn(ZenvError.PathResolutionFailed);
             return;
+        };
+        std.log.info("Requirements file size: {d} bytes", .{req_file_stat.size});
+        
+        // Now read the file content
+        const req_content = fs.cwd().readFileAlloc(allocator, req_file, 100 * 1024) catch |err| {
+            std.log.err("Failed to read requirements file '{s}': {s}", .{req_file, @errorName(err)});
+            handleErrorFn(ZenvError.PathResolutionFailed);
+            return;
+        };
+        defer allocator.free(req_content);
+        
+        std.log.info("Successfully read requirements file ({d} bytes). Parsing dependencies...", .{req_content.len});
+
+        var lines = std.mem.splitScalar(u8, req_content, '\n');
+        var req_file_dep_count: usize = 0;
+        
+        while (lines.next()) |line| {
+            const trimmed_line = std.mem.trim(u8, line, " \t\r");
+            if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
+                // Skip empty lines and comments
+                std.log.debug("Skipping comment or empty line: '{s}'", .{trimmed_line});
+                continue; 
+            }
+            
+            // Log each dependency being added
+            std.log.info("  - Requirements file dependency: {s}", .{trimmed_line});
+            
+            // Create a duplicate of the trimmed line to ensure it persists
+            const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
+            errdefer allocator.free(trimmed_dupe);
+            
+            // Add the dependency
+            try all_required_deps.append(trimmed_dupe);
+            req_file_dep_count += 1;
         }
-        return ZenvError.IoError;
-    };
-    defer dir.close();
-
-    var env_dirs = std.ArrayList([]const u8).init(allocator);
-    defer {
-        for (env_dirs.items) |item| allocator.free(item);
-        env_dirs.deinit();
+        
+        if (req_file_dep_count > 0) {
+            std.log.info("Added {d} dependencies from requirements file", .{req_file_dep_count});
+        } else {
+            std.log.warn("No valid dependencies found in requirements file", .{});
+        }
+    } else {
+        std.log.info("No requirements file specified in configuration.", .{});
     }
+    
+    std.log.info("Total combined dependencies: {d}", .{all_required_deps.items.len});
 
-    var iter = dir.iterate();
-    while (iter.next() catch |err| {
-        std.log.warn("Error reading directory entry in '{s}': {s}. Aborting list.", .{ parent_dir_abs, @errorName(err) });
-        return err; // Return the error instead of trying to continue
-    }) |entry| {
-        if (entry.kind == .directory) {
-            const env_path = fs.path.join(allocator, &[_][]const u8{parent_dir_abs, entry.name}) catch |e| {
-                 std.log.warn("Failed to join path for dir entry '{s}': {s}. Skipping.", .{ entry.name, @errorName(e) });
-                 continue;
-            };
-            defer allocator.free(env_path);
-            const activate_path = fs.path.join(allocator, &[_][]const u8{env_path, "activate.sh"}) catch |e| {
-                 std.log.warn("Failed to join path for activate script in '{s}': {s}. Skipping.", .{ entry.name, @errorName(e) });
-                 continue;
-            };
-            defer allocator.free(activate_path);
+    // Create sc_venv directory if it doesn't exist
+    try createScVenvDir(allocator, env_name);
 
-            if (fs.cwd().access(activate_path, .{}) catch null) |_| {
-                try env_dirs.append(try allocator.dupe(u8, entry.name));
+    // Create and run a single setup script that handles all steps
+    try setupEnvironment(allocator, env_config, env_name, all_required_deps.items);
+
+    // Create an activation script
+    try createActivationScript(allocator, env_config, env_name);
+
+    std.log.info("Environment '{s}' setup complete.", .{env_name});
+    // --- End Automation Logic ---
+}
+
+fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
+    std.log.info("Creating virtual environment directory for '{s}'...", .{env_name});
+
+    // Create base sc_venv directory if it doesn't exist
+    try fs.cwd().makePath("sc_venv");
+
+    // Create environment-specific directory
+    const env_dir_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}", .{env_name});
+    defer allocator.free(env_dir_path);
+
+    try fs.cwd().makePath(env_dir_path);
+}
+
+fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8) !void {
+    std.log.info("Setting up environment '{s}'...", .{env_name});
+    
+    // Create requirements file from scratch with validated dependencies
+    const req_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/requirements.txt", .{env_name});
+    defer allocator.free(req_path);
+
+    // Display dependencies for debugging
+    if (deps.len == 0) {
+        std.log.warn("No dependencies provided to setupEnvironment", .{});
+    } else {
+        std.log.info("Processing {d} dependencies before validation:", .{deps.len});
+        for (deps, 0..) |dep, i| {
+            if (dep.len > 0) {
+                std.log.info("  [{d}] '{s}'", .{i + 1, dep});
             } else {
-                 std.log.debug("Directory '{s}' found, but missing '{s}'. Skipping.", .{entry.name, "activate.sh"});
+                std.log.warn("  [{d}] Empty dependency", .{i + 1});
             }
         }
     }
 
-    std.sort.heap([]const u8, env_dirs.items, {}, struct {
-        pub fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    // Create a clean set of valid dependencies
+    var valid_deps = std.ArrayList([]const u8).init(allocator);
+    defer valid_deps.deinit();
+
+    // Create a HashMap to track seen package names to avoid duplicates
+    var seen_packages = std.StringHashMap(bool).init(allocator);
+    defer seen_packages.deinit();
+
+    // Only accept properly formatted Python package requirements
+    // Pattern: package_name[>=<~=]=version
+    std.log.info("Validating dependencies for '{s}':", .{env_name});
+    for (deps) |dep| {
+        if (dep.len == 0) {
+            std.log.warn("Skipping empty dependency", .{});
+            continue;
         }
-    }.lessThan);
+    
+        // Skip deps that look like file paths
+        if (std.mem.indexOf(u8, dep, "/") != null) {
+            std.log.warn("Skipping dependency that looks like a path: '{s}'", .{dep});
+            continue;
+        }
+    
+        // Skip deps without a valid package name (only allow common Python package name chars)
+        var valid = true;
+        var has_alpha = false;
+        for (dep) |c| {
+            // Allow alphanumeric, hyphen, underscore, dot, and comparison operators
+            if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')) {
+                has_alpha = true;
+            } else if (!((c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or 
+                        c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']')) {
+                valid = false;
+                break;
+            }
+        }
+    
+        if (!valid or !has_alpha) {
+            std.log.warn("Skipping invalid dependency: '{s}'", .{dep});
+            continue;
+        }
+        
+        // Extract the package name to check for duplicates
+        var package_name: []const u8 = undefined;
+        if (std.mem.indexOfAny(u8, dep, "<>=~")) |op_idx| {
+            package_name = std.mem.trim(u8, dep[0..op_idx], " ");
+        } else if (std.mem.indexOfScalar(u8, dep, '[')) |bracket_idx| {
+            package_name = std.mem.trim(u8, dep[0..bracket_idx], " ");
+        } else {
+            // Just the package name without version
+            package_name = std.mem.trim(u8, dep, " ");
+        }
+        
+        // Check if we've already seen this package
+        const is_duplicate = seen_packages.get(package_name) != null;
+        if (is_duplicate) {
+            std.log.warn("Skipping duplicate package '{s}' with value '{s}' (already included in dependencies)", 
+                       .{package_name, dep});
+            continue;
+        }
+        
+        // Accept this dependency as valid
+        std.log.info("Including dependency: '{s}' (package: '{s}')", .{dep, package_name});
+        try valid_deps.append(dep);
+        try seen_packages.put(package_name, true);
+    }
+
+    // Write the validated dependencies to the requirements file
+    std.log.info("Writing {d} validated dependencies to requirements file", .{valid_deps.items.len});
+    var req_file = try fs.cwd().createFile(req_path, .{});
+    defer req_file.close(); // Only defer once
+
+    if (valid_deps.items.len == 0) {
+        std.log.warn("No valid dependencies found! Only writing a comment to requirements file.", .{});
+        try req_file.writeAll("# No valid dependencies found\n");
+    } else {
+        for (valid_deps.items) |dep| {
+            try req_file.writer().print("{s}\n", .{dep});
+            std.log.debug("Wrote dependency to file: {s}", .{dep});
+        }
+    }
+
+    // Flush and verify requirements file content
+    try req_file.sync();
+    std.log.info("Created requirements file at: {s} with {d} validated dependencies", .{req_path, valid_deps.items.len});
+
+    // Read and display the file for debugging
+    const req_file_handle = try fs.cwd().openFile(req_path, .{});
+    defer req_file_handle.close();
+    const req_content_debug = try req_file_handle.readToEndAlloc(allocator, 100 * 1024);
+    defer allocator.free(req_content_debug);
+    std.log.info("Requirements file contents:\n{s}", .{req_content_debug});
+    std.log.info("Requirements file contains {d} bytes", .{req_content_debug.len});
+
+    // Generate setup script
+    const script_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/setup_env.sh", .{env_name});
+    defer allocator.free(script_path);
+
+    var script_content = std.ArrayList(u8).init(allocator);
+    defer script_content.deinit();
+
+    // Script header
+    try script_content.appendSlice("#!/bin/sh\n");
+    try script_content.appendSlice("set -e\n");  // Exit on error
+    try script_content.writer().print("\n# Setup script for '{s}' environment\n\n", .{env_name});
+
+    // Step 1: Unload all modules
+    try script_content.appendSlice("echo '==> Step 1: Purging all modules'\n");
+    try script_content.appendSlice("module --force purge\n\n");
+
+    // Step 2: Load required modules
+    try script_content.appendSlice("echo '==> Step 2: Loading required modules'\n");
+    for (env_config.modules.items) |module_name| {
+        try script_content.writer().print("module load {s}\n", .{module_name});
+    }
+    try script_content.appendSlice("\n");
+
+    // Step 3: Create virtual environment
+    try script_content.appendSlice("echo '==> Step 3: Creating Python virtual environment'\n");
+    try script_content.writer().print("{s} -m venv sc_venv/{s}/venv\n\n", .{env_config.python_executable, env_name});
+
+    // Step 4: Activate and install dependencies
+    try script_content.appendSlice("echo '==> Step 4: Activating environment and installing dependencies'\n");
+    try script_content.writer().print("source $(pwd)/sc_venv/{s}/venv/bin/activate\n", .{env_name});
+    try script_content.appendSlice("python -m pip install --upgrade pip\n");
+    try script_content.writer().print("python -m pip install -r $(pwd)/{s}\n\n", .{req_path});
+
+    // Step 5: Run custom commands if any
+    if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
+        try script_content.appendSlice("echo '==> Step 5: Running custom setup commands'\n");
+        for (env_config.setup_commands.?.items) |cmd| {
+            try script_content.writer().print("{s}\n", .{cmd});
+        }
+        try script_content.appendSlice("\n");
+    }
+
+    // Step 6: Completion message
+    try script_content.appendSlice("echo '==> Setup completed successfully!'\n");
+    try script_content.writer().print("echo 'To activate this environment, run: source $(pwd)/sc_venv/{s}/activate.sh'\n", .{env_name});
+
+    // Write script to file
+    var script_file = try fs.cwd().createFile(script_path, .{});
+    defer script_file.close();
+    try script_file.writeAll(script_content.items);
+    try script_file.chmod(0o755);  // Make executable
+
+    // Execute script
+    std.log.info("Running setup script...", .{});
+    const argv = [_][]const u8{"/bin/sh", script_path};
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+
+    // Read output
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    defer allocator.free(stdout);
+    const stderr = try child.stderr.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    defer allocator.free(stderr);
+
+    // Always print output, regardless of success or failure
+    if (stdout.len > 0) {
+        std.io.getStdOut().writer().print("\n----- Script Output -----\n{s}\n", .{stdout}) catch {};
+    }
+    if (stderr.len > 0) {
+        std.io.getStdErr().writer().print("\n----- Script Errors -----\n{s}\n", .{stderr}) catch {};
+    }
+
+    const term = try child.wait();
+    if (term != .Exited or term.Exited != 0) {
+        std.log.err("Setup script failed with exit code: {d}", .{term.Exited});
+    
+        // Display the content of the setup script for debugging
+        std.log.info("Displaying setup script content for debugging:", .{});
+        try fs.cwd().access(script_path, .{}); // Check if file still exists
+        const script_content_debug = try fs.cwd().readFileAlloc(allocator, script_path, 1024 * 1024);
+        defer allocator.free(script_content_debug);
+        std.io.getStdOut().writer().print("\n----- Setup Script Content -----\n{s}\n-----------------------------\n", .{script_content_debug}) catch {};
+    
+        return ZenvError.ProcessError;
+    }
+
+    std.log.info("Environment setup completed successfully.", .{});
+}
+
+pub fn handleActivateCommand(
+    allocator: Allocator,
+    config: *const ZenvConfig,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+     const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+     const env_name = args[2];
+
+     const stdout = std.io.getStdOut().writer();
+
+     stdout.print("# To activate environment '{s}', run the following commands:\n", .{env_name}) catch {};
+     stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
+     stdout.print("# Option 1: Use the activation script (recommended)\n", .{}) catch {};
+     stdout.print("source $(pwd)/sc_venv/{s}/activate.sh\n\n", .{env_name}) catch {};
+
+     stdout.print("# Option 2: Manual activation\n", .{}) catch {};
+     // Suggest purging first for clean state
+     stdout.print("module --force purge\n", .{}) catch {};
+     // Print module load commands
+     for (env_config.modules.items) |module_name| {
+         stdout.print("module load {s}\n", .{module_name}) catch {};
+     }
+
+     // Print virtual environment activation
+     stdout.print("source $(pwd)/sc_venv/{s}/venv/bin/activate\n", .{env_name}) catch {};
+
+     // Print custom environment variables
+     var vars_iter = env_config.custom_activate_vars.iterator();
+     while (vars_iter.next()) |entry| {
+         // Basic shell escaping (might need more robust escaping for complex values)
+         const escaped_value = entry.value_ptr.*; // TODO: Implement proper shell escaping if needed
+         stdout.print("export {s}='{s}'\n", .{entry.key_ptr.*, escaped_value}) catch {};
+     }
+     stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
+     if (env_config.description) |desc| {
+        stdout.print("# Description: {s}\n", .{desc}) catch {};
+     }
+     stdout.print("# Target Machine: {s}\n", .{env_config.target_machine}) catch {};
+}
+
+fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8) !void {
+    std.log.info("Creating activation script for '{s}'...", .{env_name});
+
+    // Generate the activation script
+    const script_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/activate.sh", .{env_name});
+    defer allocator.free(script_path);
+
+    var script_content = std.ArrayList(u8).init(allocator);
+    defer script_content.deinit();
+
+    try script_content.appendSlice("#!/bin/sh\n");
+    try script_content.writer().print("\n# This script activates the '{s}' environment\n\n", .{env_name});
+
+    // Module purge and loading
+    try script_content.appendSlice("# Unload all modules\n");
+    try script_content.appendSlice("module --force purge\n\n");
+
+    try script_content.appendSlice("# Load required modules\n");
+    for (env_config.modules.items) |module_name| {
+        try script_content.writer().print("module load {s}\n", .{module_name});
+    }
+    try script_content.appendSlice("\n");
+
+    // Virtual environment activation
+    try script_content.appendSlice("# Activate the Python virtual environment\n");
+    try script_content.appendSlice("source $(dirname \"$0\")/venv/bin/activate\n\n");
+
+    // Custom environment variables
+    if (env_config.custom_activate_vars.count() > 0) {
+        try script_content.appendSlice("# Set custom environment variables\n");
+        var vars_iter = env_config.custom_activate_vars.iterator();
+        while (vars_iter.next()) |entry| {
+            try script_content.writer().print("export {s}=\"{s}\"\n", .{entry.key_ptr.*, entry.value_ptr.*});
+        }
+        try script_content.appendSlice("\n");
+    }
+
+    // Print success message
+    if (env_config.description) |desc| {
+        try script_content.writer().print("echo \"Environment '{s}' activated: {s}\"\n", .{env_name, desc});
+    } else {
+        try script_content.writer().print("echo \"Environment '{s}' activated\"\n", .{env_name});
+    }
+
+    // Create a function to deactivate
+    try script_content.appendSlice("\n# Add deactivate_all function to completely deactivate\n");
+    try script_content.appendSlice("deactivate_all() {\n");
+    try script_content.appendSlice("  # First run Python's deactivate\n");
+    try script_content.appendSlice("  deactivate\n");
+    try script_content.appendSlice("  # Then unset any custom environment variables\n");
+    var vars_iter = env_config.custom_activate_vars.iterator();
+    while (vars_iter.next()) |entry| {
+        try script_content.writer().print("  unset {s}\n", .{entry.key_ptr.*});
+    }
+    try script_content.appendSlice("  # Unset this function\n");
+    try script_content.appendSlice("  unset -f deactivate_all\n");
+    try script_content.appendSlice("  echo \"Environment fully deactivated\"\n");
+    try script_content.appendSlice("}\n");
+
+    // Write script to file
+    var script_file = try fs.cwd().createFile(script_path, .{});
+    defer script_file.close();
+    try script_file.writeAll(script_content.items);
+    try script_file.chmod(0o755);  // Make executable
+
+    std.log.info("Activation script created at sc_venv/{s}/activate.sh", .{env_name});
+}
+
+pub fn handleListCommand(
+    allocator: Allocator,
+    config: *const ZenvConfig,
+    args: [][]const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    // _ = allocator; // Not using allocator directly here yet - Used later
+    // _ = handleErrorFn; // Not using error handling here yet - Used later
 
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("\nExisting environments found in {s}:\n\n", .{parent_dir_abs});
+    const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
 
-    if (env_dirs.items.len == 0) {
-        try stdout.print("No existing environments found. Run 'zenv setup [env_name]' first.\n", .{});
-    } else {
-        for (env_dirs.items) |name| {
-            try stdout.print("- {s}\n", .{name});
-        }
-        try stdout.print("\nTotal: {d} existing environment(s)\n", .{env_dirs.items.len});
-    }
-    try stdout.print("\nUse 'zenv list --all' to see all environments defined in the configuration.\n", .{});
-}
-
-const CommandError = ZenvError || error{ ArgsError };
-
-pub fn handleSetupCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
-    const resolved_env_name = env_utils.resolveEnvironmentName(allocator, config, args, "setup") catch |err| {
-        handleError(err);
-        return; // Exit function on error
-    };
-    var active_config = config_module.createActiveConfig(allocator, config, resolved_env_name) catch |err| {
-        handleError(err);
-        return;
-    };
-    defer active_config.deinit(); // Deinit active config when setup scope ends
-
-    doSetup(allocator, &active_config) catch |err| {
-        handleError(err);
-        return;
-    };
-    std.log.info("Setup completed successfully for environment '{s}'.", .{active_config.env_name});
-}
-
-pub fn handleActivateCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
-    const resolved_env_name = env_utils.resolveEnvironmentName(allocator, config, args, "activate") catch |err| {
-        handleError(err);
-        return;
-    };
-    var active_config = config_module.createActiveConfig(allocator, config, resolved_env_name) catch |err| {
-        handleError(err);
-        return;
-    };
-    defer active_config.deinit(); // Deinit active config when activate scope ends
-
-    doActivate(allocator, &active_config) catch |err| {
-        handleError(err);
-        return;
-    };
-}
-
-pub fn handleListCommand(allocator: Allocator, config: *const ZenvConfig, args: []const []const u8, handleError: *const fn(anyerror) void) void {
-    var show_all = false;
-    for (args[1..]) |arg| {
-        if (mem.eql(u8, arg, "--all")) {
-            show_all = true;
-            break;
-        }
-    }
-
-    if (show_all) {
-        doListConfiguredEnvs(allocator, config) catch |err| {
-            handleError(err);
-            return;
+    var current_hostname: ?[]const u8 = null;
+    if (!list_all) {
+        // Only get hostname if we need to filter
+        current_hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
+            std.log.warn("Could not determine current hostname for filtering: {s}", .{@errorName(err)});
+            // Proceed to list all if hostname fails? Or error out? For now, list all.
+             handleErrorFn(err); // Report error
+             return; // Exit if hostname is required for filtering
         };
-    } else {
-        doListExistingEnvs(allocator, config) catch |err| {
-            handleError(err);
-            return;
-        };
+       defer if (current_hostname) |h| allocator.free(h);
     }
+
+
+    stdout.print("Available zenv environments:\n", .{}) catch {};
+    stdout.print("----------------------------\n", .{}) catch {};
+
+    var iter = config.environments.iterator();
+    var count: usize = 0;
+    while (iter.next()) |entry| {
+        const env_name = entry.key_ptr.*;
+        const env_config = entry.value_ptr.*;
+
+        // Filter by target machine if not '--all' and hostname was found
+        if (!list_all and current_hostname != null) {
+             if (!std.mem.eql(u8, current_hostname.?, env_config.target_machine)) {
+                 continue; // Skip environment if target machine doesn't match
+             }
+        }
+
+        // Print environment name and target machine
+        stdout.print("- {s} (Target: {s}", .{ env_name, env_config.target_machine}) catch {};
+        // Optionally print description
+        if (env_config.description) |desc| {
+            stdout.print(" - {s}", .{desc}) catch {};
+        }
+        stdout.print(")\n", .{}) catch {};
+        count += 1;
+    }
+     stdout.print("----------------------------\n", .{}) catch {};
+      if (count == 0) {
+          if (!list_all and current_hostname != null) {
+              stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all configured environments.\n", .{current_hostname.?}) catch {};
+          } else {
+              stdout.print("No environments found in the configuration file.\n", .{}) catch {};
+          }
+      } else {
+          if (!list_all and current_hostname != null) {
+              stdout.print("Found {d} environment(s) for the current machine ('{s}').\n", .{count, current_hostname.?}) catch {};
+          } else {
+              stdout.print("Found {d} environment(s) total.\n", .{count}) catch {};
+          }
+      }
 }
+
+// Helper function placeholder for shell escaping (replace with robust implementation)
+// fn escapeForShell(allocator: Allocator, input: []const u8) ![]const u8 {
+//     // Basic example: replace single quotes
+//     // A real implementation needs to handle various special characters
+//     var escaped = ArrayList(u8).init(allocator);
+//     defer escaped.deinit();
+//     try escaped.append('\'');
+//     for (input) |char| {
+//         if (char == '\'') {
+//             try escaped.appendSlice("'\\\''"); // Replace ' with '\''
+//         } else {
+//             try escaped.append(char);
+//         }
+//     }
+//      try escaped.append('\'');
+//     return escaped.toOwnedSlice();
+// }

@@ -1,11 +1,16 @@
+// zenv/src/main.zig (Relevant parts)
+
 const std = @import("std");
-const options = @import("options");
+const options = @import("options"); // Assuming this still exists for version
 const process = std.process;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const config_module = @import("config.zig");
 const commands = @import("commands.zig");
+const Allocator = std.mem.Allocator;
 
+
+// ... Command enum definition ... (no changes needed here)
 const Command = enum {
     setup,
     activate,
@@ -23,7 +28,7 @@ const Command = enum {
     }
 };
 
-
+// ... printVersion ... (no changes needed)
 fn printVersion() void {
     std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
         std.log.err("Error printing version: {s}", .{@errorName(err)});
@@ -32,18 +37,28 @@ fn printVersion() void {
 
 
 fn printUsage() void {
+    // Updated Usage message
     const usage = comptime
-        \\Usage: zenv <command>
+        \\Usage: zenv <command> [environment_name] [--all]
+        \\
+        \\Manages environments based on zenv.json configuration.
         \\
         \\Commands:
-        \\  setup [env_name]     Set up a virtual environment. If env_name is omitted,
-        \\                       it will try to auto-detect based on hostname.
-        \\  activate [env_name]  Print instructions to activate an environment. If env_name
-        \\                       is omitted, it will try to auto-detect based on hostname.
-        \\  list                 List existing environments that have been set up.
-        \\  list --all           List all available environments from the config file.
-        \\  version, -v, --version  Print the zenv version.
-        \\  help                 Show this help message.
+        \\  setup <env_name>       Set up the specified environment for the current machine.
+        \\                         Creates a Python virtual environment in sc_venv/<env_name>/.
+        \\                         Checks if current machine matches env_name's target_machine.
+        \\  activate <env_name>    Print shell commands to activate the specified environment.
+        \\                         Shows two options: using the activation script or manual steps.
+        \\                         Checks if current machine matches env_name's target_machine.
+        \\  list                   List environments configured for the current machine.
+        \\  list --all             List all environments defined in the configuration file.
+        \\  version, -v, --version Print the zenv version.
+        \\  help, --help           Show this help message.
+        \\
+        \\Environment names (e.g., 'pytorch-gpu-jureca') are defined in zenv.json.
+        \\
+        \\To activate an environment after setup:
+        \\  source $(pwd)/sc_venv/<env_name>/activate.sh
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
@@ -55,10 +70,22 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const args = try process.argsAlloc(allocator);
+    // Allocate args properly now for command handlers that might need ownership
+    const args_owned = try process.argsAlloc(allocator);
+    // Defer freeing args_owned *after* potential early exits and config parsing
+    // defer process.argsFree(allocator, args_owned); // Moved lower
 
-    const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
+    // Convert [][]u8 to [][]const u8
+    const args_const = try allocator.alloc([]const u8, args_owned.len);
+    for (args_owned, 0..) |arg, i| {
+        args_const[i] = arg; // Implicit cast from []u8 to []const u8 happens here
+    }
+    // No need to free args_const separately, it uses the arena allocator
 
+    // Command parsing logic - Use args_const for reading, args_owned for potential modification/freeing later
+    const command: Command = if (args_const.len < 2) .help else Command.fromString(args_const[1]);
+
+    // Handle simple commands directly
     switch (command) {
         .help, .@"--help" => {
             printUsage();
@@ -68,49 +95,88 @@ pub fn main() anyerror!void {
             printVersion();
             process.exit(0);
         },
+        // Let other commands proceed to config parsing
         .setup, .activate, .list, .unknown => {},
     }
 
-    const config_path = "zenv.json";
+    const config_path = "zenv.json"; // Keep config path definition
 
+    // Define error handler
     const handleError = struct {
         pub fn func(err: anyerror) void {
             const stderr = std.io.getStdErr().writer();
-            stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-            switch (@as(ZenvError, @errorCast(err))) {
-                ZenvError.ConfigFileNotFound => stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {},
-                ZenvError.ClusterNotFound => stderr.print(" -> Target cluster doesn't match current hostname or config target mismatch.\n", .{}) catch {},
-                ZenvError.EnvironmentNotFound => stderr.print(" -> Environment not found or auto-detection failed. Check name or specify explicitly.\n", .{}) catch {},
-                ZenvError.JsonParseError => stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {},
-                ZenvError.ConfigInvalid => stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types.\n", .{config_path}) catch {},
-                ZenvError.ProcessError => stderr.print(" -> An external command failed. See output above for details.\n", .{}) catch {},
-                ZenvError.MissingHostname => stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for cluster detection.\n", .{}) catch {},
-                ZenvError.PathResolutionFailed => stderr.print(" -> Failed to resolve a required file path.\n", .{}) catch {},
-                else => {
-                    stderr.print(" -> Unexpected error details: {s}\n", .{@errorName(err)}) catch {};
-                },
+            if (@errorReturnTrace()) |trace| {
+                 // Check if it's a known ZenvError type
+                 switch (err) {
+                     ZenvError.ConfigFileNotFound => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
+                     },
+                     ZenvError.ClusterNotFound => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
+                     },
+                     ZenvError.EnvironmentNotFound => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Environment name not found in configuration or argument missing.\n", .{}) catch {};
+                     },
+                     ZenvError.JsonParseError => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {};
+                     },
+                     ZenvError.ConfigInvalid => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
+                     },
+                     ZenvError.ProcessError => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> An external command (module/pip/sh) failed. See output above for details.\n", .{}) catch {};
+                     },
+                     ZenvError.MissingHostname => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
+                     },
+                     ZenvError.PathResolutionFailed => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
+                     },
+                     else => {
+                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                         stderr.print(" -> Unexpected error.\n", .{}) catch {};
+                         std.debug.dumpStackTrace(trace.*);
+                     }
+                 }
+            } else {
+                 stderr.print("Error: {s} (no trace available)\n", .{@errorName(err)}) catch {};
             }
             process.exit(1);
         }
     }.func;
 
+
+    // Parse configuration
     var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
-         handleError(err);
-         return;
+        handleError(err);
+        return; // Exit after handling error
     };
-    defer config.deinit();
+    defer config.deinit(); // Ensure config memory is cleaned up
 
+    defer process.argsFree(allocator, args_owned); // Defer freeing the original mutable args
+
+    // Dispatch to command handlers (using args_const)
     switch (command) {
-        .setup => commands.handleSetupCommand(allocator, &config, args, &handleError),
-        .activate => commands.handleActivateCommand(allocator, &config, args, &handleError),
-        .list => commands.handleListCommand(allocator, &config, args, &handleError),
+        .setup => try commands.handleSetupCommand(allocator, &config, args_const, handleError),
+        .activate => commands.handleActivateCommand(allocator, &config, args_const, handleError),
+        .list => commands.handleListCommand(allocator, &config, args_const, handleError),
 
+        // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,
 
         .unknown => {
-            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args[1]}) catch {};
-            printUsage();
-            process.exit(1);
+            // Use args_const[1] as it's guaranteed to exist if command is unknown
+             std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};
+             printUsage();
+             process.exit(1);
         },
     }
 }

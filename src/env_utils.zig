@@ -197,7 +197,7 @@ pub fn resolveEnvironmentName(
         var iter = config.environments.iterator();
         while (iter.next()) |entry| {
             // Match if target exists and equals current cluster
-            if (entry.value_ptr.target) |target| {
+            if (entry.value_ptr.target_machine) |target| { // Updated field name
                 if (mem.eql(u8, target, current_cluster)) {
                     try matching_envs.append(entry.key_ptr.*);
                 }
