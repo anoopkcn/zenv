@@ -207,9 +207,16 @@ fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
 fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8) !void {
     std.log.info("Setting up environment '{s}'...", .{env_name});
     
+    // Get absolute path of current working directory
+    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    
     // Create requirements file from scratch with validated dependencies
-    const req_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/requirements.txt", .{env_name});
-    defer allocator.free(req_path);
+    const req_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/requirements.txt", .{env_name});
+    defer allocator.free(req_rel_path);
+    
+    const req_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, req_rel_path});
+    defer allocator.free(req_abs_path);
 
     // Display dependencies for debugging
     if (deps.len == 0) {
@@ -294,7 +301,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Write the validated dependencies to the requirements file
     std.log.info("Writing {d} validated dependencies to requirements file", .{valid_deps.items.len});
-    var req_file = try fs.cwd().createFile(req_path, .{});
+    var req_file = try fs.cwd().createFile(req_rel_path, .{});
     defer req_file.close(); // Only defer once
 
     if (valid_deps.items.len == 0) {
@@ -309,19 +316,22 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Flush and verify requirements file content
     try req_file.sync();
-    std.log.info("Created requirements file at: {s} with {d} validated dependencies", .{req_path, valid_deps.items.len});
+    std.log.info("Created requirements file at: {s} with {d} validated dependencies", .{req_abs_path, valid_deps.items.len});
 
     // Read and display the file for debugging
-    const req_file_handle = try fs.cwd().openFile(req_path, .{});
+    const req_file_handle = try fs.cwd().openFile(req_rel_path, .{});
     defer req_file_handle.close();
     const req_content_debug = try req_file_handle.readToEndAlloc(allocator, 100 * 1024);
     defer allocator.free(req_content_debug);
     std.log.info("Requirements file contents:\n{s}", .{req_content_debug});
     std.log.info("Requirements file contains {d} bytes", .{req_content_debug.len});
 
-    // Generate setup script
-    const script_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/setup_env.sh", .{env_name});
-    defer allocator.free(script_path);
+    // Generate setup script with absolute paths
+    const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/setup_env.sh", .{env_name});
+    defer allocator.free(script_rel_path);
+    
+    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, script_rel_path});
+    defer allocator.free(script_abs_path);
 
     var script_content = std.ArrayList(u8).init(allocator);
     defer script_content.deinit();
@@ -344,13 +354,15 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Step 3: Create virtual environment
     try script_content.appendSlice("echo '==> Step 3: Creating Python virtual environment'\n");
-    try script_content.writer().print("{s} -m venv sc_venv/{s}/venv\n\n", .{env_config.python_executable, env_name});
+    const venv_dir = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{cwd_path, env_name});
+    defer allocator.free(venv_dir);
+    try script_content.writer().print("{s} -m venv {s}\n\n", .{env_config.python_executable, venv_dir});
 
     // Step 4: Activate and install dependencies
     try script_content.appendSlice("echo '==> Step 4: Activating environment and installing dependencies'\n");
-    try script_content.writer().print("source $(pwd)/sc_venv/{s}/venv/bin/activate\n", .{env_name});
+    try script_content.writer().print("source {s}/bin/activate\n", .{venv_dir});
     try script_content.appendSlice("python -m pip install --upgrade pip\n");
-    try script_content.writer().print("python -m pip install -r $(pwd)/{s}\n\n", .{req_path});
+    try script_content.writer().print("python -m pip install -r {s}\n\n", .{req_abs_path});
 
     // Step 5: Run custom commands if any
     if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
@@ -363,17 +375,19 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Step 6: Completion message
     try script_content.appendSlice("echo '==> Setup completed successfully!'\n");
-    try script_content.writer().print("echo 'To activate this environment, run: source $(pwd)/sc_venv/{s}/activate.sh'\n", .{env_name});
+    const activate_abs_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/activate.sh", .{cwd_path, env_name});
+    defer allocator.free(activate_abs_path);
+    try script_content.writer().print("echo 'To activate this environment, run: source {s}'\n", .{activate_abs_path});
 
     // Write script to file
-    var script_file = try fs.cwd().createFile(script_path, .{});
+    var script_file = try fs.cwd().createFile(script_rel_path, .{});
     defer script_file.close();
     try script_file.writeAll(script_content.items);
     try script_file.chmod(0o755);  // Make executable
 
     // Execute script
-    std.log.info("Running setup script...", .{});
-    const argv = [_][]const u8{"/bin/sh", script_path};
+    std.log.info("Running setup script from {s}...", .{script_abs_path});
+    const argv = [_][]const u8{"/bin/sh", script_abs_path};
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -399,8 +413,8 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     
         // Display the content of the setup script for debugging
         std.log.info("Displaying setup script content for debugging:", .{});
-        try fs.cwd().access(script_path, .{}); // Check if file still exists
-        const script_content_debug = try fs.cwd().readFileAlloc(allocator, script_path, 1024 * 1024);
+        try fs.cwd().access(script_rel_path, .{}); // Check if file still exists
+        const script_content_debug = try fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024);
         defer allocator.free(script_content_debug);
         std.io.getStdOut().writer().print("\n----- Setup Script Content -----\n{s}\n-----------------------------\n", .{script_content_debug}) catch {};
     
@@ -419,12 +433,20 @@ pub fn handleActivateCommand(
      const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
      const env_name = args[2];
 
+     // Get absolute path of current working directory
+     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
+         std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
+         handleErrorFn(err);
+         return;
+     };
+     
      const stdout = std.io.getStdOut().writer();
 
      stdout.print("# To activate environment '{s}', run the following commands:\n", .{env_name}) catch {};
      stdout.print("# ---------------------------------------------------------\n", .{}) catch {};
      stdout.print("# Option 1: Use the activation script (recommended)\n", .{}) catch {};
-     stdout.print("source $(pwd)/sc_venv/{s}/activate.sh\n\n", .{env_name}) catch {};
+     stdout.print("source {s}/sc_venv/{s}/activate.sh\n\n", .{cwd_path, env_name}) catch {};
 
      stdout.print("# Option 2: Manual activation\n", .{}) catch {};
      // Suggest purging first for clean state
@@ -434,8 +456,8 @@ pub fn handleActivateCommand(
          stdout.print("module load {s}\n", .{module_name}) catch {};
      }
 
-     // Print virtual environment activation
-     stdout.print("source $(pwd)/sc_venv/{s}/venv/bin/activate\n", .{env_name}) catch {};
+     // Print virtual environment activation with absolute path
+     stdout.print("source {s}/sc_venv/{s}/venv/bin/activate\n", .{cwd_path, env_name}) catch {};
 
      // Print custom environment variables
      var vars_iter = env_config.custom_activate_vars.iterator();
@@ -454,9 +476,16 @@ pub fn handleActivateCommand(
 fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8) !void {
     std.log.info("Creating activation script for '{s}'...", .{env_name});
 
-    // Generate the activation script
-    const script_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/activate.sh", .{env_name});
-    defer allocator.free(script_path);
+    // Get absolute path of current working directory
+    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    
+    // Generate the activation script with absolute path
+    const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/activate.sh", .{env_name});
+    defer allocator.free(script_rel_path);
+    
+    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{cwd_path, script_rel_path});
+    defer allocator.free(script_abs_path);
 
     var script_content = std.ArrayList(u8).init(allocator);
     defer script_content.deinit();
@@ -474,9 +503,11 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     }
     try script_content.appendSlice("\n");
 
-    // Virtual environment activation
+    // Virtual environment activation with absolute path
     try script_content.appendSlice("# Activate the Python virtual environment\n");
-    try script_content.appendSlice("source $(dirname \"$0\")/venv/bin/activate\n\n");
+    const venv_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{cwd_path, env_name});
+    defer allocator.free(venv_path);
+    try script_content.writer().print("source {s}/bin/activate\n\n", .{venv_path});
 
     // Custom environment variables
     if (env_config.custom_activate_vars.count() > 0) {
@@ -510,13 +541,13 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     try script_content.appendSlice("  echo \"Environment fully deactivated\"\n");
     try script_content.appendSlice("}\n");
 
-    // Write script to file
-    var script_file = try fs.cwd().createFile(script_path, .{});
+    // Write script to file using relative path (it's created in the current directory context)
+    var script_file = try fs.cwd().createFile(script_rel_path, .{});
     defer script_file.close();
     try script_file.writeAll(script_content.items);
     try script_file.chmod(0o755);  // Make executable
 
-    std.log.info("Activation script created at sc_venv/{s}/activate.sh", .{env_name});
+    std.log.info("Activation script created at {s}", .{script_abs_path});
 }
 
 pub fn handleListCommand(

@@ -58,7 +58,7 @@ fn printUsage() void {
         \\Environment names (e.g., 'pytorch-gpu-jureca') are defined in zenv.json.
         \\
         \\To activate an environment after setup:
-        \\  source $(pwd)/sc_venv/<env_name>/activate.sh
+        \\  source /absolute/path/to/sc_venv/<env_name>/activate.sh
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
