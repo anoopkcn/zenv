@@ -355,7 +355,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     try script_content.appendSlice("if command -v module >/dev/null 2>&1; then\n");
     try script_content.appendSlice("  echo '==> Step 1: Purging all modules'\n");
     try script_content.appendSlice("  module --force purge\n");
-    
+
     if (env_config.modules.items.len > 0) {
         try script_content.appendSlice("  echo '==> Step 2: Loading required modules'\n");
         try script_content.appendSlice("  echo 'Loading modules: ");
@@ -366,7 +366,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
             try script_content.writer().print("{s}", .{module_name});
         }
         try script_content.appendSlice("'\n");
-        
+
         for (env_config.modules.items) |module_name| {
             try script_content.writer().print("  module load {s}\n", .{module_name});
         }
@@ -380,7 +380,9 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     try script_content.appendSlice("  python3 -m pip list --format=freeze > $MODULE_PACKAGES_FILE 2>/dev/null || true\n");
     try script_content.appendSlice("  if [ -s $MODULE_PACKAGES_FILE ]; then\n");
     try script_content.appendSlice("    echo '==> Found packages from modules:'\n");
-    try script_content.appendSlice("    cat $MODULE_PACKAGES_FILE | sed 's/==.*//' | sort\n");
+    try script_content.appendSlice("    echo -n '    '\n");
+    try script_content.appendSlice("    cat $MODULE_PACKAGES_FILE | sed 's/==.*//' | sort | tr '\n' ',' | sed 's/,/, /g' | sed 's/, $//'\n");
+    try script_content.appendSlice("    echo ''\n");
     try script_content.appendSlice("  else\n");
     try script_content.appendSlice("    echo '==> No Python packages detected from modules'\n");
     try script_content.appendSlice("  fi\n");
@@ -403,7 +405,7 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Add script to filter requirements.txt and exclude packages from modules
     try script_content.appendSlice("# Filter requirements to exclude packages from modules\n");
-    
+
     if (force_deps) {
         try script_content.appendSlice("# --force-deps flag detected\n");
         try script_content.appendSlice("echo '==> Using --force-deps: Installing all specified dependencies even if provided by modules'\n");
@@ -594,7 +596,7 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     try script_content.appendSlice("if command -v module >/dev/null 2>&1; then\n");
     try script_content.appendSlice("  # Unload all modules\n");
     try script_content.appendSlice("  module --force purge\n");
-    
+
     if (env_config.modules.items.len > 0) {
         try script_content.appendSlice("  # Load required modules\n");
         try script_content.appendSlice("  echo 'Loading modules: ");
@@ -605,7 +607,7 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
             try script_content.writer().print("{s}", .{module_name});
         }
         try script_content.appendSlice("'\n");
-        
+
         for (env_config.modules.items) |module_name| {
             try script_content.writer().print("  module load {s}\n", .{module_name});
         }
