@@ -5,8 +5,6 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const utils = @import("utils.zig");
-// const process = std.process; // No longer needed here
-// const fs = std.fs; // No longer needed here
 const Allocator = std.mem.Allocator;
 
 pub fn handleSetupCommand(

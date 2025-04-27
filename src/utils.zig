@@ -6,8 +6,8 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const fs = std.fs;
-const process = std.process; // Added import
-const StringHashMap = std.StringHashMap; // Added import
+const process = std.process;
+const StringHashMap = std.StringHashMap;
 
 // ============================================================================
 // Dependency Parsing Utilities
@@ -261,13 +261,13 @@ pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, 
                 break :blk package_name_raw;
             };
             defer allocator.free(lowercase_buffer);
-            
+
             // Create a persistent copy that won't be freed until the end of the function
             const result = allocator.dupe(u8, std.ascii.lowerString(lowercase_buffer, package_name_raw)) catch {
                 // If duplication fails, use the original name
                 break :blk package_name_raw;
             };
-            
+
             break :blk result;
         };
         defer if (!std.mem.eql(u8, package_name_lower, package_name_raw)) allocator.free(package_name_lower);
