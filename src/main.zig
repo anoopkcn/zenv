@@ -34,7 +34,7 @@ fn printVersion() void {
 
 fn printUsage() void {
     const usage = comptime
-        \\Usage: zenv <command> [environment_name] [--all]
+        \\Usage: zenv <command> [environment_name] [options]
         \\
         \\Manages environments based on zenv.json configuration.
         \\
@@ -49,6 +49,10 @@ fn printUsage() void {
         \\  list --all             List all environments defined in the configuration file.
         \\  version, -v, --version Print the zenv version.
         \\  help, --help           Show this help message.
+        \\
+        \\Options:
+        \\  --force-deps           When used with setup command, installs all specified dependencies
+        \\                         even if they are already provided by loaded modules.
         \\
         \\Environment names (e.g., 'pytorch-gpu-jureca') are defined in zenv.json.
         \\

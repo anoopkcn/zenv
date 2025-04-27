@@ -91,6 +91,16 @@ pub fn handleSetupCommand(
     const env_config = getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
     const env_name = args[2]; // Safe now after check in getAndValidateEnvironment
 
+    // Check for --force-deps flag
+    var force_deps = false;
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--force-deps")) {
+            force_deps = true;
+            std.log.info("Force dependencies flag detected. User-specified dependencies will override module-provided packages.", .{});
+            break;
+        }
+    }
+
     std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, env_config.target_machine });
 
     // --- Automation Logic ---
@@ -182,7 +192,7 @@ pub fn handleSetupCommand(
     try createScVenvDir(allocator, env_name);
 
     // Create and run a single setup script that handles all steps
-    try setupEnvironment(allocator, env_config, env_name, all_required_deps.items);
+    try setupEnvironment(allocator, env_config, env_name, all_required_deps.items, force_deps);
 
     // Create an activation script
     try createActivationScript(allocator, env_config, env_name);
@@ -204,7 +214,7 @@ fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
     try fs.cwd().makePath(env_dir_path);
 }
 
-fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8) !void {
+fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8, force_deps: bool) !void {
     std.log.info("Setting up environment '{s}'...", .{env_name});
 
     // Get absolute path of current working directory
@@ -379,43 +389,50 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
 
     // Add script to filter requirements.txt and exclude packages from modules
     try script_content.appendSlice("# Filter requirements to exclude packages from modules\n");
-    try script_content.appendSlice("if [ -n \"$MODULE_PACKAGES_FILE\" ] && [ -s \"$MODULE_PACKAGES_FILE\" ]; then\n");
-    try script_content.appendSlice("  echo '==> Filtering requirements to exclude packages from modules'\n");
-    try script_content.appendSlice("  FILTERED_REQUIREMENTS=$(mktemp)\n");
-    try script_content.appendSlice("  EXCLUDED_PACKAGES=\"\"\n");
-    try script_content.writer().print("  while IFS= read -r line || [ -n \"$line\" ]; do\n", .{});
-    try script_content.appendSlice("    # Skip empty lines and comments\n");
-    try script_content.appendSlice("    if [[ -z \"$line\" || \"$line\" == \"#\"* ]]; then\n");
-    try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
-    try script_content.appendSlice("      continue\n");
-    try script_content.appendSlice("    fi\n");
-    try script_content.appendSlice("    # Extract package name (remove version specifiers)\n");
-    try script_content.appendSlice("    package_name=$(echo \"$line\" | sed -E 's/([a-zA-Z0-9_\\-\\.]+)(.*)/\\1/g' | tr '[:upper:]' '[:lower:]')\n");
-    try script_content.appendSlice("    # Check if package is in MODULE_PACKAGES_FILE (case insensitive)\n");
-    try script_content.appendSlice("    if grep -i -q \"^$package_name==\" \"$MODULE_PACKAGES_FILE\" || grep -i -q \"^$package_name \" \"$MODULE_PACKAGES_FILE\"; then\n");
-    try script_content.appendSlice("      echo \"==> Excluding $line (provided by loaded modules)\"\n");
-    try script_content.appendSlice("      EXCLUDED_PACKAGES=\"$EXCLUDED_PACKAGES$package_name\n\"\n");
-    try script_content.appendSlice("    else\n");
-    try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
-    try script_content.appendSlice("    fi\n");
-    try script_content.writer().print("  done < {s}\n", .{req_abs_path});
-    try script_content.appendSlice("  echo '==> Installing filtered requirements'\n");
-    try script_content.appendSlice("  if [ -s \"$FILTERED_REQUIREMENTS\" ]; then\n");
-    try script_content.appendSlice("    python -m pip install -r \"$FILTERED_REQUIREMENTS\"\n");
-    try script_content.appendSlice("  else\n");
-    try script_content.appendSlice("    echo '==> No additional packages to install (all provided by modules)'\n");
-    try script_content.appendSlice("  fi\n");
-    try script_content.appendSlice("  # Report excluded packages\n");
-    try script_content.appendSlice("  if [ -n \"$EXCLUDED_PACKAGES\" ]; then\n");
-    try script_content.appendSlice("    echo -e '\n==> Summary of packages excluded (since they are provided by modules):'\n");
-    try script_content.appendSlice("    echo -e \"$EXCLUDED_PACKAGES\" | sort | uniq\n");
-    try script_content.appendSlice("  fi\n");
-    try script_content.appendSlice("  # Cleanup temp files\n");
-    try script_content.appendSlice("  rm -f \"$FILTERED_REQUIREMENTS\" \"$MODULE_PACKAGES_FILE\"\n");
-    try script_content.appendSlice("else\n");
-    try script_content.appendSlice("  # No module packages detected, install requirements as is\n");
-    try script_content.writer().print("  python -m pip install -r {s}\n", .{req_abs_path});
-    try script_content.appendSlice("fi\n\n");
+    
+    if (force_deps) {
+        try script_content.appendSlice("# --force-deps flag detected\n");
+        try script_content.appendSlice("echo '==> Using --force-deps: Installing all specified dependencies even if provided by modules'\n");
+        try script_content.writer().print("python -m pip install -r {s}\n\n", .{req_abs_path});
+    } else {
+        try script_content.appendSlice("if [ -n \"$MODULE_PACKAGES_FILE\" ] && [ -s \"$MODULE_PACKAGES_FILE\" ]; then\n");
+        try script_content.appendSlice("  echo '==> Filtering requirements to exclude packages from modules'\n");
+        try script_content.appendSlice("  FILTERED_REQUIREMENTS=$(mktemp)\n");
+        try script_content.appendSlice("  EXCLUDED_PACKAGES=\"\"\n");
+        try script_content.writer().print("  while IFS= read -r line || [ -n \"$line\" ]; do\n", .{});
+        try script_content.appendSlice("    # Skip empty lines and comments\n");
+        try script_content.appendSlice("    if [[ -z \"$line\" || \"$line\" == \"#\"* ]]; then\n");
+        try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
+        try script_content.appendSlice("      continue\n");
+        try script_content.appendSlice("    fi\n");
+        try script_content.appendSlice("    # Extract package name (remove version specifiers)\n");
+        try script_content.appendSlice("    package_name=$(echo \"$line\" | sed -E 's/([a-zA-Z0-9_\\-\\.]+)(.*)/\\1/g' | tr '[:upper:]' '[:lower:]')\n");
+        try script_content.appendSlice("    # Check if package is in MODULE_PACKAGES_FILE (case insensitive)\n");
+        try script_content.appendSlice("    if grep -i -q \"^$package_name==\" \"$MODULE_PACKAGES_FILE\" || grep -i -q \"^$package_name \" \"$MODULE_PACKAGES_FILE\"; then\n");
+        try script_content.appendSlice("      echo \"==> Excluding $line (provided by loaded modules)\"\n");
+        try script_content.appendSlice("      EXCLUDED_PACKAGES=\"$EXCLUDED_PACKAGES$package_name\n\"\n");
+        try script_content.appendSlice("    else\n");
+        try script_content.appendSlice("      echo \"$line\" >> \"$FILTERED_REQUIREMENTS\"\n");
+        try script_content.appendSlice("    fi\n");
+        try script_content.writer().print("  done < {s}\n", .{req_abs_path});
+        try script_content.appendSlice("  echo '==> Installing filtered requirements'\n");
+        try script_content.appendSlice("  if [ -s \"$FILTERED_REQUIREMENTS\" ]; then\n");
+        try script_content.appendSlice("    python -m pip install -r \"$FILTERED_REQUIREMENTS\"\n");
+        try script_content.appendSlice("  else\n");
+        try script_content.appendSlice("    echo '==> No additional packages to install (all provided by modules)'\n");
+        try script_content.appendSlice("  fi\n");
+        try script_content.appendSlice("  # Report excluded packages\n");
+        try script_content.appendSlice("  if [ -n \"$EXCLUDED_PACKAGES\" ]; then\n");
+        try script_content.appendSlice("    echo -e '\n==> Summary of packages excluded (since they are provided by modules):'\n");
+        try script_content.appendSlice("    echo -e \"$EXCLUDED_PACKAGES\" | sort | uniq\n");
+        try script_content.appendSlice("  fi\n");
+        try script_content.appendSlice("  # Cleanup temp files\n");
+        try script_content.appendSlice("  rm -f \"$FILTERED_REQUIREMENTS\" \"$MODULE_PACKAGES_FILE\"\n");
+        try script_content.appendSlice("else\n");
+        try script_content.appendSlice("  # No module packages detected, install requirements as is\n");
+        try script_content.writer().print("  python -m pip install -r {s}\n", .{req_abs_path});
+        try script_content.appendSlice("fi\n\n");
+    }
 
     // Step 5: Run custom commands if any
     if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
