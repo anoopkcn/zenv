@@ -14,6 +14,9 @@ Zenv is a flexible python environment manager that simplifies the setup, activat
 
 ### Install a pre-built executable
 Get the latest [release](https://github.com/anoopkcn/zenv/releases)
+```bash
+wget https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.xz
+```
 
 *Windows not supported*
 

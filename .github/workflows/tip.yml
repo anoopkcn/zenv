@@ -1,0 +1,59 @@
+name: Build Tip Release
+
+on:
+  push:
+    branches:
+      - main  # Change to your primary branch if different
+
+permissions:
+  contents: write  # Needed for creating/updating tags and releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.0
+      
+      - name: Force-build for all targets
+        run: zig build release -Dforce-release=true
+      
+      - name: Delete old 'tip' tag if it exists
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git tag -d tip || true
+          git push origin :refs/tags/tip || true
+        continue-on-error: true
+      
+      - name: Create new 'tip' tag
+        run: |
+          git tag -f tip
+          git push origin tip -f
+      
+      - name: Get short SHA
+        id: sha
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Create/Update tip release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: tip
+          name: Tip (commit ${{ steps.sha.outputs.sha }})
+          body: |
+            This is the development tip build from the main branch.
+            Commit: ${{ github.sha }}
+            
+            **Note:** This release contains the latest code from the main branch and may be unstable.
+            For stable releases, please use the versioned releases instead.
+          files: ./zig-out/releases/*.tar.xz
+          draft: false
+          prerelease: true
+          # The following ensures the release is updated if it already exists
+          make_latest: false
+          replace_artifacts: true
