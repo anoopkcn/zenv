@@ -107,25 +107,9 @@ zcd() {
     local project_dir=$(zenv cd "$env_name")
 
     if [[ $? -eq 0 && -n "$project_dir" ]]; then
-        echo "Changing to project directory for '$env_name'..."
         cd "$project_dir"
     else
         echo "Failed to find project directory for '$env_name'"
         return 1
     fi
 }
-
-# Utility function to set up a project directory prompt indicator
-# Add this to your prompt if you want to show the active environment
-zenv_prompt() {
-    if [[ -n "$ZENV_ACTIVE_ENV" ]]; then
-        echo "[zenv:$ZENV_ACTIVE_ENV]"
-    fi
-}
-
-# Example prompt integration for bash:
-# PS1='$(zenv_prompt) \u@\h:\w\$ '
-
-# Example prompt integration for zsh:
-# setopt PROMPT_SUBST
-# PROMPT='$(zenv_prompt) %n@%m:%~%# '
