@@ -106,17 +106,6 @@ const release_targets = [_]ReleaseTarget{
         .name = "macos-arm64",
         .description = "macOS ARM64",
     },
-    .{
-        .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu },
-        .name = "windows-x64",
-        .description = "Windows x86_64 (GNU)",
-    },
-    // Uncomment to add Windows ARM64 support
-    // .{
-    //     .query = .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .gnu },
-    //     .name = "windows-arm64",
-    //     .description = "Windows ARM64 (GNU)",
-    // },
 };
 
 pub fn build(b: *std.Build) !void {
@@ -178,24 +167,6 @@ pub fn build(b: *std.Build) !void {
     if (version == .tag or force_release) {
         // Add individual target-specific build steps
         for (release_targets) |release_target| {
-            // For Windows targets, add a warning message instead of the build
-            if (release_target.query.os_tag == .windows) {
-                const warning_msg = b.fmt("Windows builds are currently not supported due to cross-compilation issues with fchmod", .{});
-                
-                const target_step_small = b.step(
-                    b.fmt("release-{s}-small", .{release_target.name}), 
-                    b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
-                );
-                target_step_small.dependOn(&b.addFail(warning_msg).step);
-                
-                const target_step_fast = b.step(
-                    b.fmt("release-{s}", .{release_target.name}), 
-                    b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
-                );
-                target_step_fast.dependOn(&b.addFail(warning_msg).step);
-                continue;
-            }
-            
             const target_step_small = b.step(
                 b.fmt("release-{s}-small", .{release_target.name}), 
                 b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
@@ -233,13 +204,6 @@ pub fn build(b: *std.Build) !void {
     if (version == .tag or force_release) {
         // Set up release-all steps with different optimizations
         for (release_targets) |release_target| {
-            // Skip Windows targets if there are cross-compilation issues
-            if (release_target.query.os_tag == .windows) {
-                const skip_msg = b.fmt("Skipping {s} due to cross-compilation issues", .{release_target.description});
-                std.log.info("{s}", .{skip_msg});
-                continue;
-            }
-            
             setupTargetReleaseWithOptimize(b, release_step, version_string, release_target.query, .ReleaseFast);
             setupTargetReleaseWithOptimize(b, release_small_step, version_string, release_target.query, .ReleaseSmall);
         }
@@ -266,11 +230,6 @@ fn simplifyTripleName(target: std.Target) []const u8 {
     
     // For macOS, just use arch-macos
     if (target.os.tag == .macos) {
-        return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
-    }
-    
-    // Windows would be arch-windows if we supported it
-    if (target.os.tag == .windows) {
         return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
     }
     
@@ -320,23 +279,6 @@ fn setupTargetReleaseWithOptimize(
     };
 
     switch (target.result.os.tag) {
-        .windows => {
-            const archive_basename = b.fmt("{s}-{s}{s}.zip", .{exe_name, simplified_triple, opt_suffix});
-            const zip_cmd = b.addSystemCommand(&.{
-                "zip", 
-                "-j", // Junk paths (store only the file, not dir structure)
-                "-q", // Quiet
-                "-9", // Max compression
-            });
-            const archive_path = zip_cmd.addOutputFileArg(archive_basename);
-            zip_cmd.addFileArg(exe_release.getEmittedBin()); // Add the executable file
-            
-            release_step.dependOn(&b.addInstallFileWithDir(
-                archive_path,
-                .{ .custom = release_dir_path },
-                archive_basename,
-            ).step);
-        },
         .macos, .linux => { // Assuming tar for Linux and macOS
             const archive_basename = b.fmt("{s}-{s}{s}.tar.xz", .{exe_name, simplified_triple, opt_suffix});
             const tar_cmd = b.addSystemCommand(&.{
