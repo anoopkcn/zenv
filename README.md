@@ -22,6 +22,8 @@ wget https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-mu
 
 Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)
 
+*The linux versions are `musl` NOT `glibc`. Windows support is not planned*
+
 ### Build from source
 ```bash
 # Clone the repository
