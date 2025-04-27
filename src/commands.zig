@@ -355,9 +355,23 @@ fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, 
     try script_content.appendSlice("if command -v module >/dev/null 2>&1; then\n");
     try script_content.appendSlice("  echo '==> Step 1: Purging all modules'\n");
     try script_content.appendSlice("  module --force purge\n");
-    try script_content.appendSlice("  echo '==> Step 2: Loading required modules'\n");
-    for (env_config.modules.items) |module_name| {
-        try script_content.writer().print("  module load {s}\n", .{module_name});
+    
+    if (env_config.modules.items.len > 0) {
+        try script_content.appendSlice("  echo '==> Step 2: Loading required modules'\n");
+        try script_content.appendSlice("  echo 'Loading modules: ");
+        for (env_config.modules.items, 0..) |module_name, idx| {
+            if (idx > 0) {
+                try script_content.appendSlice(", ");
+            }
+            try script_content.writer().print("{s}", .{module_name});
+        }
+        try script_content.appendSlice("'\n");
+        
+        for (env_config.modules.items) |module_name| {
+            try script_content.writer().print("  module load {s}\n", .{module_name});
+        }
+    } else {
+        try script_content.appendSlice("  echo '==> Step 2: No modules to load'\n");
     }
 
     // Add code to detect packages provided by modules
@@ -511,10 +525,29 @@ pub fn handleActivateCommand(
      stdout.print("if command -v module >/dev/null 2>&1; then\n", .{}) catch {};
      // Suggest purging first for clean state
      stdout.print("  module --force purge\n", .{}) catch {};
-     // Print module load commands
-     for (env_config.modules.items) |module_name| {
-         stdout.print("  module load {s}\n", .{module_name}) catch {};
+
+     // Print module load commands with a clear list first
+     if (env_config.modules.items.len > 0) {
+         var modules_list = std.ArrayList(u8).init(allocator);
+         defer modules_list.deinit();
+
+         for (env_config.modules.items, 0..) |module_name, i| {
+             if (i > 0) {
+                 modules_list.appendSlice(", ") catch {};
+             }
+             modules_list.appendSlice(module_name) catch {};
+         }
+
+         stdout.print("  echo 'Loading modules: {s}'\n", .{modules_list.items}) catch {};
+
+         // Print individual load commands
+         for (env_config.modules.items) |module_name| {
+             stdout.print("  module load {s}\n", .{module_name}) catch {};
+         }
+     } else {
+         stdout.print("  echo 'No modules to load'\n", .{}) catch {};
      }
+
      stdout.print("else\n", .{}) catch {};
      stdout.print("  echo 'Module command not available, skipping module operations'\n", .{}) catch {};
      stdout.print("fi\n", .{}) catch {};
@@ -561,9 +594,23 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     try script_content.appendSlice("if command -v module >/dev/null 2>&1; then\n");
     try script_content.appendSlice("  # Unload all modules\n");
     try script_content.appendSlice("  module --force purge\n");
-    try script_content.appendSlice("  # Load required modules\n");
-    for (env_config.modules.items) |module_name| {
-        try script_content.writer().print("  module load {s}\n", .{module_name});
+    
+    if (env_config.modules.items.len > 0) {
+        try script_content.appendSlice("  # Load required modules\n");
+        try script_content.appendSlice("  echo 'Loading modules: ");
+        for (env_config.modules.items, 0..) |module_name, idx| {
+            if (idx > 0) {
+                try script_content.appendSlice(", ");
+            }
+            try script_content.writer().print("{s}", .{module_name});
+        }
+        try script_content.appendSlice("'\n");
+        
+        for (env_config.modules.items) |module_name| {
+            try script_content.writer().print("  module load {s}\n", .{module_name});
+        }
+    } else {
+        try script_content.appendSlice("  echo 'No modules to load'\n");
     }
     try script_content.appendSlice("else\n");
     try script_content.appendSlice("  echo '==> Module command not found, skipping module operations'\n");
