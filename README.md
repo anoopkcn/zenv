@@ -121,7 +121,7 @@ zenv unregister my_env
 
 One can have multiple environment configurations in the same  `zenv.json` file and it supports the following structure:
 
-```json
+```jsonc
 {
   "<env_name>": {
     "target_machine": "<machine_identifier>",
@@ -129,26 +129,26 @@ One can have multiple environment configurations in the same  `zenv.json` file a
     "modules": [
       "<module1>",
       "<module2>",
-      ...
+      // ...
     ],
     "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
     "dependencies": [
       "<package_name>[==version]",
-      ...
+      //...
     ],
     "python_executable": "<optional_path_to_python>",
     "custom_activate_vars": {
       "ENV_VAR_NAME": "value",
-      ...
+      //...
     },
     "setup_commands": [
       "echo 'Running custom setup commands'",
-      ...
+      //...
     ]
   },
   "<another_env_name>":{
     "target_machine": "<anothor_machine_identifier>",
-    ...
+    // ...
   }
 }
 ```
