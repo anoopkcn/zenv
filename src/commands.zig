@@ -136,7 +136,8 @@ pub fn handleActivateCommand(
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
-    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    // We only use env_config for validation, not for output
+    _ = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
     const env_name = args[2];
 
     // Get absolute path of current working directory
@@ -149,64 +150,12 @@ pub fn handleActivateCommand(
 
     const writer = std.io.getStdOut().writer(); // Use constant for clarity
 
-    writer.print(
-        \\# To activate environment '{s}', run the following commands:
-        \\# Option 1: Use the activation script (recommended)
-        \\source {s}/zenv/{s}/activate.sh
-        \\
-        \\# Option 2: Manual activation
-        \\
-    , .{ env_name, cwd_path, env_name }) catch |e| {
+    // Simply output the path to the activation script
+    // Ensure there's a newline at the end to avoid shell prompt appearing on the same line
+    writer.print("{s}/zenv/{s}/activate.sh\n", .{ cwd_path, env_name }) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
-
-    // Print module load commands using the utility
-    utils.printManualActivationModuleCommands(allocator, writer, env_config) catch |e| {
-        std.log.err("Error writing module commands: {s}", .{@errorName(e)});
-        return;
-    };
-
-    // Print virtual environment activation with absolute path
-    writer.print("source {s}/zenv/{s}/bin/activate\n", .{ cwd_path, env_name }) catch |e| {
-        std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
-        return;
-    };
-
-    // Print custom environment variables
-    if (env_config.custom_activate_vars.count() > 0) {
-        writer.print("# Custom environment variables:\n", .{}) catch {};
-        var vars_iter = env_config.custom_activate_vars.iterator();
-        while (vars_iter.next()) |entry| {
-            // Basic shell escaping for value
-            // Replace single quote with '\''
-            var escaped_value_list = std.ArrayList(u8).init(allocator);
-            defer escaped_value_list.deinit();
-            for (entry.value_ptr.*) |char| {
-                if (char == '\'') {
-                    escaped_value_list.appendSlice("'\\''") catch |e| {
-                        std.log.err("Failed to allocate for escaping: {s}", .{@errorName(e)});
-                        return;
-                    };
-                } else {
-                    escaped_value_list.append(char) catch |e| {
-                        std.log.err("Failed to allocate for escaping: {s}", .{@errorName(e)});
-                        return;
-                    };
-                }
-            }
-            writer.print("export {s}='{s}'\n", .{ entry.key_ptr.*, escaped_value_list.items }) catch |e| {
-                std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
-                return;
-            };
-        }
-    }
-
-    // Print footer and metadata
-    if (env_config.description) |desc| {
-        writer.print("# Description: {s}\n", .{desc}) catch {};
-    }
-    writer.print("# Target Machine: {s}\n", .{env_config.target_machine}) catch {};
 }
 
 pub fn handleListCommand(

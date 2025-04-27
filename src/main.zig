@@ -38,9 +38,9 @@ fn printUsage() void {
         \\  setup <env_name>       Set up the specified environment for the current machine.
         \\                         Creates a Python virtual environment in zenv/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
-        \\  activate <env_name>    Print shell commands to activate the specified environment.
-        \\                         Shows two options: using the activation script or manual steps.
-        \\                         Checks if current machine matches env_name's target_machine.
+        \\  activate <env_name>    Output the path to the activation script.
+        \\                         To activate the environment, use:
+        \\                         source $(zenv activate <env_name>)
         \\  list                   List environments configured for the current machine.
         \\  list --all             List all environments defined in the configuration file.
         \\  version, -v, --version Print the zenv version.
@@ -49,9 +49,6 @@ fn printUsage() void {
         \\Options:
         \\  --force-deps           When used with setup command, installs all specified dependencies
         \\                         even if they are already provided by loaded modules.
-        \\
-        \\To activate an environment after setup:
-        \\  source /path/to/zenv/<env_name>/activate.sh
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
