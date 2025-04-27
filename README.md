@@ -147,4 +147,4 @@ Zenv maintains a global registry at `~/.zenv/registry.json` that allows you to a
 
 ## License
 
-[MIT License
+[MIT License](LICENSE)
