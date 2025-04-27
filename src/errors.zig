@@ -108,6 +108,3 @@ pub const ZenvErrorWithContext = struct {
         }
     }
 };
-
-// Optional: Define a combined error type for command handlers
-// pub const CommandError = ZenvError || error{ /* Other specific errors? */ };

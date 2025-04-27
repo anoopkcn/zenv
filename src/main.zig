@@ -1,10 +1,6 @@
 const std = @import("std");
 const options = @import("options");
 const process = std.process;
-const errors = @import("errors.zig");
-const ZenvError = errors.ZenvError;
-const ZenvErrorWithContext = errors.ZenvErrorWithContext;
-const ErrorContext = errors.ErrorContext;
 const config_module = @import("config.zig");
 const commands = @import("commands.zig");
 const Allocator = std.mem.Allocator;
@@ -153,7 +149,6 @@ pub fn main() anyerror!void {
 
     // Parse configuration
     var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
-        // Config parsing already returns ZenvErrorWithContext
         handleError(err);
         return; // Exit after handling error
     };

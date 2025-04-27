@@ -289,7 +289,6 @@ pub const ZenvConfig = struct {
     pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         const file = fs.cwd().openFile(config_path, .{}) catch |err| {
             std.log.err("Failed to open config file '{s}': {s}", .{ config_path, @errorName(err) });
-            // We need to return an error, not ZenvErrorWithContext directly
             return error.ConfigFileNotFound;
         };
         defer file.close();
@@ -305,9 +304,6 @@ pub const ZenvConfig = struct {
         const value_tree = std.json.parseFromSlice(Json.Value, allocator, json_string, .{}) catch |err| {
             std.log.err("Failed to parse JSON from '{s}': {s}", .{ config_path, @errorName(err) });
             std.debug.print("JSON parsing error: {any}\n", .{err});
-            // Assuming parseFromSlice errors map reasonably to these categories
-            // Check the actual error types if needed
-            // if (err == error.JsonParseError) { return ZenvError.JsonParseError; }
             return error.JsonParseError;
         };
         // IMPORTANT: Defer destroy/deinit only AFTER ZenvConfig is fully used and deinitialized
