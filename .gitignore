@@ -14,3 +14,4 @@ docgen_tmp/
 zenv.json
 .zig-cache
 requirements.txt
+test/
