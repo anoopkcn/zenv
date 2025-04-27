@@ -40,6 +40,22 @@ jobs:
         id: sha
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
       
+      - name: Delete existing tip release if it exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if the release exists and delete it
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/tip" \
+            | jq -r '.id // empty')
+          
+          if [ ! -z "$RELEASE_ID" ]; then
+            echo "Deleting existing release with ID: $RELEASE_ID"
+            curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+          fi
+        continue-on-error: true
+      
       - name: Create/Update tip release
         uses: softprops/action-gh-release@v1
         with:
@@ -54,6 +70,3 @@ jobs:
           files: ./zig-out/releases/*.tar.xz
           draft: false
           prerelease: true
-          # The following ensures the release is updated if it already exists
-          make_latest: false
-          replace_artifacts: true
