@@ -53,15 +53,8 @@ Example:
   "my_env": {
     "target_machine": "computer1",
     "description": "Basic environment for Computer1",
-    "modules":[
-      "Python"
-      "CUDA"
-    ]
-    "dependencies": [
-      "numpy",
-      "scipy",
-      "matplotlib"
-    ]
+    "modules":[ "Python", "CUDA" ]
+    "dependencies": [ "numpy>=1.20.0", "matplotlib" ]
   }
 }
 ```
@@ -89,7 +82,7 @@ Available zenv environments:
   [Project: /path/to/project]
 - my_env (ID: 4a422bf... Target: computer2)
   [Project: /path/to/project]
-Found 2 environment(s) for the current machine ('jrlogin07.jureca').
+Found 2 environment(s) for the current machine ('login07.computer1').
 ```
 
 ### Activating Environments
@@ -136,17 +129,21 @@ One can have multiple environment configurations in the same  `zenv.json` file a
     "modules": [
       "<module1>",
       "<module2>",
+      ...
     ],
     "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
     "dependencies": [
-      "<package_name>[==version]"
+      "<package_name>[==version]",
+      ...
     ],
     "python_executable": "<optional_path_to_python>",
     "custom_activate_vars": {
-      "ENV_VAR_NAME": "value"
+      "ENV_VAR_NAME": "value",
+      ...
     },
     "setup_commands": [
-      "echo 'Running custom setup commands'"
+      "echo 'Running custom setup commands'",
+      ...
     ]
   },
   "<another_env_name>":{
