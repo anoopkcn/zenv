@@ -5,6 +5,8 @@ const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
+const ZenvErrorWithContext = errors.ZenvErrorWithContext;
+const ErrorContext = errors.ErrorContext;
 const fs = std.fs;
 const process = std.process;
 const StringHashMap = std.StringHashMap;
@@ -400,11 +402,10 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
     const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
-    // Use a BufWriter for potentially better performance when writing many small pieces
-    var file = try fs.cwd().createFile(script_rel_path, .{});
-    defer file.close();
-    var bw = std.io.bufferedWriter(file.writer());
-    const writer = bw.writer();
+    // Use a memory buffer for all content before writing to disk
+    var content_buffer = std.ArrayList(u8).init(allocator);
+    defer content_buffer.deinit();
+    const writer = content_buffer.writer();
 
     // Add standard header (no set -e for activation)
     try writer.print(
@@ -472,9 +473,12 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
         \\
     , .{});
 
-    // Flush the buffer to ensure content is written
-    try bw.flush();
-    // Make executable (chmod needs the file to be closed on some OSes, but Zig's handles it)
+    // Now write the entire content in one operation
+    var file = try fs.cwd().createFile(script_rel_path, .{});
+    defer file.close();
+    try file.writeAll(content_buffer.items);
+
+    // Make executable
     try file.chmod(0o755);
 
     std.log.info("Activation script created at {s}", .{script_abs_path});
@@ -502,14 +506,14 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
         // Display the script content for debugging if it still exists
         const script_content_debug = fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024) catch |read_err| {
             std.log.err("Failed to read script content for debugging: {s}", .{@errorName(read_err)});
-            return ZenvError.ProcessError; // Return original error
+            return error.ProcessError; // Return error directly
         };
         defer allocator.free(script_content_debug);
         // Print the script content for debugging
         std.io.getStdErr().writer().print("\n\nScript contents ({s}):\n", .{script_rel_path}) catch {};
         std.io.getStdErr().writer().print("{s}\n-------------------------------------\n", .{script_content_debug}) catch {};
 
-        return ZenvError.ProcessError;
+        return error.ProcessError;
     }
 
     std.log.info("Script completed successfully: {s}", .{script_abs_path});
@@ -732,6 +736,32 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
 // Environment Validation & Info Utilities
 // ============================================================================
 
+// Pure function to validate environment for a specific hostname
+pub fn validateEnvironmentForMachine(
+    env_config: anytype,
+    hostname: []const u8
+) bool {
+    const target = env_config.target_machine;
+
+    // 1. Exact match
+    if (std.mem.eql(u8, hostname, target)) {
+        return true;
+    }
+    // 2. Domain suffix match (e.g., node123.cluster matches target cluster)
+    if (hostname.len > target.len + 1 and hostname[hostname.len - target.len - 1] == '.') {
+        const suffix = hostname[hostname.len - target.len ..];
+        if (std.mem.eql(u8, suffix, target)) {
+            return true;
+        }
+    }
+    // 3. Substring match as fallback (least specific)
+    if (std.mem.indexOf(u8, hostname, target) != null) {
+        return true;
+    }
+
+    return false;
+}
+
 // Get and validate environment configuration based on args and current hostname
 pub fn getAndValidateEnvironment(
     allocator: Allocator,
@@ -741,20 +771,29 @@ pub fn getAndValidateEnvironment(
 ) ?*const EnvironmentConfig {
     if (args.len < 3) {
         std.log.err("Missing environment name argument for command '{s}'", .{args[1]});
-        handleErrorFn(ZenvError.EnvironmentNotFound); // Consider a specific MissingArgument error
+        // Create error context but use standard error for now
+        // TODO: Update error handling to use contextualized errors
+        handleErrorFn(error.EnvironmentNotFound); 
         return null;
     }
     const env_name = args[2];
 
     const env_config = config.getEnvironment(env_name) orelse {
         std.log.err("Environment '{s}' not found in configuration.", .{env_name});
-        handleErrorFn(ZenvError.EnvironmentNotFound);
+        handleErrorFn(error.EnvironmentNotFound);
         return null;
     };
 
+    // Use new validation function for early validation
+    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |ctx_err| {
+        std.log.err("Invalid environment configuration: {any}", .{ctx_err});
+        handleErrorFn(ctx_err.err); // Use the error part of the contextualized error
+        return null;
+    }
+
     // Get current hostname
     var hostname: []const u8 = undefined;
-    hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
+    hostname = config.getHostname() catch |err| {
         std.log.err("Failed to get current hostname: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return null;
@@ -764,30 +803,8 @@ pub fn getAndValidateEnvironment(
     // Validate hostname against target_machine
     std.log.debug("Comparing current hostname '{s}' with target machine '{s}' for env '{s}'", .{ hostname, env_config.target_machine, env_name });
 
-    // Enhanced hostname matching
-    const hostname_matches = blk: {
-        const target = env_config.target_machine;
-        // 1. Exact match
-        if (std.mem.eql(u8, hostname, target)) {
-            std.log.debug("Exact hostname match.", .{});
-            break :blk true;
-        }
-        // 2. Domain suffix match (e.g., node123.cluster matches target cluster)
-        if (hostname.len > target.len + 1 and hostname[hostname.len - target.len - 1] == '.') {
-            const suffix = hostname[hostname.len - target.len ..];
-            if (std.mem.eql(u8, suffix, target)) {
-                std.log.debug("Domain suffix match.", .{});
-                break :blk true;
-            }
-        }
-        // 3. Simple substring match (fallback, less precise)
-        if (std.mem.indexOf(u8, hostname, target) != null) {
-            std.log.debug("Substring match (fallback).", .{});
-            break :blk true;
-        }
-
-        break :blk false;
-    };
+    // Use our pure function for hostname matching
+    const hostname_matches = validateEnvironmentForMachine(env_config, hostname);
 
     if (!hostname_matches) {
         std.log.err("Current machine ('{s}') does not match target machine ('{s}') specified for environment '{s}'.", .{
@@ -795,7 +812,7 @@ pub fn getAndValidateEnvironment(
             env_config.target_machine,
             env_name,
         });
-        handleErrorFn(ZenvError.TargetMachineMismatch); // Use a specific error
+        handleErrorFn(error.TargetMachineMismatch);
         return null;
     }
 
@@ -844,3 +861,26 @@ pub fn printManualActivationModuleCommands(
 // *** Placeholder for potential future I/O Utilities ***
 // pub fn printOutputHeader(writer: anytype, title: []const u8) !void { ... }
 // pub fn printOutputFooter(writer: anytype) !void { ... }
+
+// Helper function to escape shell values (single quotes)
+// Uses a fixed buffer to avoid memory allocations
+pub fn escapeShellValue(value: []const u8, writer: anytype) !void {
+    for (value) |char| {
+        if (char == '\'') {
+            try writer.writeAll("'\\''" );
+        } else {
+            try writer.writeByte(char);
+        }
+    }
+}
+
+// Helper function to determine if a dependency was provided in the config
+// Used for memory management to avoid double freeing strings
+pub fn isConfigProvidedDependency(env_config: *const EnvironmentConfig, dep: []const u8) bool {
+    for (env_config.dependencies.items) |config_dep| {
+        if (std.mem.eql(u8, config_dep, dep)) {
+            return true;
+        }
+    }
+    return false;
+}

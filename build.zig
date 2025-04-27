@@ -82,6 +82,18 @@ fn getVersion(b: *std.Build) Version {
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    
+    // Add release-safe option for building with assertions enabled
+    const release_safe = b.option(bool, "release-safe", "Build with ReleaseSafe mode (optimized but with assertions)") orelse false;
+    const small_release = b.option(bool, "small-release", "Build with ReleaseSmall mode (optimize for binary size)") orelse false;
+    
+    // Determine effective optimization level
+    const effective_optimize = if (small_release) 
+        .ReleaseSmall 
+    else if (release_safe) 
+        .ReleaseSafe 
+    else 
+        optimize;
 
     // Determine version string
     const version = getVersion(b);
@@ -96,7 +108,7 @@ pub fn build(b: *std.Build) !void {
         .name = "zenv",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = effective_optimize,
     });
 
     // Add the options module as an import named "options"

@@ -4,6 +4,8 @@ const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
+const ZenvErrorWithContext = errors.ZenvErrorWithContext;
+const ErrorContext = errors.ErrorContext;
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 
@@ -30,20 +32,19 @@ pub fn handleSetupCommand(
 
     // 1. Combine Dependencies
     var all_required_deps = std.ArrayList([]const u8).init(allocator);
-    // Ensure deinit happens even if parsing fails later
+    // Track ownership of item strings properly
+    var deps_need_cleanup = true;
     defer {
-        // We need to free duped lines from parseRequirementsTxt if they exist
-        // Since parseRequirementsTxt now appends dupes, we free them here.
-        // Dependencies from config are assumed to be string literals or owned by config.
-        // Dependencies from parsePyprojectToml are also duped.
-        // TODO: Improve memory ownership clarity - maybe have parsers return owned lists?
-        for (all_required_deps.items) |item| {
-            // This is imperfect; we don't know which ones were duped.
-            // Assuming parse* functions always dupe for now.
-            // A better approach would be a struct { ptr: []const u8, owned: bool }
-            allocator.free(item); // Potential double-free if item came from config.dependencies
+        if (deps_need_cleanup) {
+            // We need to free duped lines from parseRequirementsTxt if they exist
+            for (all_required_deps.items) |item| {
+                // Free any item that was duped by utility functions
+                if (!utils.isConfigProvidedDependency(env_config, item)) {
+                    allocator.free(item);
+                }
+            }
+            all_required_deps.deinit();
         }
-        all_required_deps.deinit();
     }
 
     // Add dependencies from config
@@ -72,7 +73,7 @@ pub fn handleSetupCommand(
         // Read the file content
         const req_content = std.fs.cwd().readFileAlloc(allocator, req_file, 1 * 1024 * 1024) catch |err| { // Increased size limit
             std.log.err("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) });
-            handleErrorFn(ZenvError.PathResolutionFailed); // Use specific error
+            handleErrorFn(error.PathResolutionFailed); // Use specific error
             return; // Exit setup command
         };
         defer allocator.free(req_content); // Content freed after parsing finishes
@@ -106,10 +107,23 @@ pub fn handleSetupCommand(
     // 2. Create zenv base directory structure
     try utils.createVenvDir(allocator, env_name);
 
+    // Convert ArrayList to owned slice for more efficient processing
+    const deps_slice = try all_required_deps.toOwnedSlice();
+    deps_need_cleanup = false; // We've taken ownership of the items, don't clean up in defer block
+    defer {
+        // Clean up individually owned strings but not config-provided ones
+        for (deps_slice) |item| {
+            if (!utils.isConfigProvidedDependency(env_config, item)) {
+                allocator.free(item);
+            }
+        }
+        allocator.free(deps_slice); // Free the slice itself
+    }
+
     // 3. Perform the main environment setup using the utility function
     //    This now includes dependency validation, script generation, and execution.
-    //    Pass the combined list of dependencies.
-    try utils.setupEnvironment(allocator, env_config, env_name, all_required_deps.items, force_deps);
+    //    Pass the slice of dependencies.
+    try utils.setupEnvironment(allocator, env_config, env_name, deps_slice, force_deps);
 
     // 4. Create the final activation script (using a separate utility)
     try utils.createActivationScript(allocator, env_config, env_name);
@@ -140,7 +154,6 @@ pub fn handleActivateCommand(
 
     writer.print(
         \\# To activate environment '{s}', run the following commands:
-        \\# ---------------------------------------------------------
         \\# Option 1: Use the activation script (recommended)
         \\source {s}/zenv/{s}/activate.sh
         \\
@@ -193,7 +206,6 @@ pub fn handleActivateCommand(
     }
 
     // Print footer and metadata
-    writer.print("# ---------------------------------------------------------\n", .{}) catch {};
     if (env_config.description) |desc| {
         writer.print("# Description: {s}\n", .{desc}) catch {};
     }
@@ -213,7 +225,7 @@ pub fn handleListCommand(
     var use_hostname_filter = !list_all; // New variable to track if we should use hostname filter
 
     if (use_hostname_filter) {
-        current_hostname = config_module.ZenvConfig.getHostname(allocator) catch |err| {
+        current_hostname = config.getHostname() catch |err| {
             std.log.warn("Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)});
             // Don't apply hostname filter if we can't get the hostname
             use_hostname_filter = false;
@@ -227,7 +239,6 @@ pub fn handleListCommand(
     defer if (hostname_allocd and current_hostname != null) allocator.free(current_hostname.?);
 
     stdout.print("Available zenv environments:\n", .{}) catch {};
-    stdout.print("----------------------------\n", .{}) catch {};
 
     var iter = config.environments.iterator();
     var count: usize = 0;
@@ -238,17 +249,8 @@ pub fn handleListCommand(
         // Filter by target machine if requested and hostname was successfully obtained
         if (use_hostname_filter and current_hostname != null) {
             // Use the same enhanced matching logic as getAndValidateEnvironment for consistency
-            const target = env_config.target_machine;
-            const hostname = current_hostname.?;
-            const hostname_matches = blk: {
-                if (std.mem.eql(u8, hostname, target)) break :blk true; // Exact
-                if (hostname.len > target.len + 1 and hostname[hostname.len - target.len - 1] == '.') {
-                    const suffix = hostname[hostname.len - target.len ..];
-                    if (std.mem.eql(u8, suffix, target)) break :blk true; // Domain suffix
-                }
-                if (std.mem.indexOf(u8, hostname, target) != null) break :blk true; // Substring fallback
-                break :blk false;
-            };
+            // Use the pure hostname validation function
+            const hostname_matches = utils.validateEnvironmentForMachine(env_config, current_hostname.?);
 
             if (!hostname_matches) {
                 continue; // Skip this environment
@@ -264,7 +266,6 @@ pub fn handleListCommand(
         stdout.print(")\n", .{}) catch {};
         count += 1;
     }
-    stdout.print("----------------------------\n", .{}) catch {};
 
     // Print summary message
     if (count == 0) {
@@ -283,6 +284,3 @@ pub fn handleListCommand(
         }
     }
 }
-
-// ** Removed helper function placeholder for shell escaping **
-// It's handled inline in handleActivateCommand now.
