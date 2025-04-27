@@ -40,7 +40,7 @@ fn printUsage() void {
         \\
         \\Commands:
         \\  setup <env_name>       Set up the specified environment for the current machine.
-        \\                         Creates a Python virtual environment in sc_venv/<env_name>/.
+        \\                         Creates a Python virtual environment in zenv/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
         \\  activate <env_name>    Print shell commands to activate the specified environment.
         \\                         Shows two options: using the activation script or manual steps.
@@ -57,7 +57,7 @@ fn printUsage() void {
         \\Environment names (e.g., 'pytorch-gpu-jureca') are defined in zenv.json.
         \\
         \\To activate an environment after setup:
-        \\  source /absolute/path/to/sc_venv/<env_name>/activate.sh
+        \\  source /absolute/path/to/zenv/<env_name>/activate.sh
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};

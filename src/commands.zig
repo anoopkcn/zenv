@@ -103,7 +103,7 @@ pub fn handleSetupCommand(
 
     std.log.info("Total combined dependencies before validation: {d}", .{all_required_deps.items.len});
 
-    // 2. Create sc_venv base directory structure
+    // 2. Create zenv base directory structure
     try utils.createScVenvDir(allocator, env_name);
 
     // 3. Perform the main environment setup using the utility function
@@ -142,7 +142,7 @@ pub fn handleActivateCommand(
         \\# To activate environment '{s}', run the following commands:
         \\# ---------------------------------------------------------
         \\# Option 1: Use the activation script (recommended)
-        \\source {s}/sc_venv/{s}/activate.sh
+        \\source {s}/zenv/{s}/activate.sh
         \\
         \\# Option 2: Manual activation
         \\
@@ -158,7 +158,7 @@ pub fn handleActivateCommand(
     };
 
     // Print virtual environment activation with absolute path
-    writer.print("source {s}/sc_venv/{s}/venv/bin/activate\n", .{ cwd_path, env_name }) catch |e| {
+    writer.print("source {s}/zenv/{s}/venv/bin/activate\n", .{ cwd_path, env_name }) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };

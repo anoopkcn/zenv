@@ -13,6 +13,4 @@ docgen_tmp/
 # End of https://www.toptal.com/developers/gitignore/api/zig
 zenv.json
 .zig-cache
-sc_venv_template
-sc_venv
 requirements.txt

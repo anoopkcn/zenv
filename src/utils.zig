@@ -292,15 +292,15 @@ pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, 
 // Filesystem and Directory Utilities
 // ============================================================================
 
-// Create a virtual environment directory structure (sc_venv/env_name)
+// Create a virtual environment directory structure (zenv/env_name)
 pub fn createScVenvDir(allocator: Allocator, env_name: []const u8) !void {
     std.log.info("Creating virtual environment directory structure for '{s}'...", .{env_name});
 
-    // Create base sc_venv directory if it doesn't exist
-    try fs.cwd().makePath("sc_venv");
+    // Create base zenv directory if it doesn't exist
+    try fs.cwd().makePath("zenv");
 
     // Create environment-specific directory
-    const env_dir_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}", .{env_name});
+    const env_dir_path = try std.fmt.allocPrint(allocator, "zenv/{s}", .{env_name});
     defer allocator.free(env_dir_path);
 
     try fs.cwd().makePath(env_dir_path);
@@ -384,7 +384,7 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
 
     // Generate the activation script path
-    const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/activate.sh", .{env_name});
+    const script_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/activate.sh", .{env_name});
     defer allocator.free(script_rel_path);
     const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
@@ -401,7 +401,7 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
 
     // Virtual environment activation with absolute path
     try script_content.appendSlice("# Activate the Python virtual environment\n");
-    const venv_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{ cwd_path, env_name });
+    const venv_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/venv", .{ cwd_path, env_name });
     defer allocator.free(venv_path);
     try script_content.writer().print("source {s}/bin/activate\n\n", .{venv_path});
 
@@ -508,7 +508,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     // The caller of setupEnvironment (handleSetupCommand) owns the memory of the original combined list.
 
     // Create requirements file path
-    const req_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/requirements.txt", .{env_name});
+    const req_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/requirements.txt", .{env_name});
     defer allocator.free(req_rel_path);
     const req_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, req_rel_path });
     defer allocator.free(req_abs_path);
@@ -533,7 +533,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     std.log.info("Created requirements file: {s}", .{req_abs_path});
 
     // Generate setup script path
-    const script_rel_path = try std.fmt.allocPrint(allocator, "sc_venv/{s}/setup_env.sh", .{env_name});
+    const script_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/setup_env.sh", .{env_name});
     defer allocator.free(script_rel_path);
     const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
@@ -549,7 +549,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
 
     // 3. Create virtual environment
     try script_content.appendSlice("echo '==> Step 3: Creating Python virtual environment'\n");
-    const venv_dir = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/venv", .{ cwd_path, env_name });
+    const venv_dir = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/venv", .{ cwd_path, env_name });
     defer allocator.free(venv_dir);
     // Try python3 first, then python
     try script_content.writer().print(
@@ -626,11 +626,11 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         try script_content.appendSlice("  else\n");
         try script_content.appendSlice("    echo '==> No additional packages need to be installed.'\n");
         try script_content.appendSlice("  fi\n");
-        try script_content.appendSlice("  # Report excluded packages\n");
-        try script_content.appendSlice("  if [ $EXCLUDED_COUNT -gt 0 ]; then\n");
-        try script_content.appendSlice("    echo -e '\\n==> Summary of packages excluded (provided by modules):'\n");
-        try script_content.appendSlice("    echo -e \"$EXCLUDED_LIST\" | sort | uniq\n");
-        try script_content.appendSlice("  fi\n");
+        // try script_content.appendSlice("  # Report excluded packages\n");
+        // try script_content.appendSlice("  if [ $EXCLUDED_COUNT -gt 0 ]; then\n");
+        // try script_content.appendSlice("    echo -e '\\n==> Summary of packages excluded (provided by modules):'\n");
+        // try script_content.appendSlice("    echo -e \"$EXCLUDED_LIST\" | sort | uniq\n");
+        // try script_content.appendSlice("  fi\n");
         try script_content.appendSlice("  # Cleanup temp files\n");
         try script_content.appendSlice("  rm -f \"$FILTERED_REQUIREMENTS\" \"$MODULE_PACKAGES_FILE\"\n");
         try script_content.appendSlice("else\n");
@@ -660,7 +660,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
 
     // 6. Completion message
     try script_content.appendSlice("echo '==> Setup completed successfully!'\n");
-    const activate_script_path = try std.fmt.allocPrint(allocator, "{s}/sc_venv/{s}/activate.sh", .{ cwd_path, env_name });
+    const activate_script_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/activate.sh", .{ cwd_path, env_name });
     defer allocator.free(activate_script_path);
     try script_content.writer().print("echo 'To activate this environment, run: source {s}'\n", .{activate_script_path});
 
