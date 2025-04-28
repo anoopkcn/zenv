@@ -487,37 +487,14 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    "dependencies": [
         \\      "pytest",
         \\      "black",
-        \\      "flake8"
         \\    ],
-        \\    "requirements_file": "requirements-dev.txt",
+        \\    "requirements_file": "pyproject.toml",
         \\    "custom_activate_vars": {{
         \\      "DEVELOPMENT": "true",
         \\      "DEBUG": "1"
         \\    }},
         \\    "setup_commands": [
         \\      "echo 'Development environment setup complete!'"
-        \\    ]
-        \\  }},
-        \\  "cluster_env": {{
-        \\    "target_machine": "*.jureca",
-        \\    "description": "HPC cluster environment with pattern matching",
-        \\    "python_executable": "python3",
-        \\    "modules": [
-        \\      "GCC",
-        \\      "CUDA"
-        \\    ],
-        \\    "dependencies": [
-        \\      "mpi4py",
-        \\      "numpy",
-        \\      "pandas"
-        \\    ],
-        \\    "requirements_file": "requirements-cluster.txt",
-        \\    "custom_activate_vars": {{
-        \\      "CLUSTER": "true",
-        \\      "OMP_NUM_THREADS": "4"
-        \\    }},
-        \\    "setup_commands": [
-        \\      "echo 'Cluster environment setup complete!'"
         \\    ]
         \\  }}
         \\}}
@@ -542,8 +519,8 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
 
     std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
     std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
-    std.io.getStdOut().writer().print("\nNOTE: 'target_machine' now supports pattern matching:\n", .{}) catch {};
-    std.io.getStdOut().writer().print("  - Use '*' to match any characters, e.g., 'jrlogin*' matches all login nodes\n", .{}) catch {};
-    std.io.getStdOut().writer().print("  - Use '?' to match a single character, e.g., 'node0?' matches node01-09\n", .{}) catch {};
-    std.io.getStdOut().writer().print("  - Use domain components like 'jureca' to match 'jrlogin08.jureca'\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("\nNOTE: 'target_machine' now supports pattern matching:\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("  - Use '*' to match any characters, e.g., 'jrlogin*' matches all login nodes\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("  - Use '?' to match a single character, e.g., 'node0?' matches node01-09\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("  - Use domain components like 'jureca' to match 'jrlogin08.jureca'\n", .{}) catch {};
 }
