@@ -56,6 +56,7 @@ pub const RegistryEntry = struct {
     project_dir: []const u8,
     description: ?[]const u8 = null,
     target_machines_str: []const u8, // Renamed: String representation stored in registry
+    venv_path: []const u8, // Absolute path to the virtual environment directory
 
     pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
         allocator.free(self.id);
@@ -65,6 +66,7 @@ pub const RegistryEntry = struct {
             allocator.free(desc);
         }
         allocator.free(self.target_machines_str); // Renamed
+        allocator.free(self.venv_path); // Free new field
     }
 };
 
@@ -226,26 +228,59 @@ pub const EnvironmentRegistry = struct {
                 // Check for ID or generate one if not present (backward compatibility)
                 var id_owned: []const u8 = undefined;
                 if (entry_obj.get("id")) |id_value| {
-                    if (id_value == .string) {
+                    if (id_value == .string) { // Use value type check (no dereference needed)
                         id_owned = try allocator.dupe(u8, id_value.string);
                     } else {
-                        // Generate a new ID if the existing one isn't a string
                         id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
                         std.log.info("Generated new SHA-1 ID for environment with invalid ID type: {s}", .{env_name.string});
                     }
                 } else {
-                    // No ID exists, generate one (for backward compatibility)
                     id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
                     std.log.info("Generated new SHA-1 ID for existing environment: {s}", .{env_name.string});
                 }
+                errdefer allocator.free(id_owned); // Free ID if adding entry fails
 
-                // Create entry
+                // Get venv_path or reconstruct for backward compatibility
+                var venv_path_owned: []const u8 = undefined;
+                var venv_path_found_or_reconstructed = false;
+                if (entry_obj.get("venv_path")) |venv_path_val| {
+                    if (venv_path_val == .string) { // Check value type (no dereference needed)
+                        venv_path_owned = try allocator.dupe(u8, venv_path_val.string);
+                        venv_path_found_or_reconstructed = true;
+                    } else {
+                        std.log.warn("Registry entry for '{s}' has invalid 'venv_path' type, reconstructing...", .{env_name.string});
+                        // Fall through to reconstruction
+                    }
+                } else {
+                     std.log.info("Registry entry for '{s}' missing 'venv_path', reconstructing assuming default 'zenv' base...", .{env_name.string});
+                     // Fall through to reconstruction
+                }
+
+                // Reconstruction logic (if needed)
+                if (!venv_path_found_or_reconstructed) {
+                    std.log.info("Attempting to reconstruct venv_path for '{s}' assuming default 'zenv' base...", .{env_name.string});
+                    // Assume default base "zenv"
+                    venv_path_owned = std.fs.path.join(allocator, &[_][]const u8{
+                        project_dir.string, // Use the string directly from JSON
+                        "zenv",
+                        env_name.string, // Use the string directly from JSON
+                    }) catch |err| {
+                         std.log.err("Failed to reconstruct venv_path for '{s}': {s}", .{env_name.string, @errorName(err)});
+                         continue; // Skip this entry if reconstruction fails
+                    };
+                    venv_path_found_or_reconstructed = true; // Mark as successful
+                }
+                // Free venv_path if appending fails (ownership isn't transferred)
+                errdefer allocator.free(venv_path_owned); 
+
+                // Create entry (strings are duplicated for ownership by entry)
                 try registry.entries.append(.{
-                    .id = id_owned,
+                    .id = id_owned, // Ownership transferred
                     .env_name = try allocator.dupe(u8, env_name.string),
                     .project_dir = try allocator.dupe(u8, project_dir.string),
-                    .description = description,
-                    .target_machines_str = try allocator.dupe(u8, target_machines_str.string), // Renamed field
+                    .description = description, // Already duplicated or null
+                    .target_machines_str = try allocator.dupe(u8, target_machines_str.string),
+                    .venv_path = venv_path_owned, // Ownership transferred
                 });
             }
         }
@@ -293,7 +328,8 @@ pub const EnvironmentRegistry = struct {
             try entry_obj.object.put("id", std.json.Value{ .string = entry.id });
             try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
             try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
-            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machines_str }); // Renamed field
+            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machines_str }); // Reads/writes old key for now
+            try entry_obj.object.put("venv_path", std.json.Value{ .string = entry.venv_path }); // Add new field
 
             // Add optional description field
             if (entry.description) |desc| {
@@ -319,7 +355,7 @@ pub const EnvironmentRegistry = struct {
     }
 
     // Register a new environment
-    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, description: ?[]const u8, target_machines: []const []const u8) !void {
+    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, base_dir: []const u8, description: ?[]const u8, target_machines: []const []const u8) !void {
         // For registry purposes, create a single string representation of target machines
         var registry_target_machines_str: []const u8 = undefined;
         if (target_machines.len == 0) {
@@ -338,6 +374,11 @@ pub const EnvironmentRegistry = struct {
         // We need to free this string later if it's not used to update an entry
         errdefer self.allocator.free(registry_target_machines_str);
 
+        // Calculate the absolute venv_path
+        const venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{project_dir, base_dir, env_name});
+        // Free this path later if not used to update/create an entry
+        errdefer self.allocator.free(venv_path);
+
         // Check if environment already exists
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
@@ -354,7 +395,11 @@ pub const EnvironmentRegistry = struct {
                 self.allocator.free(entry.target_machines_str); // Renamed field
                 entry.target_machines_str = registry_target_machines_str; // Assign ownership
 
-                // Ownership of registry_target_machines_str transferred, so no need to free later
+                // Free the old venv_path and assign the new one
+                self.allocator.free(entry.venv_path);
+                entry.venv_path = venv_path; // Assign ownership
+                
+                // Ownership transferred, so no need to free later
                 return; // Successfully updated
             }
         }
@@ -364,13 +409,14 @@ pub const EnvironmentRegistry = struct {
         const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
         errdefer self.allocator.free(id); // Free ID if appending fails
 
-        // Add new entry (transfer ownership of registry_target_machines_str)
+        // Add new entry (transfer ownership of strings)
         try self.entries.append(.{
             .id = id,
             .env_name = try self.allocator.dupe(u8, env_name),
             .project_dir = try self.allocator.dupe(u8, project_dir),
             .description = if (description) |desc| try self.allocator.dupe(u8, desc) else null,
             .target_machines_str = registry_target_machines_str, // Renamed field, ownership transferred
+            .venv_path = venv_path, // Ownership transferred
         });
     }
 
@@ -666,6 +712,8 @@ pub const ZenvConfig = struct {
     environments: StringHashMap(EnvironmentConfig),
     // Store the parsed value tree to manage its lifetime
     value_tree: Json.Parsed(Json.Value), // Explicit type needed here
+    // Base directory for virtual environments (relative to project)
+    base_dir: []const u8, // Default is "zenv"
     // Cache the hostname to avoid repeated lookups
     cached_hostname: ?[]const u8 = null,
 
@@ -705,8 +753,28 @@ pub const ZenvConfig = struct {
             .allocator = allocator,
             .environments = StringHashMap(EnvironmentConfig).init(allocator),
             .value_tree = value_tree, // Store the tree to manage its lifetime
+            .base_dir = undefined, // Initialize, will be set below
         };
         errdefer config.deinit(); // Ensure cleanup on error during parsing loop
+
+        // Parse top-level base_dir first
+        if (root.object.get("base_dir")) |base_dir_val_ptr| {
+            if (base_dir_val_ptr == .string) { // No dereference needed
+                // Duplicate the string for ownership
+                config.base_dir = try allocator.dupe(u8, base_dir_val_ptr.string);
+            } else if (base_dir_val_ptr == .null) { // No dereference needed
+                 std.log.info("'base_dir' is null, using default 'zenv'", .{});
+                 config.base_dir = try allocator.dupe(u8, "zenv"); // Default
+            } else {
+                std.log.warn("Ignoring non-string value for 'base_dir', using default 'zenv'", .{});
+                config.base_dir = try allocator.dupe(u8, "zenv"); // Default
+            }
+        } else {
+            // If field doesn't exist, use default
+            std.log.info("'base_dir' not found, using default 'zenv'", .{});
+            config.base_dir = try allocator.dupe(u8, "zenv");
+        }
+        std.log.debug("Using virtual environment base directory: {s}", .{config.base_dir});
 
         var env_map_iter = root.object.iterator(); // Access the iterator via the .object payload
         while (env_map_iter.next()) |entry| {
@@ -867,6 +935,9 @@ pub const ZenvConfig = struct {
 
         // Now that all references to the value tree are gone, deinit it.
         self.value_tree.deinit(); // Use deinit without allocator
+
+        // Free the base_dir string
+        self.allocator.free(self.base_dir);
 
         // Free the cached hostname if one exists
         if (self.cached_hostname != null) {

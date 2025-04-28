@@ -104,8 +104,11 @@ pub fn handleSetupCommand(
 
     std.log.info("Total combined dependencies before validation: {d}", .{all_required_deps.items.len});
 
-    // 2. Create zenv base directory structure
-    try utils.createVenvDir(allocator, env_name);
+    // Get base_dir from config
+    const base_dir = config.base_dir;
+
+    // 2. Create venv base directory structure using base_dir
+    try utils.createVenvDir(allocator, base_dir, env_name);
 
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice();
@@ -121,7 +124,7 @@ pub fn handleSetupCommand(
     }
 
     // 3. Perform the main environment setup using the utility function
-    utils.setupEnvironment(allocator, env_config, env_name, deps_slice, force_deps) catch |err| {
+    utils.setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps) catch |err| {
         if (err == error.ModuleLoadError) {
             // For module load errors, we don't want to show a stack trace
             // Just output the error and exit
@@ -132,7 +135,7 @@ pub fn handleSetupCommand(
     };
 
     // 4. Create the final activation script (using a separate utility)
-    try utils.createActivationScript(allocator, env_config, env_name);
+    try utils.createActivationScript(allocator, env_config, env_name, base_dir);
 
     // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -142,7 +145,7 @@ pub fn handleSetupCommand(
         return;
     };
 
-    try registry.register(env_name, cwd_path, env_config.description, env_config.target_machines.items);
+    try registry.register(env_name, cwd_path, base_dir, env_config.description, env_config.target_machines.items);
     try registry.save();
 
     std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
@@ -168,13 +171,13 @@ pub fn handleActivateCommand(
     // Look up environment using the utility function
     const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
 
-    // Get project directory from registry entry
-    const project_dir = entry.project_dir;
+    // Get venv_path from registry entry
+    const venv_path = entry.venv_path;
 
     const writer = std.io.getStdOut().writer();
 
-    // Output the path to the activation script
-    writer.print("{s}/zenv/{s}/activate.sh\n", .{ project_dir, entry.env_name }) catch |e| {
+    // Output the absolute path to the activation script
+    writer.print("{s}/bin/activate\n", .{venv_path}) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
@@ -247,7 +250,8 @@ pub fn handleListCommand(
         if (entry.description) |desc| {
             stdout.print(" - {s}", .{desc}) catch {};
         }
-        stdout.print(")\n  [Project: {s}]\n", .{entry.project_dir}) catch {};
+        // Print project and venv paths
+        stdout.print(")\n  [Project: {s}]\n  [Venv:    {s}]\n", .{entry.project_dir, entry.venv_path}) catch {};
 
         // Print full ID on a separate line for reference
         // stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
@@ -273,7 +277,7 @@ pub fn handleListCommand(
 }
 pub fn handleRegisterCommand(
     allocator: Allocator,
-    config: *const ZenvConfig,
+    // config: *const ZenvConfig, // Config is no longer passed in, load it here
     registry: *EnvironmentRegistry,
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void,
@@ -287,8 +291,21 @@ pub fn handleRegisterCommand(
 
     const env_name = args[2];
 
+    // Load the configuration for the current directory to find base_dir
+    const config_path = "zenv.json";
+    var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
+        // If config is missing or invalid, we cannot determine the base_dir
+        std.log.err("Failed to load or parse '{s}' in current directory: {s}", .{config_path, @errorName(err)});
+        std.log.err("Cannot register environment without valid configuration.", .{});
+        handleErrorFn(err);
+        return;
+    };
+    // Ensure config is deinitialized even if subsequent operations fail
+    defer config.deinit();
+
     // Validate that the environment exists in the config
-    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
+    // Note: getAndValidateEnvironment needs a *const pointer
+    const env_config = utils.getAndValidateEnvironment(allocator, &config, args, handleErrorFn) orelse return;
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -298,8 +315,11 @@ pub fn handleRegisterCommand(
         return;
     };
 
-    // Register the environment in the global registry, passing the target_machines array
-    registry.register(env_name, cwd_path, env_config.description, env_config.target_machines.items) catch |err| {
+    // Get the base_dir from the loaded config
+    const base_dir = config.base_dir;
+
+    // Register the environment in the global registry, passing base_dir
+    registry.register(env_name, cwd_path, base_dir, env_config.description, env_config.target_machines.items) catch |err| {
         std.log.err("Failed to register environment: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return;
@@ -446,8 +466,9 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
     // Create template content with pattern examples
     const template_content = std.fmt.allocPrint(allocator,
         \\{{
+        \\  "base_dir": "zenv",
         \\  "default_env": {{
-        \\    "target_machine": ["{s}"],
+        \\    "target_machines": ["{s}"],
         \\    "description": "Default environment",
         \\    "python_executable": "python3",
         \\    "modules": [],
@@ -461,7 +482,7 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    ]
         \\  }},
         \\  "dev_env": {{
-        \\    "target_machine": ["{s}", "any"],
+        \\    "target_machines": ["{s}", "any"],
         \\    "description": "Development environment with additional tools",
         \\    "python_executable": "python3",
         \\    "modules": [],

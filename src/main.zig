@@ -38,6 +38,12 @@ fn printUsage() void {
         \\
         \\Manages environments based on zenv.json configuration.
         \\
+        \\Configuration (zenv.json):
+        \\  The zenv.json file defines your environments. It can optionally include:
+        \\  "base_dir": "path/to/venvs"  (Optional, top-level string. Specifies the base directory
+        \\                                relative to zenv.json for creating virtual environments.
+        \\                                Defaults to "zenv" if omitted.)
+        \\
         \\Commands:
         \\  init                   Create a new zenv.json template file in the current directory.
         \\
@@ -224,7 +230,7 @@ pub fn main() anyerror!void {
         .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args_const, handleError),
         .activate => commands.handleActivateCommand(&registry, args_const, handleError),
         .list => commands.handleListCommand(allocator, &registry, args_const),
-        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
+        .register => commands.handleRegisterCommand(allocator, &registry, args_const, handleError), // Removed config param
         .deregister => commands.handleDeregisterCommand(&registry, args_const, handleError),
         .cd => commands.handleCdCommand(&registry, args_const, handleError),
 

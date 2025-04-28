@@ -290,17 +290,18 @@ pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, 
 // Filesystem and Directory Utilities
 // ============================================================================
 
-// Create a virtual environment directory structure (zenv/env_name)
-pub fn createVenvDir(allocator: Allocator, env_name: []const u8) !void {
-    std.log.info("Creating virtual environment directory structure for '{s}'...", .{env_name});
+// Create a virtual environment directory structure ({base_dir}/{env_name})
+pub fn createVenvDir(allocator: Allocator, base_dir: []const u8, env_name: []const u8) !void {
+    std.log.info("Ensuring virtual environment base directory '{s}' exists...", .{base_dir});
 
-    // Create base zenv directory if it doesn't exist
-    try fs.cwd().makePath("zenv");
+    // Create base directory if it doesn't exist
+    try fs.cwd().makePath(base_dir);
 
     // Create environment-specific directory
-    const env_dir_path = try std.fmt.allocPrint(allocator, "zenv/{s}", .{env_name});
+    const env_dir_path = try std.fs.path.join(allocator, &[_][]const u8{base_dir, env_name});
     defer allocator.free(env_dir_path);
 
+    std.log.info("Creating environment directory '{s}'...", .{env_dir_path});
     try fs.cwd().makePath(env_dir_path);
 }
 
@@ -411,17 +412,18 @@ fn appendModuleCommandsToScript(
 }
 
 // Create activation script for the environment
-pub fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8) !void {
+pub fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8) !void {
     std.log.info("Creating activation script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    errdefer std.log.err("Failed to get CWD realpath in createActivationScript", .{}); // Add error context
 
-    // Generate the activation script path
-    const script_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/activate.sh", .{env_name});
+    // Generate the activation script path using base_dir
+    const script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{base_dir, env_name, "activate.sh"});
     defer allocator.free(script_rel_path);
-    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
+    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
     // Use a memory buffer for all content before writing to disk
@@ -475,8 +477,8 @@ pub fn createActivationScript(allocator: Allocator, env_config: *const Environme
     try writer.print("  echo '==> Module command not found, skipping module operations'\n", .{});
     try writer.print("fi\n\n", .{});
 
-    // Virtual environment activation with absolute path
-    const venv_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}", .{ cwd_path, env_name });
+    // Virtual environment activation with absolute path using base_dir
+    const venv_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
     defer allocator.free(venv_path);
     try writer.print(
         \\# Activate the Python virtual environment
@@ -620,8 +622,8 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
 // ============================================================================
 
 // Sets up the full environment: creates files, generates and runs setup script.
-pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, deps: []const []const u8, force_deps: bool) !void {
-    std.log.info("Setting up environment '{s}'...", .{env_name});
+pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, deps: []const []const u8, force_deps: bool) !void {
+    std.log.info("Setting up environment '{s}' in base directory '{s}'...", .{env_name, base_dir});
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -631,10 +633,10 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     var valid_deps_list = try validateDependencies(allocator, deps, env_name);
     defer valid_deps_list.deinit(); // Deinit the list itself
 
-    // Create requirements file path
-    const req_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/requirements.txt", .{env_name});
+    // Create requirements file path using base_dir
+    const req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{base_dir, env_name, "requirements.txt"});
     defer allocator.free(req_rel_path);
-    const req_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, req_rel_path });
+    const req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
     defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
@@ -658,10 +660,10 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     } // req_file is closed here
     std.log.info("Created requirements file: {s}", .{req_abs_path});
 
-    // Generate setup script path
-    const script_rel_path = try std.fmt.allocPrint(allocator, "zenv/{s}/setup_env.sh", .{env_name});
+    // Generate setup script path using base_dir
+    const script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{base_dir, env_name, "setup_env.sh"});
     defer allocator.free(script_rel_path);
-    const script_abs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_path, script_rel_path });
+    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
     // Write setup script to file
@@ -678,8 +680,8 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         // 2. Module commands (purge, load, check provided packages)
         try appendModuleCommandsToScript(writer, allocator, env_config, true);
 
-        // 3. Create virtual environment
-        const venv_dir = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}", .{ cwd_path, env_name });
+        // 3. Create virtual environment using base_dir
+        const venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
         defer allocator.free(venv_dir);
         try writer.print(
             \\echo '==> Step 3: Creating Python virtual environment'
@@ -808,7 +810,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         }
 
         // 6. Completion message
-        const activate_script_path = try std.fmt.allocPrint(allocator, "{s}/zenv/{s}/activate.sh", .{ cwd_path, env_name });
+        const activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "activate.sh" });
         defer allocator.free(activate_script_path);
         try writer.print(
             \\echo '==> Setup completed successfully!'
