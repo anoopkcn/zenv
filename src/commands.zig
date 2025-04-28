@@ -15,7 +15,7 @@ pub fn handleSetupCommand(
     handleErrorFn: fn (anyerror) void,
 ) anyerror!void {
     const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
-    const env_name = args[2]; // Safe now after check in getAndValidateEnvironment
+    const env_name = args[2];
 
     // Check for --force-deps flag
     var force_deps = false;
