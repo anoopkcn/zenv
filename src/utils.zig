@@ -841,28 +841,146 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
 // ============================================================================
 
 // Pure function to validate environment for a specific hostname
+// Normalizes a hostname for better matching
+// Handles common variations like ".local" suffix on macOS
+fn normalizeHostname(hostname: []const u8) []const u8 {
+    // Remove ".local" suffix common in macOS environments
+    if (std.mem.endsWith(u8, hostname, ".local")) {
+        return hostname[0 .. hostname.len - 6];
+    }
+    return hostname;
+}
+
+// Checks if pattern with wildcards matches a string
+// Supports * (any characters) and ? (single character)
+fn patternMatches(pattern: []const u8, str: []const u8) bool {
+    // Empty pattern only matches empty string
+    if (pattern.len == 0) return str.len == 0;
+    
+    // Special case: single * matches anything
+    if (pattern.len == 1 and pattern[0] == '*') return true;
+    
+    // Empty string only matches if pattern is just asterisks
+    if (str.len == 0) {
+        for (pattern) |c| {
+            if (c != '*') return false;
+        }
+        return true;
+    }
+    
+    // Handle common prefix pattern: "compute-*"
+    if (pattern.len >= 2 and pattern[pattern.len - 1] == '*') {
+        // Check if it's a simple prefix pattern without other wildcards
+        var has_other_wildcards = false;
+        for (pattern[0 .. pattern.len - 1]) |c| {
+            if (c == '*' or c == '?') {
+                has_other_wildcards = true;
+                break;
+            }
+        }
+        
+        if (!has_other_wildcards) {
+            const prefix = pattern[0 .. pattern.len - 1];
+            return std.mem.startsWith(u8, str, prefix);
+        }
+    }
+    
+    // Handle common suffix pattern: "*.example.com"
+    if (pattern.len >= 2 and pattern[0] == '*') {
+        // Check if it's a simple suffix pattern without other wildcards
+        var has_other_wildcards = false;
+        for (pattern[1..]) |c| {
+            if (c == '*' or c == '?') {
+                has_other_wildcards = true;
+                break;
+            }
+        }
+        
+        if (!has_other_wildcards) {
+            const suffix = pattern[1..];
+            return std.mem.endsWith(u8, str, suffix);
+        }
+    }
+    
+    // For other patterns, use a more general algorithm
+    // This is a simple implementation - could be optimized further
+    if (pattern[0] == '*') {
+        // '*' can match 0 or more characters
+        // Try matching rest of pattern with current string, or
+        // keep the asterisk and match with next character of string
+        return patternMatches(pattern[1..], str) or patternMatches(pattern, str[1..]);
+    } else if (pattern[0] == '?' or pattern[0] == str[0]) {
+        // '?' matches any single character, or match exact character
+        if (str.len >= 1) {
+            return patternMatches(pattern[1..], str[1..]);
+        }
+    }
+    
+    return false;
+}
+
+// Splits a hostname into domain components and checks if any match the target
+fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, hostname, '.');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn validateEnvironmentForMachine(
     env_config: anytype,
     hostname: []const u8
 ) bool {
     const target = env_config.target_machine;
-
-    // 1. Exact match
-    if (std.mem.eql(u8, hostname, target)) {
+    
+    // Special cases for universal targets
+    if (std.mem.eql(u8, target, "localhost") or 
+        std.mem.eql(u8, target, "any") or 
+        std.mem.eql(u8, target, "*")) {
         return true;
     }
-    // 2. Domain suffix match (e.g., node123.cluster matches target cluster)
-    if (hostname.len > target.len + 1 and hostname[hostname.len - target.len - 1] == '.') {
-        const suffix = hostname[hostname.len - target.len ..];
+    
+    // Normalize the hostname
+    const norm_hostname = normalizeHostname(hostname);
+    
+    // Check if the target contains wildcard characters
+    const has_wildcards = std.mem.indexOfAny(u8, target, "*?") != null;
+    
+    // If target has wildcards, use pattern matching
+    if (has_wildcards) {
+        return patternMatches(target, norm_hostname);
+    }
+    
+    // Otherwise, try various matching strategies in order of specificity
+    
+    // 1. Exact match (most specific)
+    if (std.mem.eql(u8, norm_hostname, target)) {
+        return true;
+    }
+    
+    // 2. Domain component match (e.g., matching "jureca" in "jrlogin08.jureca")
+    if (matchDomainComponent(norm_hostname, target)) {
+        return true;
+    }
+    
+    // 3. Check if target is a domain suffix like ".example.com"
+    if (target.len > 0 and target[0] == '.' and 
+        std.mem.endsWith(u8, norm_hostname, target)) {
+        return true;
+    }
+    
+    // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
+    if (norm_hostname.len > target.len + 1 and norm_hostname[norm_hostname.len - target.len - 1] == '.') {
+        const suffix = norm_hostname[norm_hostname.len - target.len..];
         if (std.mem.eql(u8, suffix, target)) {
             return true;
         }
     }
-    // 3. Substring match as fallback (least specific)
-    if (std.mem.indexOf(u8, hostname, target) != null) {
-        return true;
-    }
-
+    
+    // No match found
     return false;
 }
 
@@ -1030,9 +1148,55 @@ pub fn getHostname(allocator: Allocator) ![]const u8 {
 
 // Simple check for hostname matching target machine
 pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
-    // Simple substring check for now, can be enhanced later
-    return std.mem.indexOf(u8, hostname, target_machine) != null or
-           std.mem.indexOf(u8, target_machine, hostname) != null;
+    // Use the same improved matching logic as validateEnvironmentForMachine
+    // This provides consistency across different parts of the codebase
+    
+    // Special cases for universal targets
+    if (std.mem.eql(u8, target_machine, "localhost") or 
+        std.mem.eql(u8, target_machine, "any") or 
+        std.mem.eql(u8, target_machine, "*")) {
+        return true;
+    }
+    
+    // Normalize the hostname
+    const norm_hostname = normalizeHostname(hostname);
+    
+    // Check if the target contains wildcard characters
+    const has_wildcards = std.mem.indexOfAny(u8, target_machine, "*?") != null;
+    
+    // If target has wildcards, use pattern matching
+    if (has_wildcards) {
+        return patternMatches(target_machine, norm_hostname);
+    }
+    
+    // Try various matching strategies
+    
+    // 1. Exact match
+    if (std.mem.eql(u8, norm_hostname, target_machine)) {
+        return true;
+    }
+    
+    // 2. Domain component match
+    if (matchDomainComponent(norm_hostname, target_machine)) {
+        return true;
+    }
+    
+    // 3. Domain suffix
+    if (target_machine.len > 0 and target_machine[0] == '.' and 
+        std.mem.endsWith(u8, norm_hostname, target_machine)) {
+        return true;
+    }
+    
+    // 4. Domain suffix match
+    if (norm_hostname.len > target_machine.len + 1 and 
+        norm_hostname[norm_hostname.len - target_machine.len - 1] == '.') {
+        const suffix = norm_hostname[norm_hostname.len - target_machine.len..];
+        if (std.mem.eql(u8, suffix, target_machine)) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // Helper function to get hostname using the `hostname` command

@@ -440,7 +440,7 @@ pub fn handleUnregisterCommand(
 pub fn handleInitCommand(allocator: std.mem.Allocator) void {
     const cwd = std.fs.cwd();
     const config_path = "zenv.json";
-    
+
     // Check if file exists
     const file_exists = blk: {
         cwd.access(config_path, .{}) catch |err| {
@@ -458,12 +458,12 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         std.io.getStdErr().writer().print("Error: {s} already exists. Please remove or rename it first.\n", .{config_path}) catch {};
         std.process.exit(1);
     }
-    
-    // Use a static string as the default target_machine
-    const hostname = "localhost"; // Default target machine
-    
-    // Create template content
-    const template_content = std.fmt.allocPrint(allocator, 
+
+    // Use a static string as the default target_machine - now supporting patterns
+    const hostname = "localhost";
+
+    // Create template content with pattern examples
+    const template_content = std.fmt.allocPrint(allocator,
         \\{{
         \\  "default_env": {{
         \\    "target_machine": "{s}",
@@ -497,6 +497,28 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    "setup_commands": [
         \\      "echo 'Development environment setup complete!'"
         \\    ]
+        \\  }},
+        \\  "cluster_env": {{
+        \\    "target_machine": "*.jureca",
+        \\    "description": "HPC cluster environment with pattern matching",
+        \\    "python_executable": "python3",
+        \\    "modules": [
+        \\      "GCC",
+        \\      "CUDA"
+        \\    ],
+        \\    "dependencies": [
+        \\      "mpi4py",
+        \\      "numpy",
+        \\      "pandas"
+        \\    ],
+        \\    "requirements_file": "requirements-cluster.txt",
+        \\    "custom_activate_vars": {{
+        \\      "CLUSTER": "true",
+        \\      "OMP_NUM_THREADS": "4"
+        \\    }},
+        \\    "setup_commands": [
+        \\      "echo 'Cluster environment setup complete!'"
+        \\    ]
         \\  }}
         \\}}
         \\
@@ -505,19 +527,23 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         std.process.exit(1);
     };
     defer allocator.free(template_content);
-    
+
     // Write template to file
     const file = cwd.createFile(config_path, .{}) catch |err| {
         std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
         std.process.exit(1);
     };
     defer file.close();
-    
+
     file.writeAll(template_content) catch |err| {
         std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
         std.process.exit(1);
     };
-    
+
     std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
     std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
+    std.io.getStdOut().writer().print("\nNOTE: 'target_machine' now supports pattern matching:\n", .{}) catch {};
+    std.io.getStdOut().writer().print("  - Use '*' to match any characters, e.g., 'jrlogin*' matches all login nodes\n", .{}) catch {};
+    std.io.getStdOut().writer().print("  - Use '?' to match a single character, e.g., 'node0?' matches node01-09\n", .{}) catch {};
+    std.io.getStdOut().writer().print("  - Use domain components like 'jureca' to match 'jrlogin08.jureca'\n", .{}) catch {};
 }
