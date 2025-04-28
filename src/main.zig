@@ -60,7 +60,7 @@ fn printUsage() void {
         \\  help, --help           Show this help message.
         \\
         \\Options:
-        \\  --force-deps           When used with setup command, it tries to installs all specified dependencies
+        \\  --force-deps           When used with setup command, it tries to install all specified dependencies
         \\                         even if they are already provided by loaded modules.
         \\
         \\Registry:
