@@ -17,8 +17,7 @@ Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
 Example for Linux x86_64 machine:
 ```bash
-curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz
-"
+curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz"
 ```
 and extract the `zenv` executable using:
 ```bash
