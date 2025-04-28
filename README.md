@@ -60,7 +60,7 @@ Example:
     "target_machine": "computer1",
     "requirements_file": "requirements.txt",
     "description": "Basic environment for Computer1",
-    "modules":[ "Python", "CUDA" ]
+    "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ]
     "dependencies": [ "numpy>=1.20.0", "tqdm" ]
   }
 }
