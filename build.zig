@@ -35,19 +35,17 @@ fn getVersion(b: *std.Build) Version {
 
     // Run git describe --tags --match '*.*.*'
     var exit_code: u8 = undefined;
-    const result = b.runAllowFail(
-        &[_][]const u8{
-            git_path,
-            "-C", // Change directory before running command
-            build_root_path, // Path to the repo root (where .git lives)
-            "describe",
-            "--tags",         // Use tags
-            "--match", "*.*.*", // Match semantic version like tags
-            "--dirty=-dirty", // Append -dirty if working tree is modified
-            "--always",       // Fallback to commit hash if no tag found
-        },
-        &exit_code, // Pass address for exit code
-        .Ignore    // Ignore stderr
+    const result = b.runAllowFail(&[_][]const u8{
+        git_path,
+        "-C", // Change directory before running command
+        build_root_path, // Path to the repo root (where .git lives)
+        "describe",
+        "--tags", // Use tags
+        "--match", "*.*.*", // Match semantic version like tags
+        "--dirty=-dirty", // Append -dirty if working tree is modified
+        "--always", // Fallback to commit hash if no tag found
+    }, &exit_code, // Pass address for exit code
+        .Ignore // Ignore stderr
     ) catch |err| {
         std.log.warn("git describe failed, cannot determine version: {s}", .{@errorName(err)});
         return .unknown;
@@ -63,18 +61,22 @@ fn getVersion(b: *std.Build) Version {
     // Simple check: if it contains '-', assume it's a commit description, otherwise a tag.
     // This is a simplification from zine's logic for brevity.
     if (std.mem.containsAtLeast(u8, git_describe, 1, "-")) {
-         // Check if it's just the commit hash (fallback from --always)
-         // or tag-like-description
-         // We'll just call it a commit version for simplicity here
-         return .{ .commit = b.allocator.dupe(u8, git_describe) catch |err| {
-              std.log.err("Failed to allocate version string: {s}", .{@errorName(err)});
-              return .unknown; // Treat allocation failure as unknown
-         } };
+        // Check if it's just the commit hash (fallback from --always)
+        // or tag-like-description
+        // We'll just call it a commit version for simplicity here
+        return .{
+            .commit = b.allocator.dupe(u8, git_describe) catch |err| {
+                std.log.err("Failed to allocate version string: {s}", .{@errorName(err)});
+                return .unknown; // Treat allocation failure as unknown
+            },
+        };
     } else {
-         return .{ .tag = b.allocator.dupe(u8, git_describe) catch |err| {
-             std.log.err("Failed to allocate version string: {s}", .{@errorName(err)});
-             return .unknown; // Treat allocation failure as unknown
-         } };
+        return .{
+            .tag = b.allocator.dupe(u8, git_describe) catch |err| {
+                std.log.err("Failed to allocate version string: {s}", .{@errorName(err)});
+                return .unknown; // Treat allocation failure as unknown
+            },
+        };
     }
 }
 
@@ -111,19 +113,19 @@ const release_targets = [_]ReleaseTarget{
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    
+
     // Add release-safe option for building with assertions enabled
     const release_safe = b.option(bool, "release-safe", "Build with ReleaseSafe mode (optimized but with assertions)") orelse false;
     const small_release = b.option(bool, "small-release", "Build with ReleaseSmall mode (optimize for binary size)") orelse false;
     // Add option to force releases even without a tag
     const force_release = b.option(bool, "force-release", "Allow release builds without git tags") orelse false;
-    
+
     // Determine effective optimization level
-    const effective_optimize = if (small_release) 
-        .ReleaseSmall 
-    else if (release_safe) 
-        .ReleaseSafe 
-    else 
+    const effective_optimize = if (small_release)
+        .ReleaseSmall
+    else if (release_safe)
+        .ReleaseSafe
+    else
         optimize;
 
     // Determine version string
@@ -167,32 +169,20 @@ pub fn build(b: *std.Build) !void {
     if (version == .tag or force_release) {
         // Add individual target-specific build steps
         for (release_targets) |release_target| {
-            const target_step_small = b.step(
-                b.fmt("release-{s}-small", .{release_target.name}), 
-                b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
-            );
+            const target_step_small = b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description}));
             setupTargetReleaseWithOptimize(b, target_step_small, version_string, release_target.query, .ReleaseSmall);
-            
-            const target_step_fast = b.step(
-                b.fmt("release-{s}", .{release_target.name}), 
-                b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
-            );
+
+            const target_step_fast = b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description}));
             setupTargetReleaseWithOptimize(b, target_step_fast, version_string, release_target.query, .ReleaseFast);
         }
     } else {
         // When not on a tag, add the fail message to each individual target step
         const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.";
         for (release_targets) |release_target| {
-            const target_step_small = b.step(
-                b.fmt("release-{s}-small", .{release_target.name}), 
-                b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})
-            );
+            const target_step_small = b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description}));
             target_step_small.dependOn(&b.addFail(error_msg).step);
-            
-            const target_step_fast = b.step(
-                b.fmt("release-{s}", .{release_target.name}), 
-                b.fmt("Create ReleaseFast build for {s}", .{release_target.description})
-            );
+
+            const target_step_fast = b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description}));
             target_step_fast.dependOn(&b.addFail(error_msg).step);
         }
     }
@@ -200,7 +190,7 @@ pub fn build(b: *std.Build) !void {
     // --- All Targets Release Step ---
     const release_step = b.step("release", "Create release builds for all targets");
     const release_small_step = b.step("release-small", "Create small release builds for all targets");
-    
+
     if (version == .tag or force_release) {
         // Set up release-all steps with different optimizations
         for (release_targets) |release_target| {
@@ -218,23 +208,23 @@ pub fn build(b: *std.Build) !void {
 // Creates a simplified version of the target triple for file naming
 fn simplifyTripleName(target: std.Target) []const u8 {
     const allocator = std.heap.page_allocator;
-    
+
     // Format based on architecture, OS, and possibly ABI
     const arch = @tagName(target.cpu.arch);
     const os = @tagName(target.os.tag);
-    
+
     // For Linux with musl, include the ABI
     if (target.os.tag == .linux and target.abi == .musl) {
-        return std.fmt.allocPrint(allocator, "{s}-{s}-musl", .{arch, os}) catch "unknown";
+        return std.fmt.allocPrint(allocator, "{s}-{s}-musl", .{ arch, os }) catch "unknown";
     }
-    
+
     // For macOS, just use arch-macos
     if (target.os.tag == .macos) {
-        return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ arch, os }) catch "unknown";
     }
-    
+
     // Default case - just combine arch and OS
-    return std.fmt.allocPrint(allocator, "{s}-{s}", .{arch, os}) catch "unknown";
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ arch, os }) catch "unknown";
 }
 
 // Creates release artifact for a single target with specified optimization
@@ -247,7 +237,7 @@ fn setupTargetReleaseWithOptimize(
 ) void {
     const target = b.resolveTargetQuery(target_query);
     const exe_name = "zenv";
-    const release_dir_path = b.pathJoin(&.{ "releases" });
+    const release_dir_path = b.pathJoin(&.{"releases"});
 
     // --- Create Target-Specific Options Module ---
     const options_module_release = b.addOptions();
@@ -263,7 +253,7 @@ fn setupTargetReleaseWithOptimize(
     });
     exe_release.root_module.addImport("options", options_import);
 
-    // --- Package the Executable --- 
+    // --- Package the Executable ---
     const triple = target.result.zigTriple(b.allocator) catch |err| {
         std.log.err("Failed to get target triple: {s}", .{@errorName(err)});
         return; // Skip this target if we can't get the triple
@@ -271,7 +261,7 @@ fn setupTargetReleaseWithOptimize(
 
     // Create a simplified name for the archive
     const simplified_triple = simplifyTripleName(target.result);
-    
+
     // Add optimization mode to the archive name for clarity
     const opt_suffix = switch (optimize) {
         .ReleaseSmall => "-small",
@@ -281,7 +271,7 @@ fn setupTargetReleaseWithOptimize(
     switch (target.result.os.tag) {
         .macos, .linux => { // Assuming tar for Linux and macOS
             // Create a more compatible archive format
-            const archive_basename = b.fmt("{s}-{s}{s}.tar.gz", .{exe_name, simplified_triple, opt_suffix});
+            const archive_basename = b.fmt("{s}-{s}{s}.tar.gz", .{ exe_name, simplified_triple, opt_suffix });
             const tar_cmd = b.addSystemCommand(&.{
                 "tar",
                 "-czf", // Create, use gzip compression (more universal than xz)

@@ -56,7 +56,7 @@ pub const RegistryEntry = struct {
     project_dir: []const u8,
     description: ?[]const u8 = null,
     target_machines_str: []const u8, // Renamed: String representation stored in registry
-    
+
     pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
         allocator.free(self.id);
         allocator.free(self.env_name);
@@ -74,77 +74,77 @@ pub const RegistryEntry = struct {
 fn generateSHA1ID(allocator: Allocator, env_name: []const u8, project_dir: []const u8, target_machines_str: []const u8) ![]const u8 {
     // Create a SHA-1 hasher
     var sha1 = std.crypto.hash.Sha1.init(.{});
-    
+
     // Add uniqueness factors to the hash
     sha1.update(env_name);
     sha1.update(project_dir);
     sha1.update(target_machines_str); // Use the string representation for ID consistency
-    
+
     // Add a timestamp for additional uniqueness
     var timestamp_buf: [20]u8 = undefined;
     const timestamp_str = try std.fmt.bufPrint(&timestamp_buf, "{d}", .{std.time.milliTimestamp()});
     sha1.update(timestamp_str);
-    
+
     // Finalize the hash
     var hash: [20]u8 = undefined; // SHA-1 produces a 20-byte hash
     sha1.final(&hash);
-    
+
     // Convert to hex string (40 characters)
     var hex_buf: [40]u8 = undefined;
     const hex_chars = "0123456789abcdef";
-    
+
     for (hash, 0..) |byte, i| {
         hex_buf[i * 2] = hex_chars[byte >> 4];
         hex_buf[i * 2 + 1] = hex_chars[byte & 15];
     }
-    
+
     return try allocator.dupe(u8, &hex_buf);
 }
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
     entries: std.ArrayList(RegistryEntry),
-    
+
     pub fn init(allocator: Allocator) EnvironmentRegistry {
         return .{
             .allocator = allocator,
             .entries = std.ArrayList(RegistryEntry).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *EnvironmentRegistry) void {
         for (self.entries.items) |*entry| {
             entry.deinit(self.allocator);
         }
         self.entries.deinit();
     }
-    
+
     // Load registry from file, creating it if it doesn't exist
     pub fn load(allocator: Allocator) !EnvironmentRegistry {
         var registry = EnvironmentRegistry.init(allocator);
         errdefer registry.deinit();
-        
+
         // Determine home directory
         const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
             std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
             return err;
         };
         defer allocator.free(home_dir);
-        
+
         // Ensure .zenv directory exists
         const zenv_dir_path = try std.fmt.allocPrint(allocator, "{s}/.zenv", .{home_dir});
         defer allocator.free(zenv_dir_path);
-        
+
         std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
             if (err != error.PathAlreadyExists) {
                 std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
                 return err;
             }
         };
-        
+
         // Construct registry file path
         const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
         defer allocator.free(registry_path);
-        
+
         // Try to open the registry file
         const file = std.fs.openFileAbsolute(registry_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
@@ -156,21 +156,21 @@ pub const EnvironmentRegistry = struct {
             return err;
         };
         defer file.close();
-        
+
         // Read file contents
         const file_content = file.readToEndAlloc(allocator, 1 * 1024 * 1024) catch |err| {
             std.log.err("Failed to read registry file: {s}", .{@errorName(err)});
             return err;
         };
         defer allocator.free(file_content);
-        
+
         // Parse JSON
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, file_content, .{}) catch |err| {
             std.log.err("Failed to parse registry JSON: {s}", .{@errorName(err)});
             return err;
         };
         defer parsed.deinit();
-        
+
         // Process entries
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
@@ -178,15 +178,15 @@ pub const EnvironmentRegistry = struct {
                 std.log.err("Expected 'environments' to be an array, found {s}", .{@tagName(environments)});
                 return error.InvalidRegistryFormat;
             }
-            
+
             for (environments.array.items) |entry_value| {
                 if (entry_value != .object) {
                     std.log.err("Expected environment entry to be an object", .{});
                     continue;
                 }
-                
+
                 const entry_obj = entry_value.object;
-                
+
                 // Extract required fields
                 const env_name = entry_obj.get("name") orelse {
                     std.log.err("Missing 'name' field in environment entry", .{});
@@ -196,7 +196,7 @@ pub const EnvironmentRegistry = struct {
                     std.log.err("Expected 'name' to be a string", .{});
                     continue;
                 }
-                
+
                 const project_dir = entry_obj.get("project_dir") orelse {
                     std.log.err("Missing 'project_dir' field in environment entry", .{});
                     continue;
@@ -205,7 +205,7 @@ pub const EnvironmentRegistry = struct {
                     std.log.err("Expected 'project_dir' to be a string", .{});
                     continue;
                 }
-                
+
                 const target_machines_str = entry_obj.get("target_machine") orelse { // Still reads old field name for compatibility
                     std.log.err("Missing 'target_machine' field in environment entry", .{});
                     continue;
@@ -214,7 +214,7 @@ pub const EnvironmentRegistry = struct {
                     std.log.err("Expected 'target_machine' to be a string", .{});
                     continue;
                 }
-                
+
                 // Extract optional description field
                 var description: ?[]const u8 = null;
                 if (entry_obj.get("description")) |desc_value| {
@@ -222,7 +222,7 @@ pub const EnvironmentRegistry = struct {
                         description = try allocator.dupe(u8, desc_value.string);
                     }
                 }
-                
+
                 // Check for ID or generate one if not present (backward compatibility)
                 var id_owned: []const u8 = undefined;
                 if (entry_obj.get("id")) |id_value| {
@@ -238,7 +238,7 @@ pub const EnvironmentRegistry = struct {
                     id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
                     std.log.info("Generated new SHA-1 ID for existing environment: {s}", .{env_name.string});
                 }
-                
+
                 // Create entry
                 try registry.entries.append(.{
                     .id = id_owned,
@@ -249,10 +249,10 @@ pub const EnvironmentRegistry = struct {
                 });
             }
         }
-        
+
         return registry;
     }
-    
+
     // Save registry to file
     pub fn save(self: *const EnvironmentRegistry) !void {
         // Determine home directory
@@ -261,63 +261,63 @@ pub const EnvironmentRegistry = struct {
             return err;
         };
         defer self.allocator.free(home_dir);
-        
+
         // Ensure .zenv directory exists
         const zenv_dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.zenv", .{home_dir});
         defer self.allocator.free(zenv_dir_path);
-        
+
         std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
             if (err != error.PathAlreadyExists) {
                 std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
                 return err;
             }
         };
-        
+
         // Construct registry file path
         const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
         defer self.allocator.free(registry_path);
-        
+
         // Create root object with environments array
         var root = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
         defer root.object.deinit();
-        
+
         // Create environments array
         var environments = std.json.Value{ .array = std.json.Array.init(self.allocator) };
         defer environments.array.deinit();
-        
+
         // Add each entry to the environments array
         for (self.entries.items) |entry| {
             var entry_obj = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
-            
+
             // Add required fields
             try entry_obj.object.put("id", std.json.Value{ .string = entry.id });
             try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
             try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
             try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machines_str }); // Renamed field
-            
+
             // Add optional description field
             if (entry.description) |desc| {
                 try entry_obj.object.put("description", std.json.Value{ .string = desc });
             }
-            
+
             // Add to environments array
             try environments.array.append(entry_obj);
         }
-        
+
         // Add environments array to root object
         try root.object.put("environments", environments);
-        
+
         // Convert to JSON string
         const json_string = try std.json.stringifyAlloc(self.allocator, root, .{ .whitespace = .indent_2 });
         defer self.allocator.free(json_string);
-        
+
         // Write to file
         const file = try std.fs.createFileAbsolute(registry_path, .{});
         defer file.close();
-        
+
         try file.writeAll(json_string);
     }
-    
+
     // Register a new environment
     pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, description: ?[]const u8, target_machines: []const []const u8) !void {
         // For registry purposes, create a single string representation of target machines
@@ -336,7 +336,7 @@ pub const EnvironmentRegistry = struct {
             registry_target_machines_str = try self.allocator.dupe(u8, buffer.items);
         }
         // We need to free this string later if it's not used to update an entry
-        errdefer self.allocator.free(registry_target_machines_str); 
+        errdefer self.allocator.free(registry_target_machines_str);
 
         // Check if environment already exists
         for (self.entries.items) |*entry| {
@@ -353,7 +353,7 @@ pub const EnvironmentRegistry = struct {
                 // Free the old target machine string and assign the new one
                 self.allocator.free(entry.target_machines_str); // Renamed field
                 entry.target_machines_str = registry_target_machines_str; // Assign ownership
-            
+
                 // Ownership of registry_target_machines_str transferred, so no need to free later
                 return; // Successfully updated
             }
@@ -373,7 +373,7 @@ pub const EnvironmentRegistry = struct {
             .target_machines_str = registry_target_machines_str, // Renamed field, ownership transferred
         });
     }
-    
+
     // Unregister an environment
     pub fn deregister(self: *EnvironmentRegistry, env_name: []const u8) bool {
         for (self.entries.items, 0..) |entry, i| {
@@ -386,7 +386,7 @@ pub const EnvironmentRegistry = struct {
         }
         return false;
     }
-    
+
     // Look up an environment by name
     pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
         // First try exact match (for names and full IDs)
@@ -395,13 +395,13 @@ pub const EnvironmentRegistry = struct {
                 return entry;
             }
         }
-        
+
         // If no exact match, try partial ID matching (if identifier is at least 7 chars)
         // SHA-1 IDs are 40 chars, so 7 should be enough to be unique in most cases
         if (identifier.len >= 7) {
             var matching_entry: ?RegistryEntry = null;
             var match_count: usize = 0;
-            
+
             for (self.entries.items) |entry| {
                 // Check if the identifier is a prefix of entry's ID
                 if (entry.id.len >= identifier.len and std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
@@ -409,7 +409,7 @@ pub const EnvironmentRegistry = struct {
                     match_count += 1;
                 }
             }
-            
+
             // If exactly one match found, return it
             if (match_count == 1) {
                 return matching_entry;
@@ -418,7 +418,7 @@ pub const EnvironmentRegistry = struct {
                 std.log.err("Ambiguous ID prefix '{s}' matches multiple environments", .{identifier});
             }
         }
-        
+
         return null;
     }
 };
@@ -426,7 +426,7 @@ pub const EnvironmentRegistry = struct {
 // Add required field validation at compile-time
 const REQUIRED_ENV_FIELDS = [_][]const u8{
     "target_machines", // Updated from target_machine
-    "python_executable"
+    "python_executable",
 };
 
 // Validate that an environment has all required fields
@@ -518,7 +518,7 @@ fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 pub const Module = struct {
     name: []const u8,
     version: ?[]const u8 = null,
-    
+
     pub fn format(self: Module, writer: anytype) !void {
         if (self.version) |ver| {
             try writer.print("{s}/{s}", .{ self.name, ver });
@@ -526,19 +526,19 @@ pub const Module = struct {
             try writer.print("{s}", .{self.name});
         }
     }
-    
+
     pub fn parse(allocator: Allocator, module_string: []const u8) !Module {
         // Check for version specification like "name/version"
         if (std.mem.indexOf(u8, module_string, "/")) |slash_idx| {
             const name = try allocator.dupe(u8, module_string[0..slash_idx]);
-            const version = try allocator.dupe(u8, module_string[slash_idx + 1..]);
+            const version = try allocator.dupe(u8, module_string[slash_idx + 1 ..]);
             return Module{ .name = name, .version = version };
         } else {
             const name = try allocator.dupe(u8, module_string);
             return Module{ .name = name };
         }
     }
-    
+
     pub fn deinit(self: *Module, allocator: Allocator) void {
         allocator.free(self.name);
         if (self.version) |ver| {
@@ -552,7 +552,7 @@ pub const Module = struct {
 pub const Dependency = struct {
     name: []const u8,
     version_constraint: ?[]const u8 = null,
-    
+
     pub fn format(self: Dependency, writer: anytype) !void {
         if (self.version_constraint) |vc| {
             try writer.print("{s}{s}", .{ self.name, vc });
@@ -560,7 +560,7 @@ pub const Dependency = struct {
             try writer.print("{s}", .{self.name});
         }
     }
-    
+
     pub fn parse(allocator: Allocator, dep_string: []const u8) !Dependency {
         // Find first version operator (>=, ==, <=, >, <, ~=, etc)
         // We could add an enhanced parser here eventually, but for now do a simple split
@@ -571,12 +571,12 @@ pub const Dependency = struct {
                 return Dependency{ .name = name, .version_constraint = ver_constraint };
             }
         }
-        
+
         // No version constraint found
         const name = try allocator.dupe(u8, dep_string);
         return Dependency{ .name = name };
     }
-    
+
     pub fn deinit(self: *Dependency, allocator: Allocator) void {
         allocator.free(self.name);
         if (self.version_constraint) |vc| {
@@ -616,17 +616,17 @@ pub const EnvironmentConfig = struct {
     pub fn deinit(self: *EnvironmentConfig) void {
         // Free strings owned by the struct IF they were copied using allocator.dupe
         // during parsing. Current implementation uses slices, so these are commented out.
-        
+
         // Free individual target machines IF they were duped
         // for (self.target_machines.items) |machine| allocator.free(machine);
         self.target_machines.deinit();
 
         // Free python_executable IF duped
         // allocator.free(self.python_executable);
-        
+
         // Free description IF duped
         // if (self.description) |d| allocator.free(d);
-        
+
         // Free requirements_file IF duped
         // if (self.requirements_file) |f| allocator.free(f);
 
@@ -718,11 +718,11 @@ pub const ZenvConfig = struct {
                 continue;
             }
             const env_obj = env_obj_ptr.object; // Get the actual object map
-            
+
             // Validate required fields at compile time before parsing
             validateRequiredFields(env_obj, env_name) catch {
                 std.log.err("Environment '{s}' is missing required fields", .{env_name});
-                continue;  // Skip this environment if it's missing required fields
+                continue; // Skip this environment if it's missing required fields
             };
 
             var env_config = EnvironmentConfig.init(allocator);
@@ -759,8 +759,7 @@ pub const ZenvConfig = struct {
                             try env_config.target_machines.append(target);
                         }
                     } else {
-                        std.log.err("Expected string or array for field '{s}' in environment '{s}', found {s}", 
-                            .{ key, env_name, @tagName(value_ptr.*) });
+                        std.log.err("Expected string or array for field '{s}' in environment '{s}', found {s}", .{ key, env_name, @tagName(value_ptr.*) });
                         success = false;
                         continue;
                     }
@@ -868,7 +867,7 @@ pub const ZenvConfig = struct {
 
         // Now that all references to the value tree are gone, deinit it.
         self.value_tree.deinit(); // Use deinit without allocator
-        
+
         // Free the cached hostname if one exists
         if (self.cached_hostname != null) {
             self.allocator.free(self.cached_hostname.?);
@@ -882,7 +881,7 @@ pub const ZenvConfig = struct {
     pub fn getEnvironment(self: *const ZenvConfig, env_name: []const u8) ?*const EnvironmentConfig {
         return self.environments.getPtr(env_name);
     }
-    
+
     // Validate environment configuration fields for correctness
     pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvError {
         _ = env_name; // env_name no longer needed for context
@@ -890,12 +889,12 @@ pub const ZenvConfig = struct {
         if (env_config.target_machines.items.len == 0) {
             return ZenvError.ConfigInvalid;
         }
-        
+
         // Check python_executable (required)
         if (env_config.python_executable.len == 0) {
             return ZenvError.MissingPythonExecutable;
         }
-        
+
         // All validation passed
         return null;
     }
@@ -905,13 +904,13 @@ pub const ZenvConfig = struct {
     pub fn getHostname(self: *const ZenvConfig) ![]const u8 {
         // If we've already cached the hostname, return it
         if (self.cached_hostname) |cached| {
-             // Return a duplicate so the caller owns it and can free it
-             return self.allocator.dupe(u8, cached);
+            // Return a duplicate so the caller owns it and can free it
+            return self.allocator.dupe(u8, cached);
         }
-        
+
         // For non-const self, need to cast to get mutable access
         var mutable_self = @constCast(self);
-        
+
         // Get hostname using the utility function
         const hostname = try utils.getSystemHostname(mutable_self.allocator);
         errdefer mutable_self.allocator.free(hostname); // Free if caching fails
@@ -920,6 +919,6 @@ pub const ZenvConfig = struct {
         mutable_self.cached_hostname = try mutable_self.allocator.dupe(u8, hostname);
 
         // Return the initially retrieved hostname (caller owns this copy)
-        return hostname; 
+        return hostname;
     }
 };

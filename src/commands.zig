@@ -225,13 +225,13 @@ pub fn handleListCommand(
             while (targets_iter.next()) |target_pattern_raw| {
                 const target_pattern = std.mem.trim(u8, target_pattern_raw, " ");
                 if (target_pattern.len == 0) continue; // Skip empty patterns
-                
+
                 if (utils.checkHostnameMatch(current_hostname.?, target_pattern)) {
                     matches_any_target = true;
                     break; // Found a match, no need to check further patterns for this entry
                 }
             }
-            
+
             if (!matches_any_target) {
                 continue; // Skip this environment if no pattern matched
             }
@@ -488,13 +488,13 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
 
     // Write template to file
     const file = cwd.createFile(config_path, .{}) catch |err| {
-        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
+        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
     defer file.close();
 
     file.writeAll(template_content) catch |err| {
-        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
+        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
 

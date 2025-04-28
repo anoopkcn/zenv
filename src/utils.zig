@@ -8,7 +8,6 @@ const fs = std.fs;
 const process = std.process;
 const StringHashMap = std.StringHashMap;
 
-
 // ============================================================================
 // Dependency Parsing Utilities
 // ============================================================================
@@ -361,7 +360,7 @@ fn appendModuleCommandsToScript(
         // Use set +e to prevent script from exiting on module load error
         try writer.print("  # Don't exit immediately on module load errors so we can intercept and handle them\n", .{});
         try writer.print("  set +e\n", .{});
-        
+
         // Load each module with error checking
         for (env_config.modules.items) |module_name| {
             try writer.print(
@@ -371,9 +370,9 @@ fn appendModuleCommandsToScript(
                 \\    exit 1
                 \\  fi
                 \\
-            , .{module_name, module_name});
+            , .{ module_name, module_name });
         }
-        
+
         // Restore error exit mode
         try writer.print("  set -e\n", .{});
     } else {
@@ -562,7 +561,7 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
         // Just show a concise error message - since stdout/stderr is already inherited,
         // the actual error output from the module command will have been displayed already
         std.log.err("Script execution failed with exit code: {d}", .{term.Exited});
-        
+
         // Only log debug info when enabled via environment variable
         const enable_debug_logs = blk: {
             const env_var = std.process.getEnvVarOwned(allocator, "ZENV_DEBUG") catch |err| {
@@ -571,28 +570,28 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
                 break :blk false;
             };
             defer allocator.free(env_var);
-            break :blk std.mem.eql(u8, env_var, "1") or 
-                   std.mem.eql(u8, env_var, "true") or 
-                   std.mem.eql(u8, env_var, "yes");
+            break :blk std.mem.eql(u8, env_var, "1") or
+                std.mem.eql(u8, env_var, "true") or
+                std.mem.eql(u8, env_var, "yes");
         };
-        
+
         if (enable_debug_logs) {
             const script_content_debug = fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024) catch |read_err| {
                 std.log.err("Failed to read script content for debug log: {s}", .{@errorName(read_err)});
                 return error.ProcessError;
             };
             defer allocator.free(script_content_debug);
-            
+
             // Log to a debug file instead of stderr
             const debug_log_path = try std.fmt.allocPrint(allocator, "{s}.debug.log", .{script_rel_path});
             defer allocator.free(debug_log_path);
-            
+
             var debug_file = fs.cwd().createFile(debug_log_path, .{}) catch |err| {
                 std.log.err("Could not create debug log file: {s}", .{@errorName(err)});
                 return error.ProcessError;
             };
             defer debug_file.close();
-            
+
             debug_file.writeAll(script_content_debug) catch {};
             std.log.debug("Script content written to debug log: {s}", .{debug_log_path});
         }
@@ -604,7 +603,7 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
             return error.ProcessError;
         };
         defer allocator.free(script_content);
-        
+
         // Check if this script contains module load commands
         if (std.mem.indexOf(u8, script_content, "module load") != null) {
             return error.ModuleLoadError;
@@ -856,10 +855,10 @@ fn normalizeHostname(hostname: []const u8) []const u8 {
 fn patternMatches(pattern: []const u8, str: []const u8) bool {
     // Empty pattern only matches empty string
     if (pattern.len == 0) return str.len == 0;
-    
+
     // Special case: single * matches anything
     if (pattern.len == 1 and pattern[0] == '*') return true;
-    
+
     // Empty string only matches if pattern is just asterisks
     if (str.len == 0) {
         for (pattern) |c| {
@@ -867,7 +866,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
         }
         return true;
     }
-    
+
     // Handle common prefix pattern: "compute-*"
     if (pattern.len >= 2 and pattern[pattern.len - 1] == '*') {
         // Check if it's a simple prefix pattern without other wildcards
@@ -878,13 +877,13 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
                 break;
             }
         }
-        
+
         if (!has_other_wildcards) {
             const prefix = pattern[0 .. pattern.len - 1];
             return std.mem.startsWith(u8, str, prefix);
         }
     }
-    
+
     // Handle common suffix pattern: "*.example.com"
     if (pattern.len >= 2 and pattern[0] == '*') {
         // Check if it's a simple suffix pattern without other wildcards
@@ -895,13 +894,13 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
                 break;
             }
         }
-        
+
         if (!has_other_wildcards) {
             const suffix = pattern[1..];
             return std.mem.endsWith(u8, str, suffix);
         }
     }
-    
+
     // For other patterns, use a more general algorithm
     // This is a simple implementation - could be optimized further
     if (pattern[0] == '*') {
@@ -915,7 +914,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
             return patternMatches(pattern[1..], str[1..]);
         }
     }
-    
+
     return false;
 }
 
@@ -930,30 +929,28 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     return false;
 }
 
-pub fn validateEnvironmentForMachine(
-    env_config: anytype,
-    hostname: []const u8
-) bool {
+pub fn validateEnvironmentForMachine(env_config: anytype, hostname: []const u8) bool {
     // Special case: No target machines means any machine is valid
     if (env_config.target_machines.items.len == 0) {
         return true;
     }
-    
+
     // Check against each target machine in the list
     for (env_config.target_machines.items) |target| {
         // Special cases for universal targets
-        if (std.mem.eql(u8, target, "localhost") or 
-            std.mem.eql(u8, target, "any") or 
-            std.mem.eql(u8, target, "*")) {
+        if (std.mem.eql(u8, target, "localhost") or
+            std.mem.eql(u8, target, "any") or
+            std.mem.eql(u8, target, "*"))
+        {
             return true;
         }
-        
+
         // Normalize the hostname
         const norm_hostname = normalizeHostname(hostname);
-        
+
         // Check if the target contains wildcard characters
         const has_wildcards = std.mem.indexOfAny(u8, target, "*?") != null;
-        
+
         // If target has wildcards, use pattern matching
         if (has_wildcards) {
             if (patternMatches(target, norm_hostname)) {
@@ -961,34 +958,35 @@ pub fn validateEnvironmentForMachine(
             }
             continue; // Try next target
         }
-        
+
         // Otherwise, try various matching strategies in order of specificity
-        
+
         // 1. Exact match (most specific)
         if (std.mem.eql(u8, norm_hostname, target)) {
             return true;
         }
-        
+
         // 2. Domain component match (e.g., matching "jureca" in "jrlogin08.jureca")
         if (matchDomainComponent(norm_hostname, target)) {
             return true;
         }
-        
+
         // 3. Check if target is a domain suffix like ".example.com"
-        if (target.len > 0 and target[0] == '.' and 
-            std.mem.endsWith(u8, norm_hostname, target)) {
+        if (target.len > 0 and target[0] == '.' and
+            std.mem.endsWith(u8, norm_hostname, target))
+        {
             return true;
         }
-        
+
         // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
         if (norm_hostname.len > target.len + 1 and norm_hostname[norm_hostname.len - target.len - 1] == '.') {
-            const suffix = norm_hostname[norm_hostname.len - target.len..];
+            const suffix = norm_hostname[norm_hostname.len - target.len ..];
             if (std.mem.eql(u8, suffix, target)) {
                 return true;
             }
         }
     }
-    
+
     // No match found with any target machine
     return false;
 }
@@ -1017,11 +1015,11 @@ pub fn getAndValidateEnvironment(
 
     // Use new validation function for early validation
     if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        std.log.err("Invalid environment configuration for '{s}': {s}", .{env_name, @errorName(err)});
+        std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
         handleErrorFn(err);
         return null;
     }
-    
+
     // Check for --no-host flag to bypass hostname validation
     var skip_hostname_check = false;
     for (args) |arg| {
@@ -1031,7 +1029,7 @@ pub fn getAndValidateEnvironment(
             break;
         }
     }
-    
+
     if (skip_hostname_check) {
         std.log.info("Hostname validation bypassed for environment '{s}'.", .{env_name});
         return env_config;
@@ -1059,7 +1057,7 @@ pub fn getAndValidateEnvironment(
         format_block: {
             var targets_buffer = std.ArrayList(u8).init(allocator);
             defer targets_buffer.deinit();
-            
+
             // Attempt to format the string
             targets_buffer.appendSlice("[") catch |err| {
                 if (err == error.OutOfMemory) break :format_block;
@@ -1069,20 +1067,20 @@ pub fn getAndValidateEnvironment(
             for (env_config.target_machines.items, 0..) |target, i| {
                 if (i > 0) {
                     targets_buffer.appendSlice(", ") catch |err| {
-                       if (err == error.OutOfMemory) break :format_block;
-                       break :format_block;
+                        if (err == error.OutOfMemory) break :format_block;
+                        break :format_block;
                     };
                 }
                 targets_buffer.writer().print("\"{s}\"", .{target}) catch |err| {
-                   if (err == error.OutOfMemory) break :format_block;
-                   break :format_block;
+                    if (err == error.OutOfMemory) break :format_block;
+                    break :format_block;
                 };
             }
             targets_buffer.appendSlice("]") catch |err| {
                 if (err == error.OutOfMemory) break :format_block;
                 break :format_block;
             };
-            
+
             // If formatting succeeded, duplicate the result
             formatted_targets = allocator.dupe(u8, targets_buffer.items) catch |err| {
                 if (err == error.OutOfMemory) break :format_block;
@@ -1090,7 +1088,7 @@ pub fn getAndValidateEnvironment(
             };
             formatted_targets_allocated = true; // Mark that we need to free this later
         }
-        
+
         // If formatting failed (OOM or other error before allocation), use a placeholder
         if (!formatted_targets_allocated) {
             formatted_targets = "<...>";
@@ -1124,19 +1122,19 @@ pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, i
         if (is_potential_id_prefix) {
             var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
             defer matching_envs.deinit();
-            var match_count: usize = 0; 
+            var match_count: usize = 0;
 
             for (registry.entries.items) |reg_entry| {
                 if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
                     match_count += 1;
                     // Only store names if count might exceed 1
                     if (match_count > 1) {
-                       matching_envs.append(reg_entry.env_name) catch |err| {
-                          // Handle potential allocation error, though unlikely
-                          std.log.err("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)});
-                          handleErrorFn(error.OutOfMemory);
-                          return null;
-                       };
+                        matching_envs.append(reg_entry.env_name) catch |err| {
+                            // Handle potential allocation error, though unlikely
+                            std.log.err("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)});
+                            handleErrorFn(error.OutOfMemory);
+                            return null;
+                        };
                     }
                 }
             }
@@ -1149,8 +1147,8 @@ pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, i
                         std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
                     }
                 } else if (match_count > 1) {
-                   // Fallback if allocation failed but we know there were >1 matches
-                   std.io.getStdErr().writer().print("  (Could not list all matching environments due to memory issue)\n", .{}) catch {};
+                    // Fallback if allocation failed but we know there were >1 matches
+                    std.io.getStdErr().writer().print("  (Could not list all matching environments due to memory issue)\n", .{}) catch {};
                 }
                 std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
                 handleErrorFn(error.AmbiguousIdentifier);
@@ -1216,7 +1214,7 @@ pub fn printManualActivationModuleCommands(
 pub fn escapeShellValue(value: []const u8, writer: anytype) !void {
     for (value) |char| {
         if (char == '\'') {
-            try writer.writeAll("'\\''" );
+            try writer.writeAll("'\\''");
         } else {
             try writer.writeByte(char);
         }
@@ -1244,15 +1242,15 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
             // Try HOST if HOSTNAME is not found
             std.log.debug("HOSTNAME not set, trying HOST...", .{});
             const host_env = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
-                 if (err2 == error.EnvironmentVariableNotFound) {
+                if (err2 == error.EnvironmentVariableNotFound) {
                     // Fallback to command if neither env var is set
                     std.log.debug("HOST not set, falling back to 'hostname' command...", .{});
                     return getHostnameFromCommand(allocator);
-                 } else {
+                } else {
                     // Propagate other errors from getting HOST
                     std.log.err("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
                     return err2;
-                 }
+                }
             };
             // Check if HOST was empty
             if (host_env.len == 0) {
@@ -1284,52 +1282,55 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
 pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
     // This function is only for the simplified registry case of a single target machine
     // Use the same matching logic for consistency
-    
+
     // Special cases for universal targets
-    if (std.mem.eql(u8, target_machine, "localhost") or 
-        std.mem.eql(u8, target_machine, "any") or 
-        std.mem.eql(u8, target_machine, "*")) {
+    if (std.mem.eql(u8, target_machine, "localhost") or
+        std.mem.eql(u8, target_machine, "any") or
+        std.mem.eql(u8, target_machine, "*"))
+    {
         return true;
     }
-    
+
     // Normalize the hostname
     const norm_hostname = normalizeHostname(hostname);
-    
+
     // Check if the target contains wildcard characters
     const has_wildcards = std.mem.indexOfAny(u8, target_machine, "*?") != null;
-    
+
     // If target has wildcards, use pattern matching
     if (has_wildcards) {
         return patternMatches(target_machine, norm_hostname);
     }
-    
+
     // Try various matching strategies
-    
+
     // 1. Exact match
     if (std.mem.eql(u8, norm_hostname, target_machine)) {
         return true;
     }
-    
+
     // 2. Domain component match
     if (matchDomainComponent(norm_hostname, target_machine)) {
         return true;
     }
-    
+
     // 3. Domain suffix
-    if (target_machine.len > 0 and target_machine[0] == '.' and 
-        std.mem.endsWith(u8, norm_hostname, target_machine)) {
+    if (target_machine.len > 0 and target_machine[0] == '.' and
+        std.mem.endsWith(u8, norm_hostname, target_machine))
+    {
         return true;
     }
-    
+
     // 4. Domain suffix match
-    if (norm_hostname.len > target_machine.len + 1 and 
-        norm_hostname[norm_hostname.len - target_machine.len - 1] == '.') {
-        const suffix = norm_hostname[norm_hostname.len - target_machine.len..];
+    if (norm_hostname.len > target_machine.len + 1 and
+        norm_hostname[norm_hostname.len - target_machine.len - 1] == '.')
+    {
+        const suffix = norm_hostname[norm_hostname.len - target_machine.len ..];
         if (std.mem.eql(u8, suffix, target_machine)) {
             return true;
         }
     }
-    
+
     return false;
 }
 

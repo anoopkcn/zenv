@@ -24,4 +24,3 @@ pub const ZenvError = error{
     AmbiguousIdentifier, // Added for ambiguous ID prefixes
     InvalidRegistryFormat, // Added when registry JSON structure is wrong
 };
-
