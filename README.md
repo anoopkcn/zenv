@@ -109,7 +109,7 @@ source $(zenv activate 4a422bfd015982bc2569ebacb45bb590d7d5c561)
 source $(zenv activate 4a422bf)
 ```
 
-### Registering and Unregistering Environments
+### Registering and Deregistering Environments
 
 Register an environment in the global registry:
 
@@ -122,7 +122,7 @@ zenv register my_env
 Remove an environment from the registry:
 
 ```bash
-zenv unregister my_env
+zenv deregister my_env
 ```
 
 ## Configuration Reference

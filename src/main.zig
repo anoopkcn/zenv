@@ -10,7 +10,7 @@ const Command = enum {
     activate,
     list,
     register,
-    unregister,
+    deregister,
     cd,
     init,
     help,
@@ -60,7 +60,7 @@ fn printUsage() void {
         \\
         \\  register <env_name>    Register an environment in the global registry.
         \\                         Registers the current directory as the project directory.
-        \\  unregister <env_name>  Remove an environment from the global registry.
+        \\  deregister <env_name>  Remove an environment from the global registry.
         \\
         \\  version, -v, --version Print the zenv version.
         \\
@@ -120,7 +120,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .unregister, .cd, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -225,7 +225,7 @@ pub fn main() anyerror!void {
         .activate => commands.handleActivateCommand(&registry, args_const, handleError),
         .list => commands.handleListCommand(allocator, &registry, args_const),
         .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
-        .unregister => commands.handleUnregisterCommand(&registry, args_const, handleError),
+        .deregister => commands.handleDeregisterCommand(&registry, args_const, handleError),
         .cd => commands.handleCdCommand(&registry, args_const, handleError),
 
         // These were handled above, unreachable here

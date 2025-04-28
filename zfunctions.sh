@@ -92,7 +92,7 @@ zdereg() {
         return 1
     fi
 
-    zenv unregister "$env_name"
+    zenv deregister "$env_name"
 }
 
 # Change to environment's project directory

@@ -399,14 +399,14 @@ pub fn handleCdCommand(
     };
 }
 
-pub fn handleUnregisterCommand(
+pub fn handleDeregisterCommand(
     registry: *EnvironmentRegistry,
     args: [][]const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
         std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv unregister <env_name>\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name>\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -421,7 +421,7 @@ pub fn handleUnregisterCommand(
     };
 
     // Remove the environment from the registry
-    if (registry.unregister(env_name)) {
+    if (registry.deregister(env_name)) {
         // Save the registry
         registry.save() catch |err| {
             std.log.err("Failed to save registry: {s}", .{@errorName(err)});

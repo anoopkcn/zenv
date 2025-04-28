@@ -354,7 +354,7 @@ pub const EnvironmentRegistry = struct {
     }
     
     // Unregister an environment
-    pub fn unregister(self: *EnvironmentRegistry, env_name: []const u8) bool {
+    pub fn deregister(self: *EnvironmentRegistry, env_name: []const u8) bool {
         for (self.entries.items, 0..) |entry, i| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
                 // Free memory for the removed entry
