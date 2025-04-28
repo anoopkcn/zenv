@@ -1,6 +1,6 @@
 # zenv
 
-Zenv - A virtual environment manager for supercomputers
+zenv - A virtual environment manager for supercomputers
 
 `zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments.
 
@@ -17,7 +17,7 @@ Zenv - A virtual environment manager for supercomputers
 
 Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
-Example for Linux x86_64 machine:
+For example to get latest build for Linux x86_64 machine:
 
 ```bash
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz"
