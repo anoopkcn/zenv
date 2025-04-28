@@ -141,7 +141,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
 
 ```json
 {
-  "base_dir":"zenv",
+  "base_dir":"<opional_relative_base_dir>",
   "<env_name>": {
     "target_machines": ["<machine_identifier>"], // REQUIRED FIELD
     "python_executable": "<path_to_python>", // REQUIRED FIELD
