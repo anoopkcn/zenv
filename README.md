@@ -75,7 +75,7 @@ Example:
 }
 ```
 
-Provided `dependencies` will be installed in addition to the dependencies found in the `requirements_file` which can be (`requirements.txt` or a `pyproject.toml` file)
+Provided `dependencies` will be installed in addition to the dependencies found in the optional `requirements_file` which can be (`requirements.txt` or a `pyproject.toml` file)
 
 Then set up the environment:
 
@@ -141,6 +141,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
 
 ```json
 {
+  "base_dir":"zenv",
   "<env_name>": {
     "target_machines": ["<machine_identifier>"], // REQUIRED FIELD
     "python_executable": "<path_to_python>", // REQUIRED FIELD
