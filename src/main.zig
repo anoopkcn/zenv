@@ -40,23 +40,30 @@ fn printUsage() void {
         \\
         \\Commands:
         \\  init                   Create a new zenv.json template file in the current directory.
+        \\
         \\  setup <env_name>       Set up the specified environment for the current machine.
         \\                         Creates a Python virtual environment in zenv/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
+        \\
         \\  activate <env_name|id> Output the path to the activation script.
         \\                         You can use the environment name or its ID (full or partial).
         \\                         To activate the environment, use:
         \\                         source $(zenv activate <env_name|id>)
+        \\
         \\  cd <env_name|id>       Output the project directory path.
         \\                         You can use the environment name or its ID (full or partial).
         \\                         To change to the project directory, use:
         \\                         cd $(zenv cd <env_name|id>)
+        \\
         \\  list                   List environments registered for the current machine.
         \\  list --all             List all registered environments.
+        \\
         \\  register <env_name>    Register an environment in the global registry.
         \\                         Registers the current directory as the project directory.
         \\  unregister <env_name>  Remove an environment from the global registry.
+        \\
         \\  version, -v, --version Print the zenv version.
+        \\
         \\  help, --help           Show this help message.
         \\
         \\Options:
@@ -65,8 +72,9 @@ fn printUsage() void {
         \\
         \\Registry:
         \\  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
-        \\  Setting up an environment will register that environment or register it with 'zenv register <env_name>'.
-        \\  Then you can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
+        \\  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
+        \\  Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
+        \\  Also the project directory can be 'cd' into from anywhere using 'source $(zenv cd <env_name|id>)'
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
