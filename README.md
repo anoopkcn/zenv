@@ -53,12 +53,14 @@ Example:
 {
   "my_env": {
     "target_machine": "computer1",
+    "requirements_file": "requirements.txt",
     "description": "Basic environment for Computer1",
     "modules":[ "Python", "CUDA" ]
-    "dependencies": [ "numpy>=1.20.0", "matplotlib" ]
+    "dependencies": [ "numpy>=1.20.0", "tqdm" ]
   }
 }
 ```
+Provided `dependencies` will be installed in addition to the dependencies found in the `requirements_file` which can be (`requirements.txt` or a `pyproject.toml` file)
 
 Then set up the environment:
 

@@ -12,6 +12,7 @@ const Command = enum {
     register,
     unregister,
     cd,
+    init,
     help,
     version,
     @"-v",
@@ -38,6 +39,7 @@ fn printUsage() void {
         \\Manages environments based on zenv.json configuration.
         \\
         \\Commands:
+        \\  init                   Create a new zenv.json template file in the current directory.
         \\  setup <env_name>       Set up the specified environment for the current machine.
         \\                         Creates a Python virtual environment in zenv/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
@@ -58,7 +60,7 @@ fn printUsage() void {
         \\  help, --help           Show this help message.
         \\
         \\Options:
-        \\  --force-deps           When used with setup command, installs all specified dependencies
+        \\  --force-deps           When used with setup command, it tries to installs all specified dependencies
         \\                         even if they are already provided by loaded modules.
         \\
         \\Registry:
@@ -98,6 +100,11 @@ pub fn main() anyerror!void {
         },
         .version, .@"-v", .@"-V", .@"--version" => {
             printVersion();
+            process.exit(0);
+        },
+        .init => {
+            // Handle init command directly to avoid loading config
+            commands.handleInitCommand(allocator);
             process.exit(0);
         },
         // Let other commands proceed to config parsing
@@ -195,7 +202,7 @@ pub fn main() anyerror!void {
         .cd => commands.handleCdCommand(&registry, args_const, handleError),
 
         // These were handled above, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version" => unreachable,
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
 
         .unknown => {
             std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};

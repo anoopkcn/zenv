@@ -429,3 +429,89 @@ pub fn handleUnregisterCommand(
         handleErrorFn(error.EnvironmentNotRegistered);
     }
 }
+
+/// Handles the `init` command by creating a new zenv.json template in the current directory
+pub fn handleInitCommand(allocator: std.mem.Allocator) void {
+    const cwd = std.fs.cwd();
+    const config_path = "zenv.json";
+    
+    // Check if file exists
+    const file_exists = blk: {
+        cwd.access(config_path, .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                std.io.getStdErr().writer().print("Error accessing current directory: {s}\n", .{@errorName(err)}) catch {};
+                std.process.exit(1);
+            }
+            // File doesn't exist
+            break :blk false;
+        };
+        break :blk true;
+    };
+
+    if (file_exists) {
+        std.io.getStdErr().writer().print("Error: {s} already exists. Please remove or rename it first.\n", .{config_path}) catch {};
+        std.process.exit(1);
+    }
+    
+    // Use a static string as the default target_machine
+    const hostname = "localhost"; // Default target machine
+    
+    // Create template content
+    const template_content = std.fmt.allocPrint(allocator, 
+        \\{{
+        \\  "default_env": {{
+        \\    "target_machine": "{s}",
+        \\    "description": "Default environment",
+        \\    "python_executable": "python3",
+        \\    "modules": [],
+        \\    "dependencies": [],
+        \\    "requirements_file": "requirements.txt",
+        \\    "custom_activate_vars": {{
+        \\      "CUSTOM_VAR": "custom_value"
+        \\    }},
+        \\    "setup_commands": [
+        \\      "echo 'Environment setup complete!'"
+        \\    ]
+        \\  }},
+        \\  "dev_env": {{
+        \\    "target_machine": "{s}",
+        \\    "description": "Development environment with additional tools",
+        \\    "python_executable": "python3",
+        \\    "modules": [],
+        \\    "dependencies": [
+        \\      "pytest",
+        \\      "black",
+        \\      "flake8"
+        \\    ],
+        \\    "requirements_file": "requirements-dev.txt",
+        \\    "custom_activate_vars": {{
+        \\      "DEVELOPMENT": "true",
+        \\      "DEBUG": "1"
+        \\    }},
+        \\    "setup_commands": [
+        \\      "echo 'Development environment setup complete!'"
+        \\    ]
+        \\  }}
+        \\}}
+        \\
+    , .{ hostname, hostname }) catch |err| {
+        std.io.getStdErr().writer().print("Error creating template content: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(template_content);
+    
+    // Write template to file
+    const file = cwd.createFile(config_path, .{}) catch |err| {
+        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    defer file.close();
+    
+    file.writeAll(template_content) catch |err| {
+        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{config_path, @errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    
+    std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
+    std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
+}
