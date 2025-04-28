@@ -23,9 +23,9 @@ and extract the `zenv` executable using:
 ```bash
 tar -xvf zenv-x86_64-linux-musl.tar.gz
 ```
-move the `zenv` executable somewhere in your PATH ( for example: `~/.local/bin/`)
+Move the `zenv` executable somewhere in your PATH ( for example: `~/.local/bin/`)
 
-Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)
+**Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)**
 
 *The linux versions are `musl` NOT `glibc`. Windows support is not planned*
 
@@ -46,14 +46,18 @@ export PATH="$PATH:path/to/zig-out/bin"
 
 ### Creating an Environment
 
-Create a `zenv.json` configuration file in your project directory
+```bash
+zenv init
+```
+
+Create a `zenv.json` configuration file in your project directory. You can then modify this json file according to your needs.
 
 Example:
 ```json
 {
   "my_env": {
     "target_machine": "computer1",
-    "requirements_file": "requirements.txt",
+    "requirements_file": "requirements.txt", // or pyproject.toml
     "description": "Basic environment for Computer1",
     "modules":[ "Python", "CUDA" ]
     "dependencies": [ "numpy>=1.20.0", "tqdm" ]
