@@ -19,10 +19,11 @@ Example for Linux x86_64 machine:
 ```bash
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.gz"
 ```
-and
+and extract the `zenv` executable using:
 ```bash
 tar -xvf zenv-x86_64-linux-musl.tar.gz
 ```
+move the `zenv` executable somewhere in your PATH ( for example: `~/.local/bin/`)
 
 Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)
 
