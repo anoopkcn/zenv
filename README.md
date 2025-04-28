@@ -171,6 +171,14 @@ Zenv maintains a global registry at `~/.zenv/registry.json` that allows you to a
 - Target machines
 - Optional descriptions
 
+## Issues
+If you encounter any bugs open an Issues. To use the debug logging feature, users can set the `ZENV_DEBUG` environment variable:
+
+Example:
+```bash
+ZENV_DEBUG=1 zenv setup env_name
+```
+
 ## License
 
 [MIT License](LICENSE)

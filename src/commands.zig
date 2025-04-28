@@ -120,9 +120,15 @@ pub fn handleSetupCommand(
     }
 
     // 3. Perform the main environment setup using the utility function
-    //    This now includes dependency validation, script generation, and execution.
-    //    Pass the slice of dependencies.
-    try utils.setupEnvironment(allocator, env_config, env_name, deps_slice, force_deps);
+    utils.setupEnvironment(allocator, env_config, env_name, deps_slice, force_deps) catch |err| {
+        if (err == error.ModuleLoadError) {
+            // For module load errors, we don't want to show a stack trace
+            // Just output the error and exit
+            std.io.getStdErr().writer().print("Error: {s}\n", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        }
+        return err; // Propagate other errors
+    };
 
     // 4. Create the final activation script (using a separate utility)
     try utils.createActivationScript(allocator, env_config, env_name);

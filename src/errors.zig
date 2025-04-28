@@ -13,6 +13,7 @@ pub const ZenvError = error{
     EnvironmentNotFound,
     IoError,
     ProcessError,
+    ModuleLoadError, // New error type specifically for module loading failures
     MissingPythonExecutable,
     PathResolutionFailed,
     OutOfMemory,

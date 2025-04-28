@@ -149,8 +149,15 @@ pub fn main() anyerror!void {
                         stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
                     },
                     error.ProcessError => {
+                        // For process errors, don't show any additional output
+                        // as the actual error output should have already been displayed
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> An external command (module/pip/sh) failed. See output above for details.\n", .{}) catch {};
+                        process.exit(1); // Exit immediately to prevent stack trace
+                    },
+                    error.ModuleLoadError => {
+                        // Module load errors are handled specially with no stack trace
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        process.exit(1); // Exit immediately to prevent stack trace
                     },
                     error.MissingHostname => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
@@ -159,6 +166,14 @@ pub fn main() anyerror!void {
                     error.PathResolutionFailed => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
+                    },
+                    error.TargetMachineMismatch => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> Current machine does not match the target_machine specified for this environment.\n", .{}) catch {};
+                    },
+                    error.AmbiguousIdentifier => {
+                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        stderr.print(" -> The provided ID prefix matches multiple environments. Please use more characters.\n", .{}) catch {};
                     },
                     error.RegistryError => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
