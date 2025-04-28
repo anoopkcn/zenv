@@ -1016,9 +1016,9 @@ pub fn getAndValidateEnvironment(
     };
 
     // Use new validation function for early validation
-    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |ctx_err| {
-        std.log.err("Invalid environment configuration: {any}", .{ctx_err});
-        handleErrorFn(ctx_err.err); // Use the error part of the contextualized error
+    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
+        std.log.err("Invalid environment configuration for '{s}': {s}", .{env_name, @errorName(err)});
+        handleErrorFn(err);
         return null;
     }
     
@@ -1114,6 +1114,61 @@ pub fn getAndValidateEnvironment(
     return env_config;
 }
 
+// Helper function to look up a registry entry by name or ID, handling ambiguity
+pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, identifier: []const u8, handleErrorFn: fn (anyerror) void) ?config_module.RegistryEntry {
+    const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
+
+    // Look up environment in registry
+    const entry = registry.lookup(identifier) orelse {
+        // Special handling for ambiguous ID prefixes
+        if (is_potential_id_prefix) {
+            var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
+            defer matching_envs.deinit();
+            var match_count: usize = 0; 
+
+            for (registry.entries.items) |reg_entry| {
+                if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
+                    match_count += 1;
+                    // Only store names if count might exceed 1
+                    if (match_count > 1) {
+                       matching_envs.append(reg_entry.env_name) catch |err| {
+                          // Handle potential allocation error, though unlikely
+                          std.log.err("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)});
+                          handleErrorFn(error.OutOfMemory);
+                          return null;
+                       };
+                    }
+                }
+            }
+
+            if (match_count > 1) {
+                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
+                // Print the names we collected (or the first one if collection failed)
+                if (matching_envs.items.len > 0) {
+                    for (matching_envs.items) |env_name| {
+                        std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
+                    }
+                } else if (match_count > 1) {
+                   // Fallback if allocation failed but we know there were >1 matches
+                   std.io.getStdErr().writer().print("  (Could not list all matching environments due to memory issue)\n", .{}) catch {};
+                }
+                std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
+                handleErrorFn(error.AmbiguousIdentifier);
+                return null;
+            }
+        }
+
+        // Default error for no matches (exact or unique prefix)
+        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
+        std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+        return null;
+    };
+
+    // Found a unique entry
+    return entry;
+}
+
 // Prints the module load commands needed for manual activation to a writer
 pub fn printManualActivationModuleCommands(
     allocator: Allocator,
@@ -1179,43 +1234,50 @@ pub fn isConfigProvidedDependency(env_config: *const EnvironmentConfig, dep: []c
     return false;
 }
 
-// Get hostname from environment variable or command
-pub fn getHostname(allocator: Allocator) ![]const u8 {
-    std.log.debug("Attempting to get hostname from environment variable", .{});
+// Get hostname using environment variables or fallback to command
+pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
+    std.log.debug("Attempting to get hostname from environment variable...", .{});
 
-    // Try from environment variable first (consistent with ZenvConfig method)
-    const hostname = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
-        std.log.debug("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
-
-        // Try HOST instead
-        const host = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
-            std.log.debug("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
-
-            // Default to command-based hostname
-            std.log.debug("Getting hostname using command", .{});
-            return getHostnameFromCommand(allocator);
-        };
-
-        // Free and return null if it's an empty string
-        if (host.len == 0) {
-            allocator.free(host);
-            std.log.debug("HOST environment variable is empty, getting using command", .{});
-            return getHostnameFromCommand(allocator);
+    // Try HOSTNAME first
+    const hostname_env = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
+        if (err == error.EnvironmentVariableNotFound) {
+            // Try HOST if HOSTNAME is not found
+            std.log.debug("HOSTNAME not set, trying HOST...", .{});
+            const host_env = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
+                 if (err2 == error.EnvironmentVariableNotFound) {
+                    // Fallback to command if neither env var is set
+                    std.log.debug("HOST not set, falling back to 'hostname' command...", .{});
+                    return getHostnameFromCommand(allocator);
+                 } else {
+                    // Propagate other errors from getting HOST
+                    std.log.err("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
+                    return err2;
+                 }
+            };
+            // Check if HOST was empty
+            if (host_env.len == 0) {
+                allocator.free(host_env);
+                std.log.debug("HOST was empty, falling back to 'hostname' command...", .{});
+                return getHostnameFromCommand(allocator);
+            }
+            std.log.debug("Got hostname from HOST: '{s}'", .{host_env});
+            return host_env; // Return hostname from HOST
+        } else {
+            // Propagate other errors from getting HOSTNAME
+            std.log.err("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
+            return err;
         }
-
-        std.log.debug("Got hostname from HOST: '{s}'", .{host});
-        return host;
     };
 
-    // Free and return null if it's an empty string
-    if (hostname.len == 0) {
-        allocator.free(hostname);
-        std.log.debug("HOSTNAME environment variable is empty, getting using command", .{});
+    // Check if HOSTNAME was empty
+    if (hostname_env.len == 0) {
+        allocator.free(hostname_env);
+        std.log.debug("HOSTNAME was empty, falling back to 'hostname' command...", .{});
         return getHostnameFromCommand(allocator);
     }
 
-    std.log.debug("Got hostname: '{s}'", .{hostname});
-    return hostname;
+    std.log.debug("Got hostname from HOSTNAME: '{s}'", .{hostname_env});
+    return hostname_env;
 }
 
 // Simple check for hostname matching target machine

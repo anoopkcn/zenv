@@ -165,42 +165,8 @@ pub fn handleActivateCommand(
 
     const identifier = args[2];
 
-    // Check if this might be a partial ID (7+ characters)
-    const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
-
-    // Look up environment in registry
-    const entry = registry.lookup(identifier) orelse {
-        // Special handling for ambiguous ID prefixes
-        if (is_potential_id_prefix) {
-            // Count how many environments have this ID prefix
-            var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
-            defer matching_envs.deinit();
-            var match_found = false;
-
-            for (registry.entries.items) |reg_entry| {
-                if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
-                    match_found = true;
-                    matching_envs.append(reg_entry.env_name) catch continue;
-                }
-            }
-
-            if (match_found and matching_envs.items.len > 1) {
-                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
-                for (matching_envs.items) |env_name| {
-                    std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
-                }
-                std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
-                handleErrorFn(error.AmbiguousIdentifier);
-                return;
-            }
-        }
-
-        // Default error for no matches
-        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
-        std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return;
-    };
+    // Look up environment using the utility function
+    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
 
     // Get project directory from registry entry
     const project_dir = entry.project_dir;
@@ -227,14 +193,16 @@ pub fn handleListCommand(
     var use_hostname_filter = !list_all; // New variable to track if we should use hostname filter
 
     if (use_hostname_filter) {
-        // Get hostname directly without ZenvConfig
-        current_hostname = utils.getHostname(allocator) catch |err| {
+        // Get hostname directly using the utility function
+        current_hostname = utils.getSystemHostname(allocator) catch |err| {
             std.log.warn("Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)});
-            // Don't apply hostname filter if we can't get the hostname
             use_hostname_filter = false;
             current_hostname = null;
-            return; // Return early to prevent accessing null hostname
+            hostname_allocd = false; // Ensure flag is false if hostname fetch failed
+            // Explicitly return void to match the catch expression type
+            return void{};
         };
+        // This part only runs if the catch block wasn't executed
         if (current_hostname != null) {
             hostname_allocd = true; // Mark that we need to free it
         }

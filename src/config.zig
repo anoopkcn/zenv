@@ -6,8 +6,7 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-const ZenvErrorWithContext = errors.ZenvErrorWithContext;
-const ErrorContext = errors.ErrorContext;
+const utils = @import("utils.zig"); // Added import
 
 // Helper function to parse a required string field
 fn parseRequiredString(allocator: Allocator, v: *const Json.Value, field_name: []const u8, env_name: []const u8) ![]const u8 {
@@ -614,30 +613,37 @@ pub const EnvironmentConfig = struct {
     }
 
     // Deinitialize allocated memory within the struct
-    pub fn deinit(self: *EnvironmentConfig) void { // Removed allocator param
-        // Free strings owned by the struct only if they were copied (they are not in current impl)
-        // If using allocator.dupe in parsing, uncomment these:
-        // allocator.free(self.python_executable);
-        // if (self.description) |d| allocator.free(d);
-        // if (self.requirements_file) |f| allocator.free(f);
-
-        // Deinitialize target_machines ArrayList
-        // If target machine strings were duped, uncomment the inner loop
+    pub fn deinit(self: *EnvironmentConfig) void {
+        // Free strings owned by the struct IF they were copied using allocator.dupe
+        // during parsing. Current implementation uses slices, so these are commented out.
+        
+        // Free individual target machines IF they were duped
         // for (self.target_machines.items) |machine| allocator.free(machine);
         self.target_machines.deinit();
 
-        // Deinitialize ArrayLists
-        // Items are slices, no need to free individually if not duped
-        // If using allocator.dupe in parsing, uncomment the inner free calls:
+        // Free python_executable IF duped
+        // allocator.free(self.python_executable);
+        
+        // Free description IF duped
+        // if (self.description) |d| allocator.free(d);
+        
+        // Free requirements_file IF duped
+        // if (self.requirements_file) |f| allocator.free(f);
+
+        // Deinitialize module ArrayList
+        // Free individual modules IF they were duped
         // for (self.modules.items) |item| allocator.free(item);
         self.modules.deinit();
+
+        // Deinitialize dependency ArrayList
+        // Free individual dependencies IF they were duped
         // for (self.dependencies.items) |item| allocator.free(item);
         self.dependencies.deinit();
 
         // Deinitialize HashMap
         var iter = self.custom_activate_vars.iterator();
         while (iter.next()) |entry| {
-            // Free keys/values only if duped during parsing
+            // Free keys/values IF they were duped during parsing
             // allocator.free(entry.key_ptr.*);
             // allocator.free(entry.value_ptr.*);
             _ = entry; // Avoid unused var warning if not freeing
@@ -646,7 +652,7 @@ pub const EnvironmentConfig = struct {
 
         // Deinitialize optional setup_commands ArrayList
         if (self.setup_commands) |*commands_list| {
-            // Free items only if duped during parsing
+            // Free individual commands IF they were duped during parsing
             // for (commands_list.items) |cmd| allocator.free(cmd);
             commands_list.deinit();
         }
@@ -721,7 +727,7 @@ pub const ZenvConfig = struct {
 
             var env_config = EnvironmentConfig.init(allocator);
             // If parsing this entry fails, ensure its partially allocated fields are cleaned up
-            errdefer env_config.deinit(); // Use updated deinit
+            errdefer env_config.deinit(); // No allocator needed now
 
             var env_data_iter = env_obj.iterator(); // Iterate the inner object map
             var success = true; // Flag to track if parsing this entry works
@@ -826,7 +832,7 @@ pub const ZenvConfig = struct {
                 // Don't log here again, previous parsing function would have logged.
                 // Just clean up and skip this environment.
                 std.log.err("Skipping environment '{s}' due to parsing errors.", .{env_name});
-                env_config.deinit(); // Clean up what was allocated for this entry
+                env_config.deinit(); // No allocator needed now
                 continue; // Skip putting this entry into the map
             }
 
@@ -856,7 +862,7 @@ pub const ZenvConfig = struct {
         while (iter.next()) |entry| {
             // Key was likely referenced from JSON string, no need to free unless copied
             // If key was copied: self.allocator.free(entry.key_ptr.*); // Adjusted comment
-            entry.value_ptr.deinit(); // Deinit the EnvironmentConfig struct (uses updated signature)
+            entry.value_ptr.deinit(); // No allocator needed now
         }
         self.environments.deinit();
 
@@ -878,21 +884,16 @@ pub const ZenvConfig = struct {
     }
     
     // Validate environment configuration fields for correctness
-    pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvErrorWithContext {
+    pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvError {
+        _ = env_name; // env_name no longer needed for context
         // Check target_machines (required)
         if (env_config.target_machines.items.len == 0) {
-            return ZenvErrorWithContext.init(
-                ZenvError.ConfigInvalid,
-                ErrorContext.environmentName(env_name)
-            );
+            return ZenvError.ConfigInvalid;
         }
         
         // Check python_executable (required)
         if (env_config.python_executable.len == 0) {
-            return ZenvErrorWithContext.init(
-                ZenvError.MissingPythonExecutable,
-                ErrorContext.environmentName(env_name)
-            );
+            return ZenvError.MissingPythonExecutable;
         }
         
         // All validation passed
@@ -903,36 +904,22 @@ pub const ZenvConfig = struct {
     // Uses cached value if available
     pub fn getHostname(self: *const ZenvConfig) ![]const u8 {
         // If we've already cached the hostname, return it
-        if (self.cached_hostname != null) {
-            return self.cached_hostname.?;
+        if (self.cached_hostname) |cached| {
+             // Return a duplicate so the caller owns it and can free it
+             return self.allocator.dupe(u8, cached);
         }
         
         // For non-const self, need to cast to get mutable access
         var mutable_self = @constCast(self);
         
-        // Using getEnvVarOwned requires freeing the result later
-        std.log.debug("Attempting to get hostname from environment variable", .{});
-        const hostname = std.process.getEnvVarOwned(mutable_self.allocator, "HOSTNAME") catch |err| {
-            if (err == error.EnvironmentVariableNotFound) {
-                // Fallback to `hostname` command if HOSTNAME env var is not set
-                std.log.debug("HOSTNAME not set, attempting 'hostname' command.", .{});
-                const cmd_hostname = try getHostnameFromCommand(mutable_self.allocator);
-                mutable_self.cached_hostname = cmd_hostname;  // Cache the result
-                return cmd_hostname;
-            }
-            std.log.err("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
-            return error.MissingHostname;
-        };
-        // If HOSTNAME is empty, also fallback
-        if (hostname.len == 0) {
-            std.log.warn("HOSTNAME environment variable is empty, attempting 'hostname' command.", .{});
-            mutable_self.allocator.free(hostname); // Free the empty string
-            const cmd_hostname = try getHostnameFromCommand(mutable_self.allocator);
-            mutable_self.cached_hostname = cmd_hostname;  // Cache the result
-            return cmd_hostname;
-        }
-        std.log.debug("Got hostname: '{s}'", .{hostname});
-        mutable_self.cached_hostname = hostname;  // Cache the result
-        return hostname;
+        // Get hostname using the utility function
+        const hostname = try utils.getSystemHostname(mutable_self.allocator);
+        errdefer mutable_self.allocator.free(hostname); // Free if caching fails
+
+        // Cache the result (we need to dupe it again for the cache)
+        mutable_self.cached_hostname = try mutable_self.allocator.dupe(u8, hostname);
+
+        // Return the initially retrieved hostname (caller owns this copy)
+        return hostname; 
     }
 };
