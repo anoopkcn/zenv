@@ -6,7 +6,7 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-const utils = @import("utils.zig"); // Added import
+const utils = @import("utils.zig");
 
 // Helper function to parse a required string field
 fn parseRequiredString(allocator: Allocator, v: *const Json.Value, field_name: []const u8, env_name: []const u8) ![]const u8 {
@@ -271,7 +271,7 @@ pub const EnvironmentRegistry = struct {
                     venv_path_found_or_reconstructed = true; // Mark as successful
                 }
                 // Free venv_path if appending fails (ownership isn't transferred)
-                errdefer allocator.free(venv_path_owned); 
+                errdefer allocator.free(venv_path_owned);
 
                 // Create entry (strings are duplicated for ownership by entry)
                 try registry.entries.append(.{
@@ -398,7 +398,7 @@ pub const EnvironmentRegistry = struct {
                 // Free the old venv_path and assign the new one
                 self.allocator.free(entry.venv_path);
                 entry.venv_path = venv_path; // Assign ownership
-                
+
                 // Ownership transferred, so no need to free later
                 return; // Successfully updated
             }
@@ -515,48 +515,6 @@ fn parseOptionalStringArray(list_ptr: *?ArrayList([]const u8), v: *const Json.Va
         // Use try allocator.dupe(u8, item.string) if copying is needed
         list.appendAssumeCapacity(item.string);
     }
-}
-
-// Helper function to get hostname using the `hostname` command
-fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
-    std.log.debug("Executing 'hostname' command", .{});
-    const argv = [_][]const u8{"hostname"};
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe; // Capture stderr as well
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
-        catch |err| {
-            std.log.err("Failed to read stdout from `hostname` command: {s}", .{@errorName(err)});
-            _ = child.wait() catch {}; // Ensure child process is waited on
-            return error.ProcessError;
-        };
-    errdefer allocator.free(stdout);
-
-    const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
-        catch |err| {
-            std.log.err("Failed to read stderr from `hostname` command: {s}", .{@errorName(err)});
-            _ = child.wait() catch {};
-            return error.ProcessError;
-        };
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-
-    if (term != .Exited or term.Exited != 0) {
-        std.log.err("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr });
-        return error.ProcessError;
-    }
-
-    const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
-    if (trimmed_hostname.len == 0) {
-        std.log.err("`hostname` command returned empty output.", .{});
-        return error.MissingHostname;
-    }
-    std.log.debug("Got hostname from command: '{s}'", .{trimmed_hostname});
-    // Return a duplicate of the trimmed hostname
-    return allocator.dupe(u8, trimmed_hostname);
 }
 
 // Represents the configuration for a single named environment
