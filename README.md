@@ -66,6 +66,7 @@ Example:
 {
   "my_env": {
     "target_machines": ["login*.computer1", "cnode*"],
+    "python_executable": "python3",
     "requirements_file": "requirements.txt",
     "description": "Basic environment for Computer1",
     "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ]
