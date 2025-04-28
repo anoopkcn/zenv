@@ -22,14 +22,14 @@ jobs:
         with:
           version: 0.14.0  # Use latest stable Zig version
 
-      - name: Build for all targets
-        run: zig build release
+      - name: Build size-optimized releases
+        run: zig build release-small
 
       - name: Create GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
-          files: ./zig-out/releases/*.tar.gz  # Updated extension to match new archive format
+          files: ./zig-out/releases/*.tar.gz
           draft: false
           prerelease: false
           generate_release_notes: true

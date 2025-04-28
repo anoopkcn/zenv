@@ -21,7 +21,7 @@ jobs:
           version: 0.14.0
       
       - name: Force-build for all targets
-        run: zig build release -Dforce-release=true
+        run: zig build release-small -Dforce-release=true
       
       - name: Delete old 'tip' tag if it exists
         run: |
