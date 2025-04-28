@@ -17,11 +17,13 @@ Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
 Example for Linux x86_64 machine:
 ```bash
-curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl.tar.gz"
+curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz
+"
 ```
 and extract the `zenv` executable using:
 ```bash
-tar -xvf zenv-x86_64-linux-musl.tar.gz
+tar -xvf zenv-x86_64-linux-musl-small.tar.gz
+
 ```
 Move the `zenv` executable somewhere in your PATH ( for example: `~/.local/bin/`)
 
@@ -128,7 +130,7 @@ zenv unregister my_env
 
 One can have multiple environment configurations in the same  `zenv.json` file and it supports the following structure:
 
-```jsonc
+```json
 {
   "<env_name>": {
     "target_machine": "<machine_identifier>",
