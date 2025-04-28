@@ -139,6 +139,8 @@ zenv deregister my_env
 
 One can have multiple environment configurations in the same `zenv.json` file and it supports the following structure:
 
+NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERROR IF YOU TRY TO USE IT WITHOUT MODIFICATION
+
 ```json
 {
   "base_dir":"<opional_relative_base_dir>",
