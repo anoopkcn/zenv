@@ -6,7 +6,6 @@ const errors = @import("../errors.zig");
 const fs = std.fs;
 
 const template = @import("template.zig");
-const shell_utils = @import("shell_utils.zig");
 
 // Embed the template file at compile time
 const SETUP_ENV_TEMPLATE = @embedFile("templates/setup_env.sh.template");
@@ -45,17 +44,17 @@ fn createSetupScript(allocator: Allocator, env_config: *const EnvironmentConfig,
     try replacements.put("PYTHON_EXECUTABLE", env_config.python_executable);
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
-    
+
     // Set force_deps flag for the template
     try replacements.put("FORCE_DEPS_VALUE", if (force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
-    
+
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)
         try std.fmt.allocPrint(allocator, "python -m pip install -r {s}", .{req_abs_path})
     else
         "echo '==> No dependencies in requirements file to install.'";
     defer if (valid_deps_list_len > 0) allocator.free(pip_install_cmd);
-    
+
     try replacements.put("PIP_INSTALL_COMMAND", pip_install_cmd);
 
     // Generate the module loading block

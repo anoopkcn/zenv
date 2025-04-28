@@ -2,9 +2,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = std.fs;
 
-// Template processing utility
-// Processes a template with special placeholders in the format @@PLACEHOLDER@@
-// and replaces them with the provided values
+pub fn escapeShellValue(value: []const u8, writer: anytype) !void {
+    for (value) |char| {
+        if (char == '\'') {
+            try writer.writeAll("'\\'''");
+        } else {
+            try writer.writeByte(char);
+        }
+    }
+}
 
 // Template placeholder replacement function for string templates
 pub fn processTemplateString(

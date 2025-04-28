@@ -6,7 +6,6 @@ const errors = @import("../errors.zig");
 const fs = std.fs;
 
 const template = @import("template.zig");
-const shell_utils = @import("shell_utils.zig");
 
 // Embed the template file at compile time
 const ACTIVATION_TEMPLATE = @embedFile("templates/activate.sh.template");
@@ -88,7 +87,7 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
         while (vars_iter.next()) |entry| {
             // Basic quoting for safety, assumes no complex shell injection needed
             try custom_var_exports.writer().print("export {s}='", .{entry.key_ptr.*});
-            try shell_utils.escapeShellValue(entry.value_ptr.*, custom_var_exports.writer());
+            try template.escapeShellValue(entry.value_ptr.*, custom_var_exports.writer());
             try custom_var_exports.writer().print("'\n", .{});
 
             // Add to the unset commands

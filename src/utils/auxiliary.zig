@@ -14,7 +14,7 @@ const environment = @import("environment.zig");
 // Create activation script for the environment
 pub fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8) !void {
     // Forward to the new template-based implementation
-    return @import("activation_template.zig").createScriptFromTemplate(allocator, env_config, env_name, base_dir);
+    return @import("template_activate.zig").createScriptFromTemplate(allocator, env_config, env_name, base_dir);
 }
 
 // Executes a given shell script, inheriting stdio and handling errors
@@ -143,7 +143,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     defer allocator.free(script_abs_path);
 
     // Generate setup script content using the template
-    const script_content = try @import("setup_env_template.zig").createSetupScriptFromTemplate(allocator, env_config, env_name, base_dir, req_abs_path, valid_deps_list.items.len, force_deps);
+    const script_content = try @import("template_setup.zig").createSetupScriptFromTemplate(allocator, env_config, env_name, base_dir, req_abs_path, valid_deps_list.items.len, force_deps);
     defer allocator.free(script_content);
 
     // Write setup script to file
