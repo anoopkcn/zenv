@@ -70,6 +70,10 @@ fn printUsage() void {
         \\  --force-deps           When used with setup command, it tries to install all specified dependencies
         \\                         even if they are already provided by loaded modules.
         \\
+        \\  --no-host              Bypass hostname validation and allow setup/register of an environment
+        \\                         regardless of the target_machine specified in the configuration.
+        \\                         Useful for portable environments or development machines.
+        \\
         \\Registry:
         \\  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
         \\  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.

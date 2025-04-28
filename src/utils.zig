@@ -1012,6 +1012,21 @@ pub fn getAndValidateEnvironment(
         handleErrorFn(ctx_err.err); // Use the error part of the contextualized error
         return null;
     }
+    
+    // Check for --no-host flag to bypass hostname validation
+    var skip_hostname_check = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--no-host")) {
+            skip_hostname_check = true;
+            std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
+            break;
+        }
+    }
+    
+    if (skip_hostname_check) {
+        std.log.info("Hostname validation bypassed for environment '{s}'.", .{env_name});
+        return env_config;
+    }
 
     // Get current hostname
     var hostname: []const u8 = undefined;
@@ -1034,6 +1049,7 @@ pub fn getAndValidateEnvironment(
             env_config.target_machine,
             env_name,
         });
+        std.log.err("Use '--no-host' flag to bypass this check if needed.", .{});
         handleErrorFn(error.TargetMachineMismatch);
         return null;
     }
