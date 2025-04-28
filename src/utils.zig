@@ -934,53 +934,62 @@ pub fn validateEnvironmentForMachine(
     env_config: anytype,
     hostname: []const u8
 ) bool {
-    const target = env_config.target_machine;
-    
-    // Special cases for universal targets
-    if (std.mem.eql(u8, target, "localhost") or 
-        std.mem.eql(u8, target, "any") or 
-        std.mem.eql(u8, target, "*")) {
+    // Special case: No target machines means any machine is valid
+    if (env_config.target_machines.items.len == 0) {
         return true;
     }
     
-    // Normalize the hostname
-    const norm_hostname = normalizeHostname(hostname);
-    
-    // Check if the target contains wildcard characters
-    const has_wildcards = std.mem.indexOfAny(u8, target, "*?") != null;
-    
-    // If target has wildcards, use pattern matching
-    if (has_wildcards) {
-        return patternMatches(target, norm_hostname);
-    }
-    
-    // Otherwise, try various matching strategies in order of specificity
-    
-    // 1. Exact match (most specific)
-    if (std.mem.eql(u8, norm_hostname, target)) {
-        return true;
-    }
-    
-    // 2. Domain component match (e.g., matching "jureca" in "jrlogin08.jureca")
-    if (matchDomainComponent(norm_hostname, target)) {
-        return true;
-    }
-    
-    // 3. Check if target is a domain suffix like ".example.com"
-    if (target.len > 0 and target[0] == '.' and 
-        std.mem.endsWith(u8, norm_hostname, target)) {
-        return true;
-    }
-    
-    // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
-    if (norm_hostname.len > target.len + 1 and norm_hostname[norm_hostname.len - target.len - 1] == '.') {
-        const suffix = norm_hostname[norm_hostname.len - target.len..];
-        if (std.mem.eql(u8, suffix, target)) {
+    // Check against each target machine in the list
+    for (env_config.target_machines.items) |target| {
+        // Special cases for universal targets
+        if (std.mem.eql(u8, target, "localhost") or 
+            std.mem.eql(u8, target, "any") or 
+            std.mem.eql(u8, target, "*")) {
             return true;
+        }
+        
+        // Normalize the hostname
+        const norm_hostname = normalizeHostname(hostname);
+        
+        // Check if the target contains wildcard characters
+        const has_wildcards = std.mem.indexOfAny(u8, target, "*?") != null;
+        
+        // If target has wildcards, use pattern matching
+        if (has_wildcards) {
+            if (patternMatches(target, norm_hostname)) {
+                return true;
+            }
+            continue; // Try next target
+        }
+        
+        // Otherwise, try various matching strategies in order of specificity
+        
+        // 1. Exact match (most specific)
+        if (std.mem.eql(u8, norm_hostname, target)) {
+            return true;
+        }
+        
+        // 2. Domain component match (e.g., matching "jureca" in "jrlogin08.jureca")
+        if (matchDomainComponent(norm_hostname, target)) {
+            return true;
+        }
+        
+        // 3. Check if target is a domain suffix like ".example.com"
+        if (target.len > 0 and target[0] == '.' and 
+            std.mem.endsWith(u8, norm_hostname, target)) {
+            return true;
+        }
+        
+        // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
+        if (norm_hostname.len > target.len + 1 and norm_hostname[norm_hostname.len - target.len - 1] == '.') {
+            const suffix = norm_hostname[norm_hostname.len - target.len..];
+            if (std.mem.eql(u8, suffix, target)) {
+                return true;
+            }
         }
     }
     
-    // No match found
+    // No match found with any target machine
     return false;
 }
 
@@ -1038,15 +1047,62 @@ pub fn getAndValidateEnvironment(
     defer allocator.free(hostname);
 
     // Validate hostname against target_machine
-    std.log.debug("Comparing current hostname '{s}' with target machine '{s}' for env '{s}'", .{ hostname, env_config.target_machine, env_name });
+    std.log.debug("Comparing current hostname '{s}' with target machines for env '{s}'", .{ hostname, env_name });
 
     // Use our pure function for hostname matching
     const hostname_matches = validateEnvironmentForMachine(env_config, hostname);
 
     if (!hostname_matches) {
-        std.log.err("Current machine ('{s}') does not match target machine ('{s}') specified for environment '{s}'.", .{
+        // Format the target machines for the error message, handle OOM gracefully
+        var formatted_targets: []const u8 = undefined;
+        var formatted_targets_allocated = false;
+        format_block: {
+            var targets_buffer = std.ArrayList(u8).init(allocator);
+            defer targets_buffer.deinit();
+            
+            // Attempt to format the string
+            targets_buffer.appendSlice("[") catch |err| {
+                if (err == error.OutOfMemory) break :format_block;
+                // For other errors, also just break and use the placeholder
+                break :format_block;
+            };
+            for (env_config.target_machines.items, 0..) |target, i| {
+                if (i > 0) {
+                    targets_buffer.appendSlice(", ") catch |err| {
+                       if (err == error.OutOfMemory) break :format_block;
+                       break :format_block;
+                    };
+                }
+                targets_buffer.writer().print("\"{s}\"", .{target}) catch |err| {
+                   if (err == error.OutOfMemory) break :format_block;
+                   break :format_block;
+                };
+            }
+            targets_buffer.appendSlice("]") catch |err| {
+                if (err == error.OutOfMemory) break :format_block;
+                break :format_block;
+            };
+            
+            // If formatting succeeded, duplicate the result
+            formatted_targets = allocator.dupe(u8, targets_buffer.items) catch |err| {
+                if (err == error.OutOfMemory) break :format_block;
+                break :format_block;
+            };
+            formatted_targets_allocated = true; // Mark that we need to free this later
+        }
+        
+        // If formatting failed (OOM or other error before allocation), use a placeholder
+        if (!formatted_targets_allocated) {
+            formatted_targets = "<...>";
+        }
+        // Ensure allocated string is freed if we successfully allocated it
+        if (formatted_targets_allocated) {
+            defer allocator.free(formatted_targets);
+        }
+
+        std.log.err("Current machine ('{s}') does not match target machines ('{s}') specified for environment '{s}'.", .{
             hostname,
-            env_config.target_machine,
+            formatted_targets,
             env_name,
         });
         std.log.err("Use '--no-host' flag to bypass this check if needed.", .{});
@@ -1164,8 +1220,8 @@ pub fn getHostname(allocator: Allocator) ![]const u8 {
 
 // Simple check for hostname matching target machine
 pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
-    // Use the same improved matching logic as validateEnvironmentForMachine
-    // This provides consistency across different parts of the codebase
+    // This function is only for the simplified registry case of a single target machine
+    // Use the same matching logic for consistency
     
     // Special cases for universal targets
     if (std.mem.eql(u8, target_machine, "localhost") or 

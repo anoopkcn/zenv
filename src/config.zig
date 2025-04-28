@@ -56,7 +56,7 @@ pub const RegistryEntry = struct {
     env_name: []const u8,
     project_dir: []const u8,
     description: ?[]const u8 = null,
-    target_machine: []const u8,
+    target_machines_str: []const u8, // Renamed: String representation stored in registry
     
     pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
         allocator.free(self.id);
@@ -65,21 +65,21 @@ pub const RegistryEntry = struct {
         if (self.description) |desc| {
             allocator.free(desc);
         }
-        allocator.free(self.target_machine);
+        allocator.free(self.target_machines_str); // Renamed
     }
 };
 
 // Global registry of environments
 /// Generates a SHA-1 based ID for an environment using its name, project directory, and target machine
 /// Adds a timestamp to ensure uniqueness even if the other parameters are identical
-fn generateSHA1ID(allocator: Allocator, env_name: []const u8, project_dir: []const u8, target_machine: []const u8) ![]const u8 {
+fn generateSHA1ID(allocator: Allocator, env_name: []const u8, project_dir: []const u8, target_machines_str: []const u8) ![]const u8 {
     // Create a SHA-1 hasher
     var sha1 = std.crypto.hash.Sha1.init(.{});
     
     // Add uniqueness factors to the hash
     sha1.update(env_name);
     sha1.update(project_dir);
-    sha1.update(target_machine);
+    sha1.update(target_machines_str); // Use the string representation for ID consistency
     
     // Add a timestamp for additional uniqueness
     var timestamp_buf: [20]u8 = undefined;
@@ -207,11 +207,11 @@ pub const EnvironmentRegistry = struct {
                     continue;
                 }
                 
-                const target_machine = entry_obj.get("target_machine") orelse {
+                const target_machines_str = entry_obj.get("target_machine") orelse { // Still reads old field name for compatibility
                     std.log.err("Missing 'target_machine' field in environment entry", .{});
                     continue;
                 };
-                if (target_machine != .string) {
+                if (target_machines_str != .string) {
                     std.log.err("Expected 'target_machine' to be a string", .{});
                     continue;
                 }
@@ -231,12 +231,12 @@ pub const EnvironmentRegistry = struct {
                         id_owned = try allocator.dupe(u8, id_value.string);
                     } else {
                         // Generate a new ID if the existing one isn't a string
-                        id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machine.string);
+                        id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
                         std.log.info("Generated new SHA-1 ID for environment with invalid ID type: {s}", .{env_name.string});
                     }
                 } else {
                     // No ID exists, generate one (for backward compatibility)
-                    id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machine.string);
+                    id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
                     std.log.info("Generated new SHA-1 ID for existing environment: {s}", .{env_name.string});
                 }
                 
@@ -246,7 +246,7 @@ pub const EnvironmentRegistry = struct {
                     .env_name = try allocator.dupe(u8, env_name.string),
                     .project_dir = try allocator.dupe(u8, project_dir.string),
                     .description = description,
-                    .target_machine = try allocator.dupe(u8, target_machine.string),
+                    .target_machines_str = try allocator.dupe(u8, target_machines_str.string), // Renamed field
                 });
             }
         }
@@ -294,7 +294,7 @@ pub const EnvironmentRegistry = struct {
             try entry_obj.object.put("id", std.json.Value{ .string = entry.id });
             try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
             try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
-            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machine });
+            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machines_str }); // Renamed field
             
             // Add optional description field
             if (entry.description) |desc| {
@@ -320,36 +320,58 @@ pub const EnvironmentRegistry = struct {
     }
     
     // Register a new environment
-    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, description: ?[]const u8, target_machine: []const u8) !void {
+    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, description: ?[]const u8, target_machines: []const []const u8) !void {
+        // For registry purposes, create a single string representation of target machines
+        var registry_target_machines_str: []const u8 = undefined;
+        if (target_machines.len == 0) {
+            registry_target_machines_str = try self.allocator.dupe(u8, "any");
+        } else if (target_machines.len == 1) {
+            registry_target_machines_str = try self.allocator.dupe(u8, target_machines[0]);
+        } else {
+            var buffer = std.ArrayList(u8).init(self.allocator);
+            defer buffer.deinit();
+            for (target_machines, 0..) |machine, i| {
+                if (i > 0) try buffer.appendSlice(", ");
+                try buffer.appendSlice(machine);
+            }
+            registry_target_machines_str = try self.allocator.dupe(u8, buffer.items);
+        }
+        // We need to free this string later if it's not used to update an entry
+        errdefer self.allocator.free(registry_target_machines_str); 
+
         // Check if environment already exists
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
-                // Update existing entry (ID remains the same)
+                // Update existing entry
                 self.allocator.free(entry.project_dir);
                 entry.project_dir = try self.allocator.dupe(u8, project_dir);
-                
+
                 if (entry.description) |desc| {
                     self.allocator.free(desc);
                 }
                 entry.description = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
-                
-                self.allocator.free(entry.target_machine);
-                entry.target_machine = try self.allocator.dupe(u8, target_machine);
-                
-                return;
+
+                // Free the old target machine string and assign the new one
+                self.allocator.free(entry.target_machines_str); // Renamed field
+                entry.target_machines_str = registry_target_machines_str; // Assign ownership
+            
+                // Ownership of registry_target_machines_str transferred, so no need to free later
+                return; // Successfully updated
             }
         }
-        
-        // Generate a SHA-1 ID for the new entry
-        const id = try generateSHA1ID(self.allocator, env_name, project_dir, target_machine);
-        
-        // Add new entry
+
+        // If the environment doesn't exist, create a new entry
+        // Generate a SHA-1 ID for the new entry using the registry string
+        const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
+        errdefer self.allocator.free(id); // Free ID if appending fails
+
+        // Add new entry (transfer ownership of registry_target_machines_str)
         try self.entries.append(.{
             .id = id,
             .env_name = try self.allocator.dupe(u8, env_name),
             .project_dir = try self.allocator.dupe(u8, project_dir),
             .description = if (description) |desc| try self.allocator.dupe(u8, desc) else null,
-            .target_machine = try self.allocator.dupe(u8, target_machine),
+            .target_machines_str = registry_target_machines_str, // Renamed field, ownership transferred
         });
     }
     
@@ -404,7 +426,7 @@ pub const EnvironmentRegistry = struct {
 
 // Add required field validation at compile-time
 const REQUIRED_ENV_FIELDS = [_][]const u8{
-    "target_machine", 
+    "target_machines", // Updated from target_machine
     "python_executable"
 };
 
@@ -566,7 +588,7 @@ pub const Dependency = struct {
 };
 
 pub const EnvironmentConfig = struct {
-    target_machine: []const u8,
+    target_machines: ArrayList([]const u8), // Updated to array format
     description: ?[]const u8 = null,
     modules: ArrayList([]const u8),
     requirements_file: ?[]const u8 = null,
@@ -579,7 +601,7 @@ pub const EnvironmentConfig = struct {
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return EnvironmentConfig{
             // Initialize fields that need it
-            .target_machine = undefined, // Will be assigned during parsing
+            .target_machines = ArrayList([]const u8).init(allocator),
             .python_executable = undefined, // Will be assigned during parsing
             .modules = ArrayList([]const u8).init(allocator),
             .dependencies = ArrayList([]const u8).init(allocator),
@@ -595,10 +617,14 @@ pub const EnvironmentConfig = struct {
     pub fn deinit(self: *EnvironmentConfig) void { // Removed allocator param
         // Free strings owned by the struct only if they were copied (they are not in current impl)
         // If using allocator.dupe in parsing, uncomment these:
-        // allocator.free(self.target_machine);
         // allocator.free(self.python_executable);
         // if (self.description) |d| allocator.free(d);
         // if (self.requirements_file) |f| allocator.free(f);
+
+        // Deinitialize target_machines ArrayList
+        // If target machine strings were duped, uncomment the inner loop
+        // for (self.target_machines.items) |machine| allocator.free(machine);
+        self.target_machines.deinit();
 
         // Deinitialize ArrayLists
         // Items are slices, no need to free individually if not duped
@@ -704,13 +730,34 @@ pub const ZenvConfig = struct {
                 const key = field.key_ptr.*; // Use pointer
                 const value_ptr = field.value_ptr; // Value is already pointer
 
-                if (std.mem.eql(u8, key, "target_machine")) {
-                    env_config.target_machine = parseRequiredString(allocator, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                if (std.mem.eql(u8, key, "target_machines")) { // Updated field name here
+                    // Handle both string and array formats for backward compatibility
+                    if (value_ptr.* == .string) {
+                        // For backward compatibility: Single string target
+                        const target = parseRequiredString(allocator, value_ptr, key, env_name) catch |e| {
+                            std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                            success = false;
+                            continue;
+                        };
+                        try env_config.target_machines.append(target);
+                    } else if (value_ptr.* == .array) {
+                        // New format: Array of target machines
+                        for (value_ptr.array.items) |target_item_val| {
+                            const target_item = &target_item_val;
+                            if (target_item.* != .string) {
+                                std.log.err("Expected string elements in target_machine array for environment '{s}'", .{env_name});
+                                success = false;
+                                continue;
+                            }
+                            const target = try allocator.dupe(u8, target_item.string);
+                            try env_config.target_machines.append(target);
+                        }
+                    } else {
+                        std.log.err("Expected string or array for field '{s}' in environment '{s}', found {s}", 
+                            .{ key, env_name, @tagName(value_ptr.*) });
                         success = false;
                         continue;
-                    };
-                    // Removed: if (env_config.target_machine == undefined) success = false;
+                    }
                 } else if (std.mem.eql(u8, key, "description")) {
                     env_config.description = parseOptionalString(allocator, value_ptr, key, env_name) catch |e| {
                         std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
@@ -832,8 +879,8 @@ pub const ZenvConfig = struct {
     
     // Validate environment configuration fields for correctness
     pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvErrorWithContext {
-        // Check target_machine (required)
-        if (env_config.target_machine.len == 0) {
+        // Check target_machines (required)
+        if (env_config.target_machines.items.len == 0) {
             return ZenvErrorWithContext.init(
                 ZenvError.ConfigInvalid,
                 ErrorContext.environmentName(env_name)

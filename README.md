@@ -57,7 +57,7 @@ Example:
 ```json
 {
   "my_env": {
-    "target_machine": "login*.computer1",
+    "target_machines": ["login*.computer1", "cnode*"],
     "requirements_file": "requirements.txt",
     "description": "Basic environment for Computer1",
     "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ]
@@ -86,11 +86,9 @@ zenv list --all
 Example output:
 ```
 Available zenv environments:
-- test (ID: e66460f... Target: computer1 - My PyTorch environment for Computer1)
+- test (ID: e66460f... Target: login*.computer1, cnode* - My PyTorch environment for Computer1)
   [Project: /path/to/project]
-- my_env (ID: 4a422bf... Target: computer2)
-  [Project: /path/to/project]
-Found 2 environment(s) for the current machine ('login07.computer1').
+Found 1 environment(s) for the current machine ('login07.computer1').
 ```
 
 ### Activating Environments
@@ -103,10 +101,10 @@ Example:
 source $(zenv activate my_env)
 
 # Activate by full ID
-source $(zenv activate 4a422bfd015982bc2569ebacb45bb590d7d5c561)
+source $(zenv activate e66460fd015982bc2569ebacb45bb590d7d5c561)
 
 # Activate by partial ID (first 7+ characters)
-source $(zenv activate 4a422bf)
+source $(zenv activate e66460f)
 ```
 
 ### Registering and Deregistering Environments

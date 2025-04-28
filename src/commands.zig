@@ -27,7 +27,8 @@ pub fn handleSetupCommand(
         }
     }
 
-    std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, env_config.target_machine });
+    const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
+    std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
 
     // 1. Combine Dependencies
     var all_required_deps = std.ArrayList([]const u8).init(allocator);
@@ -141,7 +142,7 @@ pub fn handleSetupCommand(
         return;
     };
 
-    try registry.register(env_name, cwd_path, env_config.description, env_config.target_machine);
+    try registry.register(env_name, cwd_path, env_config.description, env_config.target_machines.items);
     try registry.save();
 
     std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
@@ -246,21 +247,33 @@ pub fn handleListCommand(
     var count: usize = 0;
     for (registry.entries.items) |entry| {
         const env_name = entry.env_name;
-        const target_machine = entry.target_machine;
+        const target_machines_str = entry.target_machines_str; // Renamed
 
         // Filter by target machine if requested and hostname was successfully obtained
         if (use_hostname_filter and current_hostname != null) {
-            // Simple target machine check - could be enhanced with the same logic as in config
-            if (!utils.checkHostnameMatch(current_hostname.?, target_machine)) {
-                continue; // Skip this environment
+            // Check if the current hostname matches ANY of the target patterns
+            var matches_any_target = false;
+            var targets_iter = std.mem.splitScalar(u8, target_machines_str, ','); // Use the renamed variable
+            while (targets_iter.next()) |target_pattern_raw| {
+                const target_pattern = std.mem.trim(u8, target_pattern_raw, " ");
+                if (target_pattern.len == 0) continue; // Skip empty patterns
+                
+                if (utils.checkHostnameMatch(current_hostname.?, target_pattern)) {
+                    matches_any_target = true;
+                    break; // Found a match, no need to check further patterns for this entry
+                }
+            }
+            
+            if (!matches_any_target) {
+                continue; // Skip this environment if no pattern matched
             }
         }
 
         // Get short ID (first 7 characters)
         const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
 
-        // Print environment name, short ID, and target machine
-        stdout.print("- {s} (ID: {s}... Target: {s}", .{ env_name, short_id, target_machine }) catch {};
+        // Print environment name, short ID, and target machine string
+        stdout.print("- {s} (ID: {s}... Target: {s}", .{ env_name, short_id, target_machines_str }) catch {}; // Renamed
 
         // Optionally print description
         if (entry.description) |desc| {
@@ -317,8 +330,8 @@ pub fn handleRegisterCommand(
         return;
     };
 
-    // Register the environment in the global registry
-    registry.register(env_name, cwd_path, env_config.description, env_config.target_machine) catch |err| {
+    // Register the environment in the global registry, passing the target_machines array
+    registry.register(env_name, cwd_path, env_config.description, env_config.target_machines.items) catch |err| {
         std.log.err("Failed to register environment: {s}", .{@errorName(err)});
         handleErrorFn(err);
         return;
@@ -466,7 +479,7 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
     const template_content = std.fmt.allocPrint(allocator,
         \\{{
         \\  "default_env": {{
-        \\    "target_machine": "{s}",
+        \\    "target_machine": ["{s}"],
         \\    "description": "Default environment",
         \\    "python_executable": "python3",
         \\    "modules": [],
@@ -480,7 +493,7 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    ]
         \\  }},
         \\  "dev_env": {{
-        \\    "target_machine": "{s}",
+        \\    "target_machine": ["{s}", "any"],
         \\    "description": "Development environment with additional tools",
         \\    "python_executable": "python3",
         \\    "modules": [],
