@@ -6,7 +6,7 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-const utils = @import("utils.zig");
+const environment = @import("environment.zig");
 
 // Helper function to parse a required string field
 fn parseRequiredString(allocator: Allocator, v: *const Json.Value, field_name: []const u8, env_name: []const u8) ![]const u8 {
@@ -941,7 +941,7 @@ pub const ZenvConfig = struct {
         var mutable_self = @constCast(self);
 
         // Get hostname using the utility function
-        const hostname = try utils.getSystemHostname(mutable_self.allocator);
+        const hostname = try environment.getSystemHostname(mutable_self.allocator);
         errdefer mutable_self.allocator.free(hostname); // Free if caching fails
 
         // Cache the result (we need to dupe it again for the cache)

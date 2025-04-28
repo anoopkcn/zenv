@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const config_module = @import("../config.zig");
-const errors = @import("../errors.zig");
+const config_module = @import("config.zig");
+const errors = @import("errors.zig");
 const process = std.process;
 const fs = std.fs;
 

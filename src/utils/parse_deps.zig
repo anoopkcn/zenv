@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap(void);
+const config = @import("config.zig");
 
 // Helper function to parse a line containing potential dependencies (used by parsePyprojectToml)
 // Not marked pub as it's internal to this module
@@ -155,7 +156,6 @@ pub fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: 
     return count;
 }
 
-
 // Parse dependencies from requirements.txt format content
 // Returns the number of dependencies found
 pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
@@ -270,19 +270,18 @@ pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, 
 
         // Add the owned lowercase name to the seen set. If put fails, free the key.
         seen_packages.put(package_name_lower_owned, {}) catch |err| {
-             allocator.free(package_name_lower_owned);
-             return err;
+            allocator.free(package_name_lower_owned);
+            return err;
         };
     }
 
     return valid_deps;
 }
 
-
 // Helper function to determine if a dependency was provided in the config
 // Used for memory management to avoid double freeing strings
 // Requires access to EnvironmentConfig, which needs to be imported by the caller.
-pub fn isConfigProvidedDependency(env_config: *const @import("../config.zig").EnvironmentConfig, dep: []const u8) bool {
+pub fn isConfigProvidedDependency(env_config: *const config.EnvironmentConfig, dep: []const u8) bool {
     for (env_config.dependencies.items) |config_dep| {
         if (std.mem.eql(u8, config_dep, dep)) {
             return true;

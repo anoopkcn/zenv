@@ -1,9 +1,9 @@
 const std = @import("std");
-const config_module = @import("config.zig");
+const config_module = @import("utils/config.zig");
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const EnvironmentRegistry = config_module.EnvironmentRegistry;
-const errors = @import("errors.zig");
+const errors = @import("utils/errors.zig");
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 

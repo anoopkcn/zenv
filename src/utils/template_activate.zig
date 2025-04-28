@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const config_module = @import("../config.zig");
+const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
-const errors = @import("../errors.zig");
+const errors = @import("errors.zig");
 const fs = std.fs;
 
 const template = @import("template.zig");
