@@ -27,7 +27,7 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
     // Inherit stdio for real-time output
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
-    child.stdin_behavior = .Inherit; // Allow user input if script needs it
+    child.stdin_behavior = .Inherit;
 
     const term = try child.spawnAndWait();
 
