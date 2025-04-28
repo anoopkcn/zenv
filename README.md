@@ -1,7 +1,7 @@
 # zenv
 Zenv - A virtual environment manager for supercomputers
 
-`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments that has a module system.
+`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments.
 
 ## Features
 
