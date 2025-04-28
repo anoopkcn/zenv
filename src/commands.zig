@@ -486,7 +486,7 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    "modules": [],
         \\    "dependencies": [
         \\      "pytest",
-        \\      "black",
+        \\      "black"
         \\    ],
         \\    "requirements_file": "pyproject.toml",
         \\    "custom_activate_vars": {{

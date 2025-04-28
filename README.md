@@ -51,13 +51,13 @@ export PATH="$PATH:path/to/zig-out/bin"
 zenv init
 ```
 
-Create a `zenv.json` configuration file in your project directory. You can then modify this json file according to your needs.
+This creates a `zenv.json` configuration file in your project directory. You can then **modify this json file** according to your needs.
 
 Example:
 ```json
 {
   "my_env": {
-    "target_machine": "computer1",
+    "target_machine": "login*.computer1",
     "requirements_file": "requirements.txt",
     "description": "Basic environment for Computer1",
     "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ]
