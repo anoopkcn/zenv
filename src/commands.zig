@@ -190,8 +190,8 @@ pub fn handleActivateCommand(
 
     const writer = std.io.getStdOut().writer();
 
-    // Output the absolute path to the activation script
-    writer.print("{s}/bin/activate\n", .{venv_path}) catch |e| {
+    // Output the absolute path to our custom activation script
+    writer.print("{s}/activate.sh\n", .{venv_path}) catch |e| {
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
