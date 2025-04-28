@@ -74,7 +74,7 @@ pub fn handleSetupCommand(
                  return;
             }
         };
-        
+
         // Log the absolute path for debugging
         var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
@@ -507,7 +507,6 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
         \\    "requirements_file": "pyproject.toml",
         \\    "custom_activate_vars": {{
         \\      "DEVELOPMENT": "true",
-        \\      "DEBUG": "1"
         \\    }},
         \\    "setup_commands": [
         \\      "echo 'Development environment setup complete!'"

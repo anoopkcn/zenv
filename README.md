@@ -173,15 +173,64 @@ One can have multiple environment configurations in the same `zenv.json` file an
 }
 ```
 
-## Registry
+## Help
+```bash
+zenv --help
+```
+Output:
+```
+Usage: zenv <command> [environment_name|id] [options]
 
-Zenv maintains a global registry at `~/.zenv/registry.json` that allows you to activate environments from any directory. The registry stores:
+Manages environments based on zenv.json configuration.
 
-- Environment names
-- Unique SHA-1 IDs
-- Project directories
-- Target machines
-- Optional descriptions
+Configuration (zenv.json):
+  The zenv.json file defines your environments. It can optionally include:
+  "base_dir": "path/to/venvs"  (Optional, top-level string. Specifies the base directory
+                                relative to zenv.json for creating virtual environments.
+                                Defaults to "zenv" if omitted.)
+
+Commands:
+  init                   Create a new zenv.json template file in the current directory.
+
+  setup <env_name>       Set up the specified environment for the current machine.
+                         Creates a Python virtual environment in zenv/<env_name>/.
+                         Checks if current machine matches env_name's target_machine.
+
+  activate <env_name|id> Output the path to the activation script.
+                         You can use the environment name or its ID (full or partial).
+                         To activate the environment, use:
+                         source $(zenv activate <env_name|id>)
+
+  cd <env_name|id>       Output the project directory path.
+                         You can use the environment name or its ID (full or partial).
+                         To change to the project directory, use:
+                         cd $(zenv cd <env_name|id>)
+
+  list                   List environments registered for the current machine.
+  list --all             List all registered environments.
+
+  register <env_name>    Register an environment in the global registry.
+                         Registers the current directory as the project directory.
+  deregister <env_name>  Remove an environment from the global registry.
+
+  version, -v, --version Print the zenv version.
+
+  help, --help           Show this help message.
+
+Options:
+  --force-deps           When used with setup command, it tries to install all specified dependencies
+                         even if they are already provided by loaded modules.
+
+  --no-host              Bypass hostname validation and allow setup/register of an environment
+                         regardless of the target_machine specified in the configuration.
+                         Useful for portable environments or development machines.
+
+Registry:
+  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
+  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
+  Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
+  Also the project directory can be 'cd' into from anywhere using 'source $(zenv cd <env_name|id>)'
+```
 
 ## Issues
 
