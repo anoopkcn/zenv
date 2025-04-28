@@ -61,6 +61,20 @@ pub fn handleSetupCommand(
 
     // Add dependencies from requirements file if specified
     if (env_config.requirements_file) |req_file| {
+        // Check if the specified requirements file actually exists
+        std.fs.cwd().access(req_file, .{}) catch |err| {
+            if (err == error.FileNotFound) {
+                std.log.err("Requirements file specified in configuration ('{s}') not found.", .{req_file});
+                handleErrorFn(err); // Use the original file not found error
+                return; // Exit setup command
+            } else {
+                 // Handle other potential access errors
+                 std.log.err("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) });
+                 handleErrorFn(err);
+                 return;
+            }
+        };
+        
         // Log the absolute path for debugging
         var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {

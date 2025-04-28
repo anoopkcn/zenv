@@ -142,6 +142,9 @@ pub fn main() anyerror!void {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
                     },
+                    error.FileNotFound => {
+                       stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                    },
                     error.ClusterNotFound => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
