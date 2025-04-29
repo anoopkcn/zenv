@@ -73,7 +73,7 @@ Example:
 
 ```json
 {
-  "my_env": {
+  "env_name": {
     "target_machines": ["login*.computer1", "cnode*"],
     "python_executable": "python3",
     "requirements_file": "requirements.txt",
@@ -106,9 +106,13 @@ Example output:
 
 ```
 Available zenv environments:
-- test (ID: e66460f... Target: login*.computer1, cnode* - My PyTorch environment for Computer1)
-  [Project: /path/to/project]
-Found 1 environment(s) for the current machine ('login07.computer1').
+- env_name (404dee1315fb7a2447e864ec029d6d06562afa68)
+  [target  : *.machine1, cnode*]
+  [project : /path/to/project]
+  [venv    : /path/to/project/zenv/env_name]
+  [desc    : My test environment for machine1]
+
+Found 1 total registered environment(s).
 ```
 
 ### Activating Environments
@@ -119,13 +123,13 @@ Example:
 
 ```bash
 # Activate by name
-source $(zenv activate my_env)
+source $(zenv activate env_name)
 
 # Activate by full ID
-source $(zenv activate e66460fd015982bc2569ebacb45bb590d7d5c561)
+source $(zenv activate 404dee1315fb7a2447e864ec029d6d06562afa68)
 
 # Activate by partial ID (first 7+ characters)
-source $(zenv activate e66460f)
+source $(zenv activate 404dee1)
 ```
 
 ### Registering and Deregistering Environments
@@ -135,28 +139,25 @@ Register an environment in the global registry:
 _This is done automatically when you run `zenv setup <env_name>`_
 
 ```bash
-zenv register my_env
+zenv register env_name
 ```
 
 Remove an environment from the registry:
 
 ```bash
-zenv deregister my_env        # Remove by name
-zenv deregister abc1234      # Remove by ID prefix
+zenv deregister env_name     # Remove by name or ID
 ```
 
 ## Configuration Reference
 
 One can have multiple environment configurations in the same `zenv.json` file and it supports the following structure:
 
-NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERROR IF YOU TRY TO USE IT WITHOUT MODIFICATION
-
 ```json
 {
   "base_dir": "<opional_base_dir>",
   "<env_name>": {
-    "target_machines": ["<machine_identifier>"], // REQUIRED FIELD
-    "python_executable": "<path_to_python>", // REQUIRED FIELD
+    "target_machines": ["<machine_identifier>"],
+    "python_executable": "<path_to_python>",
     "description": "<optional_description>",
     "modules": [
       "<module1>",
@@ -165,7 +166,7 @@ NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERR
     ],
     "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
     "dependencies": [
-      "<package_name>[==version]"
+      "<package_name_version>"
       //...
     ],
     "custom_activate_vars": {
@@ -178,15 +179,14 @@ NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERR
     ]
   },
   "<another_env_name>": {
-    "target_machines": ["<anothor_machine_identifier>"], // REQUIRED FIELD
-    "python_executable": "<path_to_python>" // REQUIRED FIELD
+    "target_machines": ["<anothor_machine_identifier>"],
+    "python_executable": "<path_to_python>"
     // ...
   }
 }
 ```
 
 In the configuration `target_machines` and `python_executable` are required key-values, all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project directory. One can use wildcards to target specific systems, to mantch all systems use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `requirements_file` is the same directory as `zenv.json`.
-
 
 ## Help
 
