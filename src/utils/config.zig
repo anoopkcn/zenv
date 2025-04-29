@@ -915,9 +915,9 @@ pub const ZenvConfig = struct {
         // Free the base_dir string
         self.allocator.free(self.base_dir);
 
-        // Free the cached hostname if one exists
-        if (self.cached_hostname != null) {
-            self.allocator.free(self.cached_hostname.?);
+        // Free the cached hostname if one exists using optional chaining
+        if (self.cached_hostname) |hostname| {
+            self.allocator.free(hostname);
             self.cached_hostname = null;
         }
 
@@ -949,17 +949,19 @@ pub const ZenvConfig = struct {
     // Helper to get the current machine's hostname
     // Uses cached value if available
     pub fn getHostname(self: *const ZenvConfig) ![]const u8 {
-        // If we've already cached the hostname, return it
+        // If we've already cached the hostname, return it using optional chaining
         if (self.cached_hostname) |cached| {
             // Return a duplicate so the caller owns it and can free it
-            return self.allocator.dupe(u8, cached);
+            return try self.allocator.dupe(u8, cached);
         }
 
         // For non-const self, need to cast to get mutable access
         var mutable_self = @constCast(self);
 
-        // Get hostname using the utility function
-        const hostname = try environment.getSystemHostname(mutable_self.allocator);
+        // Get hostname using the utility function with better error handling
+        const hostname = environment.getSystemHostname(mutable_self.allocator) catch |err| {
+            return errors.logAndReturn(err, "Failed to get system hostname: {s}", .{@errorName(err)});
+        };
         errdefer mutable_self.allocator.free(hostname); // Free if caching fails
 
         // Cache the result (we need to dupe it again for the cache)

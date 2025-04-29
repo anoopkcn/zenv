@@ -221,9 +221,8 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
                     std.log.debug("HOST not set, falling back to 'hostname' command...", .{});
                     return getHostnameFromCommand(allocator);
                 } else {
-                    // Propagate other errors from getting HOST
-                    std.log.err("Failed to get HOST environment variable: {s}", .{@errorName(err2)});
-                    return err2;
+                    // Use our new error helper for consistent logging
+                    return errors.logAndReturn(err2, "Failed to get HOST environment variable: {s}", .{@errorName(err2)});
                 }
             };
             // Check if HOST was empty
@@ -235,9 +234,8 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
             std.log.debug("Got hostname from HOST: '{s}'", .{host_env});
             return host_env; // Return hostname from HOST
         } else {
-            // Propagate other errors from getting HOSTNAME
-            std.log.err("Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
-            return err;
+            // Use our new error helper for consistent logging
+            return errors.logAndReturn(err, "Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
         }
     };
 
@@ -308,11 +306,20 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
     return false;
 }
 
-// Get and validate environment configuration based on args and current hostname
+/// Gets and validates environment configuration based on command-line arguments and current hostname.
+/// This is a key utility function used by most commands to get the environment configuration.
+///
+/// Params:
+///   - allocator: Memory allocator for temporary allocations
+///   - config: ZenvConfig containing all available environments
+///   - args: Command-line arguments including the environment name at args[2]
+///   - handleErrorFn: Callback function to handle errors
+///
+/// Returns: Validated environment configuration or null if validation failed
 pub fn getAndValidateEnvironment(
     allocator: Allocator,
     config: *const ZenvConfig,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) ?*const EnvironmentConfig {
     if (args.len < 3) {
@@ -428,7 +435,15 @@ pub fn getAndValidateEnvironment(
     return env_config;
 }
 
-// Helper function to look up a registry entry by name or ID, handling ambiguity
+/// Helper function to look up a registry entry by name or ID, handling ambiguity.
+/// This function provides user-friendly error messages for common lookup issues.
+///
+/// Params:
+///   - registry: The environment registry to search in
+///   - identifier: The name or ID to look up (can be a partial ID if 7+ characters)
+///   - handleErrorFn: Callback function to handle errors
+///
+/// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
 pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, identifier: []const u8, handleErrorFn: fn (anyerror) void) ?RegistryEntry {
     const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
 

@@ -161,6 +161,11 @@ pub fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: 
 pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
     std.log.info("Parsing requirements.txt for dependencies...", .{});
     var count: usize = 0;
+    
+    // Create a reusable buffer to minimize allocations
+    var line_buffer = std.ArrayList(u8).init(allocator);
+    defer line_buffer.deinit();
+    
     var lines = std.mem.splitScalar(u8, content, '\n');
 
     while (lines.next()) |line| {
@@ -174,8 +179,12 @@ pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list
         // Log each dependency being added
         std.log.info("  - Requirements file dependency: {s}", .{trimmed_line});
 
-        // Create a duplicate of the trimmed line to ensure it persists
-        const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
+        // Clear buffer and add the trimmed line
+        line_buffer.clearRetainingCapacity();
+        try line_buffer.appendSlice(trimmed_line);
+        
+        // Create a duplicate of the buffer contents
+        const trimmed_dupe = try allocator.dupe(u8, line_buffer.items);
         errdefer allocator.free(trimmed_dupe); // Clean up if append fails
 
         // Add the dependency
@@ -190,7 +199,24 @@ pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list
 pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, env_name: []const u8) !std.ArrayList([]const u8) {
     std.log.info("Validating dependencies for '{s}':", .{env_name});
     var valid_deps = std.ArrayList([]const u8).init(allocator);
-    errdefer valid_deps.deinit(); // Clean up if an error occurs during allocation
+    // Improved error handling with explicit cleanup of any added items
+    errdefer {
+        // If an error occurs, free any items we've added to valid_deps
+        for (valid_deps.items) |item| {
+            // Make sure the item isn't from raw_deps before freeing
+            var from_raw_deps = false;
+            for (raw_deps) |raw_dep| {
+                if (raw_dep.ptr == item.ptr) {
+                    from_raw_deps = true;
+                    break;
+                }
+            }
+            if (!from_raw_deps) {
+                allocator.free(item);
+            }
+        }
+        valid_deps.deinit();
+    }
 
     // Create a hashmap to track seen package names (case-insensitive) with owned keys
     var seen_packages = StringHashMap.init(allocator);

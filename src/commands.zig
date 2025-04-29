@@ -1,29 +1,86 @@
 const std = @import("std");
+// Standard library components
+const Allocator = std.mem.Allocator;
+
+// Project specific imports
 const config_module = @import("utils/config.zig");
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("utils/errors.zig");
 const utils = @import("utils.zig");
-const Allocator = std.mem.Allocator;
+
+// Helper function to create the environment directory and setup basic structure
+fn setupEnvironmentDirectory(allocator: Allocator, base_dir: []const u8, env_name: []const u8) !void {
+    // Validate input parameters
+    try utils.validatePath(base_dir);
+    try utils.validatePath(env_name);
+    
+    // Create the environment directory structure
+    try utils.createVenvDir(allocator, base_dir, env_name);
+}
+
+// Helper function to install dependencies for the environment
+fn installDependencies(
+    allocator: Allocator, 
+    env_config: *const EnvironmentConfig, 
+    env_name: []const u8, 
+    base_dir: []const u8,
+    all_required_deps: *std.ArrayList([]const u8),
+    force_deps: bool
+) !void {
+    // Convert ArrayList to owned slice for more efficient processing
+    const deps_slice = try all_required_deps.toOwnedSlice();
+    // Handle memory cleanup
+    defer {
+        // Clean up individually owned strings but not config-provided ones
+        for (deps_slice) |item| {
+            if (!utils.isConfigProvidedDependency(env_config, item)) {
+                allocator.free(item);
+            }
+        }
+        allocator.free(deps_slice); // Free the slice itself
+    }
+    
+    // Call the main environment setup function
+    try utils.setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps);
+}
 
 pub fn handleSetupCommand(
     allocator: Allocator,
     config: *const ZenvConfig,
     registry: *EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) anyerror!void {
+    // Create an arena allocator for temporary allocations
+    var temp_arena = std.heap.ArenaAllocator.init(allocator);
+    defer temp_arena.deinit();
+    const temp_allocator = temp_arena.allocator();
+    
     const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
     const env_name = args[2];
 
-    // Check for --force-deps flag
+    // Check for command-line flags
     var force_deps = false;
+    var skip_hostname_check = false;
+    
     for (args[3..]) |arg| {
-        if (std.mem.eql(u8, arg, "--force-deps")) {
-            force_deps = true;
-            std.log.info("Force dependencies flag detected. User-specified dependencies will override module-provided packages.", .{});
-            break;
+        // Use a switch statement instead of if-else chains
+        switch (std.mem.eql(u8, arg, "--force-deps")) {
+            true => {
+                force_deps = true;
+                std.log.info("Force dependencies flag detected. User-specified dependencies will override module-provided packages.", .{});
+            },
+            false => {}
+        }
+        
+        switch (std.mem.eql(u8, arg, "--no-host")) {
+            true => {
+                skip_hostname_check = true;
+                std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
+            },
+            false => {}
         }
     }
 
@@ -34,6 +91,7 @@ pub fn handleSetupCommand(
     var all_required_deps = std.ArrayList([]const u8).init(allocator);
     // Track ownership of item strings properly
     var deps_need_cleanup = true;
+    // Defer cleanup if needed
     defer {
         if (deps_need_cleanup) {
             // We need to free duped lines from parseRequirementsTxt if they exist
@@ -43,6 +101,9 @@ pub fn handleSetupCommand(
                     allocator.free(item);
                 }
             }
+            all_required_deps.deinit();
+        } else {
+            // Just deinit the list if we don't need to cleanup individual items
             all_required_deps.deinit();
         }
     }
@@ -84,13 +145,13 @@ pub fn handleSetupCommand(
         };
         std.log.info("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path });
 
-        // Read the file content
-        const req_content = std.fs.cwd().readFileAlloc(allocator, req_file, 1 * 1024 * 1024) catch |err| { // Increased size limit
+        // Read the file content - use temp_allocator since we're done with it after parsing
+        const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| { // Increased size limit
             std.log.err("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) });
             handleErrorFn(error.PathResolutionFailed); // Use specific error
             return; // Exit setup command
         };
-        defer allocator.free(req_content); // Content freed after parsing finishes
+        // No need to defer free because the arena will handle cleanup
 
         std.log.info("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len});
 
@@ -116,37 +177,28 @@ pub fn handleSetupCommand(
         std.log.info("No requirements file specified in configuration.", .{});
     }
 
-    std.log.info("Total combined dependencies before validation: {d}", .{all_required_deps.items.len});
-
     // Get base_dir from config
     const base_dir = config.base_dir;
 
     // 2. Create venv base directory structure using base_dir
-    try utils.createVenvDir(allocator, base_dir, env_name);
+    try setupEnvironmentDirectory(allocator, base_dir, env_name);
 
-    // Convert ArrayList to owned slice for more efficient processing
-    const deps_slice = try all_required_deps.toOwnedSlice();
-    deps_need_cleanup = false; // We've taken ownership of the items, don't clean up in defer block
-    defer {
-        // Clean up individually owned strings but not config-provided ones
-        for (deps_slice) |item| {
-            if (!utils.isConfigProvidedDependency(env_config, item)) {
-                allocator.free(item);
-            }
-        }
-        allocator.free(deps_slice); // Free the slice itself
+    // 3. Install dependencies
+    if (all_required_deps.items.len > 0) {
+        deps_need_cleanup = true;
+        try installDependencies(
+            allocator, 
+            env_config, 
+            env_name, 
+            base_dir, 
+            &all_required_deps,
+            force_deps
+        );
+        // After this call, all_required_deps is empty and doesn't need cleanup
+        deps_need_cleanup = false;
+    } else {
+        std.log.info("No dependencies to install", .{});
     }
-
-    // 3. Perform the main environment setup using the utility function
-    utils.setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps) catch |err| {
-        if (err == error.ModuleLoadError) {
-            // For module load errors, we don't want to show a stack trace
-            // Just output the error and exit
-            std.io.getStdErr().writer().print("Error: {s}\n", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        }
-        return err; // Propagate other errors
-    };
 
     // 4. Create the final activation script (using a separate utility)
     try utils.createActivationScript(allocator, env_config, env_name, base_dir);
@@ -170,7 +222,7 @@ pub fn handleSetupCommand(
 
 pub fn handleActivateCommand(
     registry: *const EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
@@ -200,7 +252,7 @@ pub fn handleActivateCommand(
 pub fn handleListCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
 ) void {
     const stdout = std.io.getStdOut().writer();
     const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
@@ -224,8 +276,8 @@ pub fn handleListCommand(
             hostname_allocd = true; // Mark that we need to free it
         }
     }
-    // Ensure hostname is freed if allocated
-    defer if (hostname_allocd and current_hostname != null) allocator.free(current_hostname.?);
+    // Ensure hostname is freed if allocated using optional chaining
+    defer if (hostname_allocd) if (current_hostname) |hostname| allocator.free(hostname);
 
     stdout.print("Available zenv environments:\n", .{}) catch {};
 
@@ -293,7 +345,7 @@ pub fn handleRegisterCommand(
     allocator: Allocator,
     // config: *const ZenvConfig, // Config is no longer passed in, load it here
     registry: *EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
@@ -353,7 +405,7 @@ pub fn handleRegisterCommand(
 // Handle cd command - outputs the project directory path for a given environment
 pub fn handleCdCommand(
     registry: *const EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
@@ -416,7 +468,7 @@ pub fn handleCdCommand(
 
 pub fn handleDeregisterCommand(
     registry: *EnvironmentRegistry,
-    args: [][]const u8,
+    args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {

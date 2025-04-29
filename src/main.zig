@@ -1,9 +1,12 @@
 const std = @import("std");
-const options = @import("options");
+// Standard library components
 const process = std.process;
+const Allocator = std.mem.Allocator;
+
+// Project specific imports
+const options = @import("options");
 const config_module = @import("utils/config.zig");
 const commands = @import("commands.zig");
-const Allocator = std.mem.Allocator;
 
 const Command = enum {
     setup,
