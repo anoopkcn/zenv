@@ -7,3 +7,4 @@ pub usingnamespace @import("utils/auxiliary.zig");
 pub usingnamespace @import("utils/template.zig");
 pub usingnamespace @import("utils/template_activate.zig");
 pub usingnamespace @import("utils/template_setup.zig");
+pub usingnamespace @import("utils/flags.zig");

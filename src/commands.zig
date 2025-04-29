@@ -9,6 +9,8 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("utils/errors.zig");
 const utils = @import("utils.zig");
+const flags_module = @import("utils/flags.zig");
+const CommandFlags = flags_module.CommandFlags;
 
 // Helper function to create the environment directory and setup basic structure
 fn setupEnvironmentDirectory(allocator: Allocator, base_dir: []const u8, env_name: []const u8) !void {
@@ -58,31 +60,20 @@ pub fn handleSetupCommand(
     defer temp_arena.deinit();
     const temp_allocator = temp_arena.allocator();
     
-    const env_config = utils.getAndValidateEnvironment(allocator, config, args, handleErrorFn) orelse return;
-    const env_name = args[2];
-
-    // Check for command-line flags
-    var force_deps = false;
-    var skip_hostname_check = false;
+    // Parse command-line flags
+    const flags = CommandFlags.fromArgs(args);
     
-    for (args[3..]) |arg| {
-        // Use a switch statement instead of if-else chains
-        switch (std.mem.eql(u8, arg, "--force-deps")) {
-            true => {
-                force_deps = true;
-                std.log.info("Force dependencies flag detected. User-specified dependencies will override module-provided packages.", .{});
-            },
-            false => {}
-        }
-        
-        switch (std.mem.eql(u8, arg, "--no-host")) {
-            true => {
-                skip_hostname_check = true;
-                std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
-            },
-            false => {}
-        }
+    // Log the detected flags
+    if (flags.force_deps) {
+        std.log.info("Force dependencies flag detected. User-specified dependencies will try to override module-provided packages.", .{});
     }
+    if (flags.skip_hostname_check) {
+        std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
+    }
+    
+    // Get and validate the environment config
+    const env_config = utils.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
+    const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
     std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
@@ -192,7 +183,7 @@ pub fn handleSetupCommand(
             env_name, 
             base_dir, 
             &all_required_deps,
-            force_deps
+            flags.force_deps
         );
         // After this call, all_required_deps is empty and doesn't need cleanup
         deps_need_cleanup = false;
@@ -369,9 +360,17 @@ pub fn handleRegisterCommand(
     // Ensure config is deinitialized even if subsequent operations fail
     defer config.deinit();
 
+    // Parse command-line flags
+    const flags = CommandFlags.fromArgs(args);
+    
+    // Log flags if they're set
+    if (flags.skip_hostname_check) {
+        std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
+    }
+    
     // Validate that the environment exists in the config
     // Note: getAndValidateEnvironment needs a *const pointer
-    const env_config = utils.getAndValidateEnvironment(allocator, &config, args, handleErrorFn) orelse return;
+    const env_config = utils.getAndValidateEnvironment(allocator, &config, args, flags, handleErrorFn) orelse return;
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;

@@ -2,12 +2,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const errors = @import("errors.zig");
+const flags_module = @import("flags.zig");
 const process = std.process;
 const fs = std.fs;
 
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const RegistryEntry = config_module.RegistryEntry;
+const CommandFlags = flags_module.CommandFlags;
 
 
 // Normalizes a hostname for better matching
@@ -320,6 +322,7 @@ pub fn getAndValidateEnvironment(
     allocator: Allocator,
     config: *const ZenvConfig,
     args: []const []const u8,
+    flags: CommandFlags,
     handleErrorFn: fn (anyerror) void,
 ) ?*const EnvironmentConfig {
     if (args.len < 3) {
@@ -342,18 +345,9 @@ pub fn getAndValidateEnvironment(
         return null;
     }
 
-    // Check for --no-host flag to bypass hostname validation
-    var skip_hostname_check = false;
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--no-host")) {
-            skip_hostname_check = true;
-            std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
-            break;
-        }
-    }
-
-    if (skip_hostname_check) {
-        std.log.info("Hostname validation bypassed for environment '{s}'.", .{env_name});
+    // Check if hostname validation is needed
+    if (flags.skip_hostname_check) {
+        errors.debugLog(allocator, "Hostname validation bypassed for environment '{s}'.", .{env_name});
         return env_config;
     }
 
