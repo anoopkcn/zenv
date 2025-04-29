@@ -36,18 +36,8 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
         // the actual error output from the module command will have been displayed already
         std.log.err("Script execution failed with exit code: {d}", .{term.Exited});
 
-        // Only log debug info when enabled via environment variable
-        const enable_debug_logs = blk: {
-            const env_var = std.process.getEnvVarOwned(allocator, "ZENV_DEBUG") catch |err| {
-                if (err == error.EnvironmentVariableNotFound) break :blk false;
-                std.log.warn("Failed to check ZENV_DEBUG environment variable: {s}", .{@errorName(err)});
-                break :blk false;
-            };
-            defer allocator.free(env_var);
-            break :blk std.mem.eql(u8, env_var, "1") or
-                std.mem.eql(u8, env_var, "true") or
-                std.mem.eql(u8, env_var, "yes");
-        };
+        // Only log debug info when enabled via ZENV_DEBUG
+        const enable_debug_logs = errors.isDebugEnabled(allocator);
 
         if (enable_debug_logs) {
             const script_content_debug = fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024) catch |read_err| {
@@ -67,7 +57,7 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
             defer debug_file.close();
 
             _ = debug_file.writeAll(script_content_debug) catch {};
-            std.log.debug("Script content written to debug log: {s}", .{debug_log_path});
+            errors.debugLog(allocator, "Script content written to debug log: {s}", .{debug_log_path});
         }
 
         // Check if this is a module load failure by reading the script content
@@ -148,7 +138,7 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         } else {
             for (valid_deps_list.items) |dep| {
                 try writer.print("{s}\n", .{dep});
-                std.log.debug("Wrote dependency to file: {s}", .{dep});
+                errors.debugLog(allocator, "Wrote dependency to file: {s}", .{dep});
             }
         }
         try bw.flush();

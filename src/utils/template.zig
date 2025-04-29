@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = std.fs;
+const errors = @import("errors.zig");
 
 /// Escapes a shell value by handling special characters, particularly single quotes.
 /// This ensures the value can be safely used in shell script strings.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 pub const ZenvError = error{
     MissingHostname,
@@ -59,4 +60,37 @@ pub fn handleFileError(err: anyerror, path: []const u8, operation: []const u8) a
         error.AccessDenied => ZenvError.IoError,
         else => err,
     };
+}
+
+/// Check if debug mode is enabled by examining the ZENV_DEBUG environment variable.
+/// Debug statements should only be printed if ZENV_DEBUG is set to "1", "true", or "yes".
+///
+/// Params:
+///   - allocator: Memory allocator for environment variable handling
+///
+/// Returns: Whether debug logging should be enabled
+pub fn isDebugEnabled(allocator: Allocator) bool {
+    const env_var = std.process.getEnvVarOwned(allocator, "ZENV_DEBUG") catch |err| {
+        if (err == error.EnvironmentVariableNotFound) return false;
+        // If we encounter other errors reading the env var, default to false
+        return false;
+    };
+    defer allocator.free(env_var);
+    
+    return std.mem.eql(u8, env_var, "1") or
+           std.mem.eql(u8, env_var, "true") or
+           std.mem.eql(u8, env_var, "yes");
+}
+
+/// Log a debug message, but only if the ZENV_DEBUG environment variable is enabled.
+/// This provides a consistent way to handle conditional debug logging across the app.
+///
+/// Params:
+///   - allocator: Memory allocator for environment checking
+///   - message: Format string for the debug message
+///   - args: Arguments for the format string
+pub fn debugLog(allocator: Allocator, comptime message: []const u8, args: anytype) void {
+    if (isDebugEnabled(allocator)) {
+        std.log.debug(message, args);
+    }
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap(void);
 const config = @import("config.zig");
+const errors = @import("errors.zig");
 
 // Helper function to parse a line containing potential dependencies (used by parsePyprojectToml)
 // Not marked pub as it's internal to this module
@@ -172,7 +173,7 @@ pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list
         const trimmed_line = std.mem.trim(u8, line, " \t\r");
         if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
             // Skip empty lines and comments
-            std.log.debug("Skipping comment or empty line: '{s}'", .{trimmed_line});
+            errors.debugLog(allocator, "Skipping comment or empty line: '{s}'", .{trimmed_line});
             continue;
         }
 

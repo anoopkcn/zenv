@@ -166,7 +166,7 @@ fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostname:
 
 // Helper function to get hostname using the `hostname` command (internal)
 pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
-    std.log.debug("Executing 'hostname' command", .{});
+    errors.debugLog(allocator, "Executing 'hostname' command", .{});
     const argv = [_][]const u8{"hostname"};
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Pipe;
@@ -201,24 +201,24 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
         std.log.err("`hostname` command returned empty output.", .{});
         return error.MissingHostname;
     }
-    std.log.debug("Got hostname from command: '{s}'", .{trimmed_hostname});
+    errors.debugLog(allocator, "Got hostname from command: '{s}'", .{trimmed_hostname});
     // Return a duplicate of the trimmed hostname
     return allocator.dupe(u8, trimmed_hostname);
 }
 
 // Get hostname using environment variables or fallback to command
 pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
-    std.log.debug("Attempting to get hostname from environment variable...", .{});
+    errors.debugLog(allocator, "Attempting to get hostname from environment variable...", .{});
 
     // Try HOSTNAME first
     const hostname_env = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
         if (err == error.EnvironmentVariableNotFound) {
             // Try HOST if HOSTNAME is not found
-            std.log.debug("HOSTNAME not set, trying HOST...", .{});
+            errors.debugLog(allocator, "HOSTNAME not set, trying HOST...", .{});
             const host_env = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
                 if (err2 == error.EnvironmentVariableNotFound) {
                     // Fallback to command if neither env var is set
-                    std.log.debug("HOST not set, falling back to 'hostname' command...", .{});
+                    errors.debugLog(allocator, "HOST not set, falling back to 'hostname' command...", .{});
                     return getHostnameFromCommand(allocator);
                 } else {
                     // Use our new error helper for consistent logging
@@ -228,10 +228,10 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
             // Check if HOST was empty
             if (host_env.len == 0) {
                 allocator.free(host_env);
-                std.log.debug("HOST was empty, falling back to 'hostname' command...", .{});
+                errors.debugLog(allocator, "HOST was empty, falling back to 'hostname' command...", .{});
                 return getHostnameFromCommand(allocator);
             }
-            std.log.debug("Got hostname from HOST: '{s}'", .{host_env});
+            errors.debugLog(allocator, "Got hostname from HOST: '{s}'", .{host_env});
             return host_env; // Return hostname from HOST
         } else {
             // Use our new error helper for consistent logging
@@ -242,11 +242,11 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
     // Check if HOSTNAME was empty
     if (hostname_env.len == 0) {
         allocator.free(hostname_env);
-        std.log.debug("HOSTNAME was empty, falling back to 'hostname' command...", .{});
+        errors.debugLog(allocator, "HOSTNAME was empty, falling back to 'hostname' command...", .{});
         return getHostnameFromCommand(allocator);
     }
 
-    std.log.debug("Got hostname from HOSTNAME: '{s}'", .{hostname_env});
+    errors.debugLog(allocator, "Got hostname from HOSTNAME: '{s}'", .{hostname_env});
     return hostname_env;
 }
 
@@ -367,7 +367,7 @@ pub fn getAndValidateEnvironment(
     defer allocator.free(hostname);
 
     // Validate hostname against target_machines using the internal helper
-    std.log.debug("Comparing current hostname '{s}' with target machines for env '{s}'", .{ hostname, env_name });
+    errors.debugLog(allocator, "Comparing current hostname '{s}' with target machines for env '{s}'", .{ hostname, env_name });
 
     const hostname_matches = validateEnvironmentForMachine(env_config, hostname);
 
@@ -431,7 +431,7 @@ pub fn getAndValidateEnvironment(
         return null;
     }
 
-    std.log.debug("Hostname validation passed for env '{s}'.", .{env_name});
+    errors.debugLog(allocator, "Hostname validation passed for env '{s}'.", .{env_name});
     return env_config;
 }
 

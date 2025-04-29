@@ -18,6 +18,11 @@ fn parseRequiredString(allocator: Allocator, v: *const Json.Value, field_name: [
     return try allocator.dupe(u8, v.string);
 }
 
+// Helper function to handle parse errors with debug logging
+fn debugParseError(allocator: Allocator, field_name: []const u8, env_name: []const u8, err: anyerror) void {
+    errors.debugLog(allocator, "Parse error on field '{s}' in environment '{s}': {s}", .{ field_name, env_name, @errorName(err) });
+}
+
 // Helper function to parse an optional string field
 fn parseOptionalString(allocator: Allocator, v: *const Json.Value, field_name: []const u8, env_name: []const u8) !?[]const u8 {
     if (v.* == .null) return null; // Dereference pointer
@@ -739,19 +744,19 @@ pub const ZenvConfig = struct {
             std.log.info("'base_dir' not found, using default 'zenv'", .{});
             config.base_dir = try allocator.dupe(u8, "zenv");
         }
-        
+
         // Log if base_dir is an absolute path
         if (std.fs.path.isAbsolute(config.base_dir)) {
             std.log.info("Using absolute path for virtual environment base directory: {s}", .{config.base_dir});
         } else {
-            std.log.debug("Using relative virtual environment base directory: {s}", .{config.base_dir});
+            errors.debugLog(allocator, "Using relative virtual environment base directory: {s}", .{config.base_dir});
         }
 
         var env_map_iter = root.object.iterator(); // Access the iterator via the .object payload
         while (env_map_iter.next()) |entry| {
             const env_name = entry.key_ptr.*; // Use pointer
             const env_obj_ptr = entry.value_ptr; // Value is already a pointer
-            
+
             // Skip known top-level configuration keys (like base_dir)
             if (std.mem.eql(u8, env_name, "base_dir")) {
                 continue; // Skip base_dir, it's already handled
@@ -785,7 +790,7 @@ pub const ZenvConfig = struct {
                     if (value_ptr.* == .string) {
                         // For backward compatibility: Single string target
                         const target = parseRequiredString(allocator, value_ptr, key, env_name) catch |e| {
-                            std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                            debugParseError(allocator, key, env_name, e);
                             success = false;
                             continue;
                         };
@@ -809,33 +814,33 @@ pub const ZenvConfig = struct {
                     }
                 } else if (std.mem.eql(u8, key, "description")) {
                     env_config.description = parseOptionalString(allocator, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
                 } else if (std.mem.eql(u8, key, "modules")) {
                     // Pass allocator explicitly for parseStringArray
                     parseStringArray(allocator, &env_config.modules, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
                 } else if (std.mem.eql(u8, key, "requirements_file")) {
                     env_config.requirements_file = parseOptionalString(allocator, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
                 } else if (std.mem.eql(u8, key, "dependencies")) {
                     // Pass allocator explicitly for parseStringArray
                     parseStringArray(allocator, &env_config.dependencies, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
                 } else if (std.mem.eql(u8, key, "python_executable")) {
                     env_config.python_executable = parseRequiredString(allocator, value_ptr, key, env_name) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
@@ -861,7 +866,7 @@ pub const ZenvConfig = struct {
                     // Removed unnecessary check: if (!success) continue;
                 } else if (std.mem.eql(u8, key, "setup_commands")) {
                     parseOptionalStringArray(&env_config.setup_commands, value_ptr, key, env_name, allocator) catch |e| {
-                        std.log.debug("Parse error on field '{s}': {s}", .{ key, @errorName(e) });
+                        debugParseError(allocator, key, env_name, e);
                         success = false;
                         continue;
                     };
