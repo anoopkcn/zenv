@@ -9,7 +9,7 @@ zenv - A virtual environment manager for supercomputers
 - **Environment Setup**: Creates a virtual environment with specific dependencies with a single `zenv.json` file.
 - **Module Support**: Integrate with HPC module systems, specified in the same `zenv.json`
 - **Machine-Specific Environments**: Configure environments for specific target machines
-- **Operations from any directory**: All environments are registered at `~/.zenv/registry.json`, so operations like activation, listing and changing directories can be done from any directory location
+- **Operations from any directory**: Environments can be located anywhere(project directory or a global location)  but all are registered at `~/.zenv/registry.json`, so operations like activation, listing and changing directories can be done from any directory location
 - **Validation**: Input validation, module priority mode(by default)
 
 ## Installation
