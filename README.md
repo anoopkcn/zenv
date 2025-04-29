@@ -133,7 +133,8 @@ zenv register my_env
 Remove an environment from the registry:
 
 ```bash
-zenv deregister my_env
+zenv deregister my_env        # Remove by name
+zenv deregister abc1234      # Remove by ID prefix
 ```
 
 ## Configuration Reference
@@ -214,7 +215,8 @@ Commands:
 
   register <env_name>    Register an environment in the global registry.
                          Registers the current directory as the project directory.
-  deregister <env_name>  Remove an environment from the global registry.
+  deregister <env_name|id>  Remove an environment from the global registry.
+                           You can use the environment name or its ID (full or partial).
 
   version, -v, --version Print the zenv version.
 

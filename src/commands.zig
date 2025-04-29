@@ -11,6 +11,7 @@ const errors = @import("utils/errors.zig");
 const utils = @import("utils.zig");
 const flags_module = @import("utils/flags.zig");
 const CommandFlags = flags_module.CommandFlags;
+const environment = @import("utils/environment.zig");
 
 // Helper function to create the environment directory and setup basic structure
 fn setupEnvironmentDirectory(allocator: Allocator, base_dir: []const u8, env_name: []const u8) !void {
@@ -334,7 +335,7 @@ pub fn handleListCommand(
 }
 pub fn handleRegisterCommand(
     allocator: Allocator,
-    // config: *const ZenvConfig, // Config is no longer passed in, load it here
+    config: *const ZenvConfig, // Accept the pre-parsed config from main
     registry: *EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
@@ -348,18 +349,6 @@ pub fn handleRegisterCommand(
 
     const env_name = args[2];
 
-    // Load the configuration for the current directory to find base_dir
-    const config_path = "zenv.json";
-    var config = config_module.ZenvConfig.parse(allocator, config_path) catch |err| {
-        // If config is missing or invalid, we cannot determine the base_dir
-        std.log.err("Failed to load or parse '{s}' in current directory: {s}", .{config_path, @errorName(err)});
-        std.log.err("Cannot register environment without valid configuration.", .{});
-        handleErrorFn(err);
-        return;
-    };
-    // Ensure config is deinitialized even if subsequent operations fail
-    defer config.deinit();
-
     // Parse command-line flags
     const flags = CommandFlags.fromArgs(args);
     
@@ -368,9 +357,39 @@ pub fn handleRegisterCommand(
         std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
     }
     
-    // Validate that the environment exists in the config
-    // Note: getAndValidateEnvironment needs a *const pointer
-    const env_config = utils.getAndValidateEnvironment(allocator, &config, args, flags, handleErrorFn) orelse return;
+    // Get the environment config directly without re-parsing validation
+    const env_config = config.getEnvironment(env_name) orelse {
+        std.log.err("Environment '{s}' not found in configuration.", .{env_name});
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    };
+    
+    // Validate the environment config
+    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
+        std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
+        handleErrorFn(err);
+        return;
+    }
+    
+    // Check hostname validation if needed
+    if (!flags.skip_hostname_check) {
+        const hostname = utils.getSystemHostname(allocator) catch |err| {
+            std.log.err("Failed to get current hostname: {s}", .{@errorName(err)});
+            handleErrorFn(err);
+            return;
+        };
+        defer allocator.free(hostname);
+        
+        // Use the dedicated function for hostname validation
+        const hostname_matches = environment.validateEnvironmentForMachine(env_config, hostname);
+        
+        if (!hostname_matches) {
+            std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{hostname, env_name});
+            std.log.err("Use '--no-host' flag to bypass this check if needed.", .{});
+            handleErrorFn(error.TargetMachineMismatch);
+            return;
+        }
+    }
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -471,23 +490,29 @@ pub fn handleDeregisterCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name>\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name|env_id>\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
 
-    const env_name = args[2];
-
+    const identifier = args[2];
+    
     // Look up environment in registry first to check if it exists
-    _ = registry.lookup(env_name) orelse {
-        std.io.getStdErr().writer().print("Error: Environment '{s}' not found in registry.\n", .{env_name}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
+    // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
+    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+
+    // Store name for the success message - make a copy to ensure it remains valid
+    const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
+        std.log.err("Failed to duplicate environment name: {s}", .{@errorName(err)});
+        handleErrorFn(err);
         return;
     };
-
-    // Remove the environment from the registry
-    if (registry.deregister(env_name)) {
+    defer registry.allocator.free(env_name);
+    
+    // Remove the environment from the registry using the name
+    // We pass the original identifier which could be a name or ID
+    if (registry.deregister(identifier)) {
         // Save the registry
         registry.save() catch |err| {
             std.log.err("Failed to save registry: {s}", .{@errorName(err)});

@@ -102,8 +102,8 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     return false;
 }
 
-// Internal function to validate environment for a specific hostname
-fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostname: []const u8) bool {
+// Validate environment for a specific hostname
+pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostname: []const u8) bool {
     // Special case: No target machines means any machine is valid
     if (env_config.target_machines.items.len == 0) {
         return true;

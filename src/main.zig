@@ -70,7 +70,7 @@ fn printUsage() void {
         \\
         \\  register <env_name>    Register an environment in the global registry.
         \\                         Registers the current directory as the project directory.
-        \\  deregister <env_name>  Remove an environment from the global registry.
+        \\  deregister <env_name|id>  Remove an environment from the global registry.
         \\
         \\  version, -v, --version Print the zenv version.
         \\
@@ -237,7 +237,7 @@ pub fn main() anyerror!void {
         .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args_const, handleError),
         .activate => commands.handleActivateCommand(&registry, args_const, handleError),
         .list => commands.handleListCommand(allocator, &registry, args_const),
-        .register => commands.handleRegisterCommand(allocator, &registry, args_const, handleError), // Removed config param
+        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
         .deregister => commands.handleDeregisterCommand(&registry, args_const, handleError),
         .cd => commands.handleCdCommand(&registry, args_const, handleError),
 

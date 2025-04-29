@@ -433,13 +433,24 @@ pub const EnvironmentRegistry = struct {
     }
 
     // Unregister an environment
-    pub fn deregister(self: *EnvironmentRegistry, env_name: []const u8) bool {
-        for (self.entries.items, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.env_name, env_name)) {
-                // Free memory for the removed entry
-                var removed_entry = self.entries.orderedRemove(i);
-                removed_entry.deinit(self.allocator);
-                return true;
+    /// Removes an environment from the registry based on name or ID.
+    /// Returns true if the environment was successfully removed, false otherwise.
+    ///
+    /// Params:
+    ///   - identifier: The environment name or ID (can be a partial ID if long enough)
+    ///
+    /// Returns: Whether the environment was successfully removed
+    pub fn deregister(self: *EnvironmentRegistry, identifier: []const u8) bool {
+        // Try to look up the entry first using our existing method which handles IDs
+        if (self.lookup(identifier)) |entry| {
+            // We found an entry, now find its index
+            for (self.entries.items, 0..) |reg_entry, i| {
+                if (std.mem.eql(u8, reg_entry.env_name, entry.env_name)) {
+                    // Free memory for the removed entry
+                    var removed_entry = self.entries.orderedRemove(i);
+                    removed_entry.deinit(self.allocator);
+                    return true;
+                }
             }
         }
         return false;
