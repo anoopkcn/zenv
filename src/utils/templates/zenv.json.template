@@ -1,0 +1,34 @@
+{
+  "base_dir": "zenv",
+  "default_env": {
+    "target_machines": ["jureca","juwels"],
+    "description": "Default python environment",
+    "python_executable": "python3",
+    "modules": [
+        "Stages/2025",
+        "GCC",
+        "OpenMPI",
+        "CUDA",
+        "Python",
+        "CMake"
+    ],
+    "dependencies": [],
+    "requirements_file": null,
+    "custom_activate_vars": {},
+    "setup_commands": []
+  },
+  "dev_env": {
+    "target_machines": ["@@HOSTNAME@@", "any"],
+    "description": "Development environment with additional tools",
+    "python_executable": "python3",
+    "modules": [],
+    "dependencies": [],
+    "requirements_file": "pyproject.toml",
+    "custom_activate_vars": {
+      "DEVELOPMENT": "true"
+    },
+    "setup_commands": [
+      "echo 'Development environment setup complete!'"
+    ]
+  }
+}

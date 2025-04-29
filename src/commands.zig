@@ -538,48 +538,25 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
     // Use a static string as the default target_machine - now supporting patterns
     const hostname = "localhost";
 
-    // Create template content with pattern examples
-    const template_content = std.fmt.allocPrint(allocator,
-        \\{{
-        \\  "base_dir": "zenv",
-        \\  "default_env": {{
-        \\    "target_machines": ["{s}"],
-        \\    "description": "Default environment",
-        \\    "python_executable": "python3",
-        \\    "modules": [],
-        \\    "dependencies": [],
-        \\    "requirements_file": "requirements.txt",
-        \\    "custom_activate_vars": {{
-        \\      "CUSTOM_VAR": "custom_value"
-        \\    }},
-        \\    "setup_commands": [
-        \\      "echo 'Environment setup complete!'"
-        \\    ]
-        \\  }},
-        \\  "dev_env": {{
-        \\    "target_machines": ["{s}", "any"],
-        \\    "description": "Development environment with additional tools",
-        \\    "python_executable": "python3",
-        \\    "modules": [],
-        \\    "dependencies": [
-        \\      "pytest",
-        \\      "black"
-        \\    ],
-        \\    "requirements_file": "pyproject.toml",
-        \\    "custom_activate_vars": {{
-        \\      "DEVELOPMENT": "true",
-        \\    }},
-        \\    "setup_commands": [
-        \\      "echo 'Development environment setup complete!'"
-        \\    ]
-        \\  }}
-        \\}}
-        \\
-    , .{ hostname, hostname }) catch |err| {
-        std.io.getStdErr().writer().print("Error creating template content: {s}\n", .{@errorName(err)}) catch {};
+    // Import the template module for JSON
+    const template_json = @import("utils/template_json.zig");
+
+    // Create a map for template replacements
+    var replacements = std.StringHashMap([]const u8).init(allocator);
+    defer replacements.deinit();
+
+    // Add replacements for the template
+    replacements.put("HOSTNAME", hostname) catch |err| {
+        std.io.getStdErr().writer().print("Error creating replacements: {s}\n", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
-    defer allocator.free(template_content);
+
+    // Process the template using our JSON template utility
+    const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
+        std.io.getStdErr().writer().print("Error processing template: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(processed_content);
 
     // Write template to file
     const file = cwd.createFile(config_path, .{}) catch |err| {
@@ -588,7 +565,7 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
     };
     defer file.close();
 
-    file.writeAll(template_content) catch |err| {
+    file.writeAll(processed_content) catch |err| {
         std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
