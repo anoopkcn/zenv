@@ -162,11 +162,11 @@ pub fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: 
 pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
     std.log.info("Parsing requirements.txt for dependencies...", .{});
     var count: usize = 0;
-    
+
     // Create a reusable buffer to minimize allocations
     var line_buffer = std.ArrayList(u8).init(allocator);
     defer line_buffer.deinit();
-    
+
     var lines = std.mem.splitScalar(u8, content, '\n');
 
     while (lines.next()) |line| {
@@ -183,7 +183,7 @@ pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list
         // Clear buffer and add the trimmed line
         line_buffer.clearRetainingCapacity();
         try line_buffer.appendSlice(trimmed_line);
-        
+
         // Create a duplicate of the buffer contents
         const trimmed_dupe = try allocator.dupe(u8, line_buffer.items);
         errdefer allocator.free(trimmed_dupe); // Clean up if append fails

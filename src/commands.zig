@@ -18,20 +18,13 @@ fn setupEnvironmentDirectory(allocator: Allocator, base_dir: []const u8, env_nam
     // Validate input parameters
     try utils.validatePath(base_dir);
     try utils.validatePath(env_name);
-    
+
     // Create the environment directory structure
     try utils.createVenvDir(allocator, base_dir, env_name);
 }
 
 // Helper function to install dependencies for the environment
-fn installDependencies(
-    allocator: Allocator, 
-    env_config: *const EnvironmentConfig, 
-    env_name: []const u8, 
-    base_dir: []const u8,
-    all_required_deps: *std.ArrayList([]const u8),
-    force_deps: bool
-) !void {
+fn installDependencies(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, all_required_deps: *std.ArrayList([]const u8), force_deps: bool) !void {
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice();
     // Handle memory cleanup
@@ -44,7 +37,7 @@ fn installDependencies(
         }
         allocator.free(deps_slice); // Free the slice itself
     }
-    
+
     // Call the main environment setup function
     try utils.setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps);
 }
@@ -60,10 +53,10 @@ pub fn handleSetupCommand(
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
     const temp_allocator = temp_arena.allocator();
-    
+
     // Parse command-line flags
     const flags = CommandFlags.fromArgs(args);
-    
+
     // Log the detected flags
     if (flags.force_deps) {
         std.log.info("Force dependencies flag detected. User-specified dependencies will try to override module-provided packages.", .{});
@@ -71,7 +64,7 @@ pub fn handleSetupCommand(
     if (flags.skip_hostname_check) {
         std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
     }
-    
+
     // Get and validate the environment config
     const env_config = utils.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
     const env_name = args[2];
@@ -121,10 +114,10 @@ pub fn handleSetupCommand(
                 handleErrorFn(err); // Use the original file not found error
                 return; // Exit setup command
             } else {
-                 // Handle other potential access errors
-                 std.log.err("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) });
-                 handleErrorFn(err);
-                 return;
+                // Handle other potential access errors
+                std.log.err("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) });
+                handleErrorFn(err);
+                return;
             }
         };
 
@@ -178,14 +171,7 @@ pub fn handleSetupCommand(
     // 3. Install dependencies
     if (all_required_deps.items.len > 0) {
         deps_need_cleanup = true;
-        try installDependencies(
-            allocator, 
-            env_config, 
-            env_name, 
-            base_dir, 
-            &all_required_deps,
-            flags.force_deps
-        );
+        try installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps);
         // After this call, all_required_deps is empty and doesn't need cleanup
         deps_need_cleanup = false;
     } else {
@@ -309,7 +295,7 @@ pub fn handleListCommand(
             stdout.print(" - {s}", .{desc}) catch {};
         }
         // Print project and venv paths
-        stdout.print(")\n  [Project: {s}]\n  [Venv:    {s}]\n", .{entry.project_dir, entry.venv_path}) catch {};
+        stdout.print(")\n  [Project: {s}]\n  [Venv:    {s}]\n", .{ entry.project_dir, entry.venv_path }) catch {};
 
         // Print full ID on a separate line for reference
         // stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
@@ -351,26 +337,26 @@ pub fn handleRegisterCommand(
 
     // Parse command-line flags
     const flags = CommandFlags.fromArgs(args);
-    
+
     // Log flags if they're set
     if (flags.skip_hostname_check) {
         std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
     }
-    
+
     // Get the environment config directly without re-parsing validation
     const env_config = config.getEnvironment(env_name) orelse {
         std.log.err("Environment '{s}' not found in configuration.", .{env_name});
         handleErrorFn(error.EnvironmentNotFound);
         return;
     };
-    
+
     // Validate the environment config
     if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
         std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
         handleErrorFn(err);
         return;
     }
-    
+
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
         const hostname = utils.getSystemHostname(allocator) catch |err| {
@@ -379,12 +365,12 @@ pub fn handleRegisterCommand(
             return;
         };
         defer allocator.free(hostname);
-        
+
         // Use the dedicated function for hostname validation
         const hostname_matches = environment.validateEnvironmentForMachine(env_config, hostname);
-        
+
         if (!hostname_matches) {
-            std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{hostname, env_name});
+            std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{ hostname, env_name });
             std.log.err("Use '--no-host' flag to bypass this check if needed.", .{});
             handleErrorFn(error.TargetMachineMismatch);
             return;
@@ -497,7 +483,7 @@ pub fn handleDeregisterCommand(
     }
 
     const identifier = args[2];
-    
+
     // Look up environment in registry first to check if it exists
     // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
     const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
@@ -509,7 +495,7 @@ pub fn handleDeregisterCommand(
         return;
     };
     defer registry.allocator.free(env_name);
-    
+
     // Remove the environment from the registry using the name
     // We pass the original identifier which could be a name or ID
     if (registry.deregister(identifier)) {

@@ -11,7 +11,6 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const RegistryEntry = config_module.RegistryEntry;
 const CommandFlags = flags_module.CommandFlags;
 
-
 // Normalizes a hostname for better matching
 // Handles common variations like ".local" suffix on macOS
 fn normalizeHostname(hostname: []const u8) []const u8 {
@@ -83,13 +82,12 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
         // '?' matches any single character
         return str.len > 0 and patternMatches(pattern[1..], str[1..]);
     } else if (pattern[0] == str[0]) {
-         // Match exact character
-         return str.len > 0 and patternMatches(pattern[1..], str[1..]);
+        // Match exact character
+        return str.len > 0 and patternMatches(pattern[1..], str[1..]);
     }
 
     return false;
 }
-
 
 // Splits a hostname into domain components and checks if any match the target
 fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
@@ -382,9 +380,9 @@ pub fn getAndValidateEnvironment(
             for (env_config.target_machines.items, 0..) |target, i| {
                 if (i > 0) {
                     targets_buffer.appendSlice(", ") catch |err| {
-                         std.log.err("Failed to format target machines for error message: {s}", .{@errorName(err)});
-                         handleErrorFn(err);
-                         break :format_block;
+                        std.log.err("Failed to format target machines for error message: {s}", .{@errorName(err)});
+                        handleErrorFn(err);
+                        break :format_block;
                     };
                 }
                 targets_buffer.writer().print("\"{s}\"", .{target}) catch |err| {
@@ -394,9 +392,9 @@ pub fn getAndValidateEnvironment(
                 };
             }
             targets_buffer.appendSlice("]") catch |err| {
-                 std.log.err("Failed to format target machines for error message: {s}", .{@errorName(err)});
-                 handleErrorFn(err);
-                 break :format_block;
+                std.log.err("Failed to format target machines for error message: {s}", .{@errorName(err)});
+                handleErrorFn(err);
+                break :format_block;
             };
 
             // If formatting succeeded, duplicate the result
@@ -462,7 +460,7 @@ pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, i
                     }
                     // If it's the first match, store its name in case it's the only one
                     else if (match_count == 1) {
-                         matching_envs.append(reg_entry.env_name) catch |err| {
+                        matching_envs.append(reg_entry.env_name) catch |err| {
                             std.log.err("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)});
                             handleErrorFn(error.OutOfMemory);
                             return null;

@@ -257,8 +257,8 @@ pub const EnvironmentRegistry = struct {
                         // Fall through to reconstruction
                     }
                 } else {
-                     std.log.info("Registry entry for '{s}' missing 'venv_path', reconstructing assuming default 'zenv' base...", .{env_name.string});
-                     // Fall through to reconstruction
+                    std.log.info("Registry entry for '{s}' missing 'venv_path', reconstructing assuming default 'zenv' base...", .{env_name.string});
+                    // Fall through to reconstruction
                 }
 
                 // Reconstruction logic (if needed)
@@ -270,8 +270,8 @@ pub const EnvironmentRegistry = struct {
                         "zenv",
                         env_name.string, // Use the string directly from JSON
                     }) catch |err| {
-                         std.log.err("Failed to reconstruct venv_path for '{s}': {s}", .{env_name.string, @errorName(err)});
-                         continue; // Skip this entry if reconstruction fails
+                        std.log.err("Failed to reconstruct venv_path for '{s}': {s}", .{ env_name.string, @errorName(err) });
+                        continue; // Skip this entry if reconstruction fails
                     };
                     venv_path_found_or_reconstructed = true; // Mark as successful
                 }
@@ -383,10 +383,10 @@ pub const EnvironmentRegistry = struct {
         var venv_path: []const u8 = undefined;
         if (std.fs.path.isAbsolute(base_dir)) {
             // For absolute base_dir, join directly with env_name
-            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{base_dir, env_name});
+            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir, env_name });
         } else {
             // For relative base_dir, join with project_dir first
-            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{project_dir, base_dir, env_name});
+            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ project_dir, base_dir, env_name });
         }
         // Free this path later if not used to update/create an entry
         errdefer self.allocator.free(venv_path);
@@ -744,8 +744,8 @@ pub const ZenvConfig = struct {
                 // Duplicate the string for ownership
                 config.base_dir = try allocator.dupe(u8, base_dir_val_ptr.string);
             } else if (base_dir_val_ptr == .null) { // No dereference needed
-                 std.log.info("'base_dir' is null, using default 'zenv'", .{});
-                 config.base_dir = try allocator.dupe(u8, "zenv"); // Default
+                std.log.info("'base_dir' is null, using default 'zenv'", .{});
+                config.base_dir = try allocator.dupe(u8, "zenv"); // Default
             } else {
                 std.log.warn("Ignoring non-string value for 'base_dir', using default 'zenv'", .{});
                 config.base_dir = try allocator.dupe(u8, "zenv"); // Default

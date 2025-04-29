@@ -199,47 +199,48 @@ Usage: zenv <command> [environment_name|id] [options]
 Manages environments based on zenv.json configuration.
 
 Configuration (zenv.json):
-  The zenv.json file defines your environments. It can optionally include:
-  "base_dir": "path/to/venvs"  (Optional, top-level string. Specifies the base directory
-                                relative to zenv.json for creating virtual environments.
-                                Defaults to "zenv" if omitted.)
+  The zenv.json file defines your environments. It can optionally include top-level key-value:
+  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
+  Can be relative to zenv.json location or an absolute path.
+  Defaults to "zenv" if omitted.
 
 Commands:
-  init                   Create a new zenv.json template file in the current directory.
+  init                      Create a new zenv.json template file in the current directory.
 
-  setup <env_name>       Set up the specified environment for the current machine.
-                         Creates a Python virtual environment in zenv/<env_name>/.
-                         Checks if current machine matches env_name's target_machine.
+  setup <env_name>          Set up the specified environment for the current machine.
+                            Creates a Python virtual environment in <base_dir>/<env_name>/.
+                            Checks if current machine matches env_name's target_machine.
 
-  activate <env_name|id> Output the path to the activation script.
-                         You can use the environment name or its ID (full or partial).
-                         To activate the environment, use:
-                         source $(zenv activate <env_name|id>)
+  activate <env_name|id>    Output the path to the activation script.
+                            You can use the environment name or its ID (full or partial).
+                            To activate the environment, use:
+                            source $(zenv activate <env_name|id>)
 
-  cd <env_name|id>       Output the project directory path.
-                         You can use the environment name or its ID (full or partial).
-                         To change to the project directory, use:
-                         cd $(zenv cd <env_name|id>)
+  cd <env_name|id>          Output the project directory path.
+                            You can use the environment name or its ID (full or partial).
+                            To change to the project directory, use:
+                            cd $(zenv cd <env_name|id>)
 
-  list                   List environments registered for the current machine.
-  list --all             List all registered environments.
+  list                      List environments registered for the current machine.
 
-  register <env_name>    Register an environment in the global registry.
-                         Registers the current directory as the project directory.
+  list --all                List all registered environments.
+
+  register <env_name>       Register an environment in the global registry.
+                            Registers the current directory as the project directory.
+
   deregister <env_name|id>  Remove an environment from the global registry.
-                           You can use the environment name or its ID (full or partial).
 
-  version, -v, --version Print the zenv version.
+  version, -v, --version    Print the zenv version.
 
-  help, --help           Show this help message.
+  help, --help              Show this help message.
 
 Options:
-  --force-deps           When used with setup command, it tries to install all specified dependencies
-                         even if they are already provided by loaded modules.
+  --force-deps              When used with setup command, it tries to install all specified dependencies
+                            even if they are already provided by loaded modules.
 
-  --no-host              Bypass hostname validation and allow setup/register of an environment
-                         regardless of the target_machine specified in the configuration.
-                         Useful for portable environments or development machines.
+  --no-host                 Bypass hostname validation and allow setup/register of an environment
+                            regardless of the target_machine specified in the configuration.
+                            Useful for portable environments or development machines.
 
 Registry:
   The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.

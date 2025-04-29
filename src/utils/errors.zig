@@ -52,7 +52,7 @@ pub fn logAndReturn(err: anyerror, comptime message: []const u8, args: anytype) 
 /// Returns: A mapped error or the original error
 pub fn handleFileError(err: anyerror, path: []const u8, operation: []const u8) anyerror {
     std.log.err("File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) });
-    
+
     // Map common file errors to our error set
     return switch (err) {
         error.FileNotFound => ZenvError.ConfigFileNotFound,
@@ -76,10 +76,10 @@ pub fn isDebugEnabled(allocator: Allocator) bool {
         return false;
     };
     defer allocator.free(env_var);
-    
+
     return std.mem.eql(u8, env_var, "1") or
-           std.mem.eql(u8, env_var, "true") or
-           std.mem.eql(u8, env_var, "yes");
+        std.mem.eql(u8, env_var, "true") or
+        std.mem.eql(u8, env_var, "yes");
 }
 
 /// Log a debug message, but only if the ZENV_DEBUG environment variable is enabled.
