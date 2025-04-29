@@ -8,3 +8,5 @@ pub usingnamespace @import("utils/template.zig");
 pub usingnamespace @import("utils/template_activate.zig");
 pub usingnamespace @import("utils/template_setup.zig");
 pub usingnamespace @import("utils/flags.zig");
+pub usingnamespace @import("utils/config.zig");
+pub usingnamespace @import("utils/errors.zig");

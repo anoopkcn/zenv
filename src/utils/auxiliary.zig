@@ -1,25 +1,35 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const fs = @import("std").fs;
+const process = @import("std").process;
+
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("errors.zig");
-const fs = @import("std").fs;
-const process = @import("std").process;
-
 const parse_deps = @import("parse_deps.zig");
 const environment = @import("environment.zig");
 const template_activate = @import("template_activate.zig");
 const template_setup = @import("template_setup.zig");
+const filesystem = @import("filesystem.zig");
 
 // Create activation script for the environment
-pub fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8) !void {
+pub fn createActivationScript(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+) !void {
     return template_activate.createScriptFromTemplate(allocator, env_config, env_name, base_dir);
 }
 
 // Executes a given shell script, inheriting stdio and handling errors
-pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, script_rel_path: []const u8) !void {
+pub fn executeShellScript(
+    allocator: Allocator,
+    script_abs_path: []const u8,
+    script_rel_path: []const u8,
+) !void {
     std.log.info("Running script: {s}", .{script_abs_path});
     const argv = [_][]const u8{ "/bin/sh", script_abs_path };
     var child = process.Child.init(&argv, allocator);
@@ -81,8 +91,53 @@ pub fn executeShellScript(allocator: Allocator, script_abs_path: []const u8, scr
     std.log.info("Script completed successfully: {s}", .{script_abs_path});
 }
 
+pub fn setupEnvironmentDirectory(
+    allocator: Allocator,
+    base_dir: []const u8,
+    env_name: []const u8,
+) !void {
+    // Validate input parameters
+    try filesystem.validatePath(base_dir);
+    try filesystem.validatePath(env_name);
+
+    // Create the environment directory structure
+    try filesystem.createVenvDir(allocator, base_dir, env_name);
+}
+
+pub fn installDependencies(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+    all_required_deps: *std.ArrayList([]const u8),
+    force_deps: bool,
+) !void {
+    // Convert ArrayList to owned slice for more efficient processing
+    const deps_slice = try all_required_deps.toOwnedSlice();
+    // Handle memory cleanup
+    defer {
+        // Clean up individually owned strings but not config-provided ones
+        for (deps_slice) |item| {
+            if (!parse_deps.isConfigProvidedDependency(env_config, item)) {
+                allocator.free(item);
+            }
+        }
+        allocator.free(deps_slice); // Free the slice itself
+    }
+
+    // Call the main environment setup function
+    try setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps);
+}
+
 // Sets up the full environment: creates files, generates and runs setup script.
-pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, deps: []const []const u8, force_deps: bool) !void {
+pub fn setupEnvironment(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+    deps: []const []const u8,
+    force_deps: bool,
+) !void {
     std.log.info("Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir });
 
     // Get absolute path of current working directory

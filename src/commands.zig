@@ -1,45 +1,74 @@
 const std = @import("std");
-// Standard library components
 const Allocator = std.mem.Allocator;
 
-// Project specific imports
-const config_module = @import("utils/config.zig");
-const ZenvConfig = config_module.ZenvConfig;
-const EnvironmentConfig = config_module.EnvironmentConfig;
-const EnvironmentRegistry = config_module.EnvironmentRegistry;
-const errors = @import("utils/errors.zig");
 const utils = @import("utils.zig");
-const flags_module = @import("utils/flags.zig");
-const CommandFlags = flags_module.CommandFlags;
-const environment = @import("utils/environment.zig");
+const ZenvConfig = utils.ZenvConfig;
+const EnvironmentConfig = utils.EnvironmentConfig;
+const EnvironmentRegistry = utils.EnvironmentRegistry;
+const CommandFlags = utils.CommandFlags;
 
-// Helper function to create the environment directory and setup basic structure
-fn setupEnvironmentDirectory(allocator: Allocator, base_dir: []const u8, env_name: []const u8) !void {
-    // Validate input parameters
-    try utils.validatePath(base_dir);
-    try utils.validatePath(env_name);
+pub fn handleInitCommand(
+    allocator: std.mem.Allocator,
+) void {
+    const cwd = std.fs.cwd();
+    const config_path = "zenv.json";
 
-    // Create the environment directory structure
-    try utils.createVenvDir(allocator, base_dir, env_name);
-}
-
-// Helper function to install dependencies for the environment
-fn installDependencies(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, all_required_deps: *std.ArrayList([]const u8), force_deps: bool) !void {
-    // Convert ArrayList to owned slice for more efficient processing
-    const deps_slice = try all_required_deps.toOwnedSlice();
-    // Handle memory cleanup
-    defer {
-        // Clean up individually owned strings but not config-provided ones
-        for (deps_slice) |item| {
-            if (!utils.isConfigProvidedDependency(env_config, item)) {
-                allocator.free(item);
+    // Check if file exists
+    const file_exists = blk: {
+        cwd.access(config_path, .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                std.io.getStdErr().writer().print("Error accessing current directory: {s}\n", .{@errorName(err)}) catch {};
+                std.process.exit(1);
             }
-        }
-        allocator.free(deps_slice); // Free the slice itself
+            // File doesn't exist
+            break :blk false;
+        };
+        break :blk true;
+    };
+
+    if (file_exists) {
+        std.io.getStdErr().writer().print("Error: {s} already exists. Please remove or rename it first.\n", .{config_path}) catch {};
+        std.process.exit(1);
     }
 
-    // Call the main environment setup function
-    try utils.setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps);
+    // Use a static string as the default target_machine - now supporting patterns
+    const hostname = "localhost";
+
+    // Import the template module for JSON
+    const template_json = @import("utils/template_json.zig");
+
+    // Create a map for template replacements
+    var replacements = std.StringHashMap([]const u8).init(allocator);
+    defer replacements.deinit();
+
+    // Add replacements for the template
+    replacements.put("HOSTNAME", hostname) catch |err| {
+        std.io.getStdErr().writer().print("Error creating replacements: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+
+    // Process the template using our JSON template utility
+    const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
+        std.io.getStdErr().writer().print("Error processing template: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(processed_content);
+
+    // Write template to file
+    const file = cwd.createFile(config_path, .{}) catch |err| {
+        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
+        std.process.exit(1);
+    };
+    defer file.close();
+
+    file.writeAll(processed_content) catch |err| {
+        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
+        std.process.exit(1);
+    };
+
+    std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
+    std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("You can use an absolute path for base_dir (e.g., '/home/user/venvs') to store environments outside the project directory.\n", .{}) catch {};
 }
 
 pub fn handleSetupCommand(
@@ -166,12 +195,12 @@ pub fn handleSetupCommand(
     const base_dir = config.base_dir;
 
     // 2. Create venv base directory structure using base_dir
-    try setupEnvironmentDirectory(allocator, base_dir, env_name);
+    try utils.setupEnvironmentDirectory(allocator, base_dir, env_name);
 
     // 3. Install dependencies
     if (all_required_deps.items.len > 0) {
         deps_need_cleanup = true;
-        try installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps);
+        try utils.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps);
         // After this call, all_required_deps is empty and doesn't need cleanup
         deps_need_cleanup = false;
     } else {
@@ -195,8 +224,6 @@ pub fn handleSetupCommand(
     std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
     std.log.info("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name});
 }
-
-// setupEnvironment moved to utils.zig
 
 pub fn handleActivateCommand(
     registry: *const EnvironmentRegistry,
@@ -289,13 +316,13 @@ pub fn handleListCommand(
 
         // Print environment name, short ID, and target machine string
         stdout.print("- {s} ({s})", .{ env_name, entry.id }) catch {};
-        stdout.print("\n  [target  : {s}]", .{ target_machines_str }) catch {};
-        stdout.print("\n  [project : {s}]", .{ entry.project_dir }) catch {};
-        stdout.print("\n  [venv    : {s}]", .{ entry.venv_path }) catch {};
+        stdout.print("\n  [target  : {s}]", .{target_machines_str}) catch {};
+        stdout.print("\n  [project : {s}]", .{entry.project_dir}) catch {};
+        stdout.print("\n  [venv    : {s}]", .{entry.venv_path}) catch {};
 
         // Optionally print description
         if (entry.description) |desc| {
-            stdout.print("\n  [desc    : {s}]\n\n", .{ desc }) catch {};
+            stdout.print("\n  [desc    : {s}]\n\n", .{desc}) catch {};
         }
 
         count += 1;
@@ -318,9 +345,10 @@ pub fn handleListCommand(
         }
     }
 }
+
 pub fn handleRegisterCommand(
     allocator: Allocator,
-    config: *const ZenvConfig, // Accept the pre-parsed config from main
+    config: *const ZenvConfig,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
@@ -334,7 +362,6 @@ pub fn handleRegisterCommand(
 
     const env_name = args[2];
 
-    // Parse command-line flags
     const flags = CommandFlags.fromArgs(args);
 
     // Log flags if they're set
@@ -350,7 +377,7 @@ pub fn handleRegisterCommand(
     };
 
     // Validate the environment config
-    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
+    if (utils.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
         std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
         handleErrorFn(err);
         return;
@@ -366,7 +393,7 @@ pub fn handleRegisterCommand(
         defer allocator.free(hostname);
 
         // Use the dedicated function for hostname validation
-        const hostname_matches = environment.validateEnvironmentForMachine(env_config, hostname);
+        const hostname_matches = utils.validateEnvironmentForMachine(env_config, hostname);
 
         if (!hostname_matches) {
             std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{ hostname, env_name });
@@ -405,7 +432,49 @@ pub fn handleRegisterCommand(
     std.io.getStdOut().writer().print("You can now activate it from any directory with: source $(zenv activate {s})\n", .{env_name}) catch {};
 }
 
-// Handle cd command - outputs the project directory path for a given environment
+pub fn handleDeregisterCommand(
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
+        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name|env_id>\n", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+
+    const identifier = args[2];
+
+    // Look up environment in registry first to check if it exists
+    // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
+    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+
+    // Store name for the success message - make a copy to ensure it remains valid
+    const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
+        std.log.err("Failed to duplicate environment name: {s}", .{@errorName(err)});
+        handleErrorFn(err);
+        return;
+    };
+    defer registry.allocator.free(env_name);
+
+    // Remove the environment from the registry using the name
+    // We pass the original identifier which could be a name or ID
+    if (registry.deregister(identifier)) {
+        // Save the registry
+        registry.save() catch |err| {
+            std.log.err("Failed to save registry: {s}", .{@errorName(err)});
+            handleErrorFn(err);
+            return;
+        };
+
+        std.io.getStdOut().writer().print("Environment '{s}' unregistered successfully.\n", .{env_name}) catch {};
+    } else {
+        std.io.getStdErr().writer().print("Error: Failed to unregister environment '{s}'.\n", .{env_name}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+    }
+}
+
 pub fn handleCdCommand(
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
@@ -467,110 +536,4 @@ pub fn handleCdCommand(
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
-}
-
-pub fn handleDeregisterCommand(
-    registry: *EnvironmentRegistry,
-    args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
-    if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name|env_id>\n", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
-    }
-
-    const identifier = args[2];
-
-    // Look up environment in registry first to check if it exists
-    // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
-    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
-
-    // Store name for the success message - make a copy to ensure it remains valid
-    const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        std.log.err("Failed to duplicate environment name: {s}", .{@errorName(err)});
-        handleErrorFn(err);
-        return;
-    };
-    defer registry.allocator.free(env_name);
-
-    // Remove the environment from the registry using the name
-    // We pass the original identifier which could be a name or ID
-    if (registry.deregister(identifier)) {
-        // Save the registry
-        registry.save() catch |err| {
-            std.log.err("Failed to save registry: {s}", .{@errorName(err)});
-            handleErrorFn(err);
-            return;
-        };
-
-        std.io.getStdOut().writer().print("Environment '{s}' unregistered successfully.\n", .{env_name}) catch {};
-    } else {
-        std.io.getStdErr().writer().print("Error: Failed to unregister environment '{s}'.\n", .{env_name}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-    }
-}
-
-/// Handles the `init` command by creating a new zenv.json template in the current directory
-pub fn handleInitCommand(allocator: std.mem.Allocator) void {
-    const cwd = std.fs.cwd();
-    const config_path = "zenv.json";
-
-    // Check if file exists
-    const file_exists = blk: {
-        cwd.access(config_path, .{}) catch |err| {
-            if (err != error.FileNotFound) {
-                std.io.getStdErr().writer().print("Error accessing current directory: {s}\n", .{@errorName(err)}) catch {};
-                std.process.exit(1);
-            }
-            // File doesn't exist
-            break :blk false;
-        };
-        break :blk true;
-    };
-
-    if (file_exists) {
-        std.io.getStdErr().writer().print("Error: {s} already exists. Please remove or rename it first.\n", .{config_path}) catch {};
-        std.process.exit(1);
-    }
-
-    // Use a static string as the default target_machine - now supporting patterns
-    const hostname = "localhost";
-
-    // Import the template module for JSON
-    const template_json = @import("utils/template_json.zig");
-
-    // Create a map for template replacements
-    var replacements = std.StringHashMap([]const u8).init(allocator);
-    defer replacements.deinit();
-
-    // Add replacements for the template
-    replacements.put("HOSTNAME", hostname) catch |err| {
-        std.io.getStdErr().writer().print("Error creating replacements: {s}\n", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
-
-    // Process the template using our JSON template utility
-    const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
-        std.io.getStdErr().writer().print("Error processing template: {s}\n", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
-    defer allocator.free(processed_content);
-
-    // Write template to file
-    const file = cwd.createFile(config_path, .{}) catch |err| {
-        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
-        std.process.exit(1);
-    };
-    defer file.close();
-
-    file.writeAll(processed_content) catch |err| {
-        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
-        std.process.exit(1);
-    };
-
-    std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
-    std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("You can use an absolute path for base_dir (e.g., '/home/user/venvs') to store environments outside the project directory.\n", .{}) catch {};
 }
