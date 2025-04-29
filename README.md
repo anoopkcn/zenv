@@ -18,20 +18,28 @@ zenv - A virtual environment manager for supercomputers
 
 Get the latest [release](https://github.com/anoopkcn/zenv/releases)
 
-For example to get latest build for Linux x86_64 machine:
+For example to get latest **pre-release** build for Linux x86_64 machine:
 
 ```bash
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz"
 ```
 
-and extract the `zenv` executable using:
+OR
+
+Get the latest stable release:
+
+```bash
+# Replace <tag> with last stable release version:
+# Example tag = v0.5.4
+curl -LO "https://github.com/anoopkcn/zenv/releases/download/<tag>/zenv-x86_64-linux-musl-small.tar.gz"
+```
+
+Extract the `zenv` executable and move it somewhere in your `PATH`
 
 ```bash
 tar -xvf zenv-x86_64-linux-musl-small.tar.gz
-
+mv zenv ~/.local/bin/
 ```
-
-Move the `zenv` executable somewhere in your PATH ( for example: `~/.local/bin/`)
 
 **Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)**
 
@@ -145,7 +153,7 @@ NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERR
 
 ```json
 {
-  "base_dir":"<opional_relative_base_dir>",
+  "base_dir": "<opional_relative_base_dir>",
   "<env_name>": {
     "target_machines": ["<machine_identifier>"], // REQUIRED FIELD
     "python_executable": "<path_to_python>", // REQUIRED FIELD
@@ -171,17 +179,20 @@ NOTE: THE CONFIG TEMPLATE IS ONLY A REFERENCE, COMMENTS (`//`) WILL THROW AN ERR
   },
   "<another_env_name>": {
     "target_machines": ["<anothor_machine_identifier>"], // REQUIRED FIELD
-    "python_executable": "<path_to_python>", // REQUIRED FIELD
+    "python_executable": "<path_to_python>" // REQUIRED FIELD
     // ...
   }
 }
 ```
 
 ## Help
+
 ```bash
 zenv --help
 ```
+
 Output:
+
 ```
 Usage: zenv <command> [environment_name|id] [options]
 
