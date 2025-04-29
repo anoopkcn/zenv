@@ -534,8 +534,5 @@ pub fn handleInitCommand(allocator: std.mem.Allocator) void {
 
     std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
     std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("\nNOTE: 'target_machine' now supports pattern matching:\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("  - Use '*' to match any characters, e.g., 'jrlogin*' matches all login nodes\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("  - Use '?' to match a single character, e.g., 'node0?' matches node01-09\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("  - Use domain components like 'jureca' to match 'jrlogin08.jureca'\n", .{}) catch {};
+    // std.io.getStdOut().writer().print("You can use an absolute path for base_dir (e.g., '/home/user/venvs') to store environments outside the project directory.\n", .{}) catch {};
 }

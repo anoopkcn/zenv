@@ -24,14 +24,37 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
     errdefer std.log.err("Failed to get CWD realpath in createActivationScript", .{}); // Add error context
 
+    // Check if base_dir is absolute
+    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+
     // Generate the activation script path using base_dir
-    const script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
+    var script_rel_path: []const u8 = undefined;
+    var script_abs_path: []const u8 = undefined;
+    
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, paths are already absolute
+        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
+        script_abs_path = try allocator.dupe(u8, script_rel_path); // Use same path for both
+    } else {
+        // For relative base_dir, combine with cwd for absolute paths
+        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
+        script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
+    }
+    
     defer allocator.free(script_rel_path);
-    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
     // Virtual environment absolute path
-    const venv_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
+    var venv_path: []const u8 = undefined;
+    
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, simply join with env_name
+        venv_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+    } else {
+        // For relative base_dir, combine with cwd for absolute path
+        venv_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
+    }
+    
     defer allocator.free(venv_path);
 
     // Create a map for template replacements
@@ -120,7 +143,11 @@ fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentCo
     defer allocator.free(processed_content);
 
     // Write the processed content to the file
-    var file = try fs.cwd().createFile(script_rel_path, .{});
+    var file = if (is_absolute_base_dir)
+        try std.fs.createFileAbsolute(script_rel_path, .{})
+    else
+        try fs.cwd().createFile(script_rel_path, .{});
+        
     defer file.close();
     try file.writeAll(processed_content);
 

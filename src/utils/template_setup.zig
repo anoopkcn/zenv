@@ -23,12 +23,29 @@ fn createSetupScript(allocator: Allocator, env_config: *const EnvironmentConfig,
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
 
+    // Check if base_dir is absolute
+    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+
     // Virtual environment absolute path
-    const venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
+    var venv_dir: []const u8 = undefined;
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, simply join with env_name
+        venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+    } else {
+        // For relative base_dir, combine with cwd for absolute path
+        venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
+    }
     defer allocator.free(venv_dir);
 
     // Activation script path
-    const activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "activate.sh" });
+    var activate_script_path: []const u8 = undefined;
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, paths are already absolute
+        activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
+    } else {
+        // For relative base_dir, combine with cwd for absolute paths
+        activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "activate.sh" });
+    }
     defer allocator.free(activate_script_path);
 
     // Create a map for template replacements

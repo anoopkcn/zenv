@@ -110,16 +110,34 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
         valid_deps_list.deinit();
     }
 
+    // Handle paths differently based on whether base_dir is absolute or relative
+    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+    
     // Create requirements file path using base_dir
-    const req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
+    var req_rel_path: []const u8 = undefined;
+    var req_abs_path: []const u8 = undefined;
+    
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, paths are already absolute
+        req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
+        req_abs_path = try allocator.dupe(u8, req_rel_path); // Use same path for both
+    } else {
+        // For relative base_dir, combine with cwd for absolute paths
+        req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
+        req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
+    }
+    
     defer allocator.free(req_rel_path);
-    const req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
     defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
     std.log.info("Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_rel_path });
     {
-        var req_file = try fs.cwd().createFile(req_rel_path, .{});
+        var req_file = if (is_absolute_base_dir) 
+            try std.fs.createFileAbsolute(req_rel_path, .{})
+        else
+            try fs.cwd().createFile(req_rel_path, .{});
+            
         defer req_file.close();
         var bw = std.io.bufferedWriter(req_file.writer());
         const writer = bw.writer();
@@ -138,9 +156,20 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     std.log.info("Created requirements file: {s}", .{req_abs_path});
 
     // Generate setup script path using base_dir
-    const script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
+    var script_rel_path: []const u8 = undefined;
+    var script_abs_path: []const u8 = undefined;
+    
+    if (is_absolute_base_dir) {
+        // For absolute base_dir, paths are already absolute
+        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
+        script_abs_path = try allocator.dupe(u8, script_rel_path); // Use same path for both
+    } else {
+        // For relative base_dir, combine with cwd for absolute paths
+        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
+        script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
+    }
+    
     defer allocator.free(script_rel_path);
-    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
     defer allocator.free(script_abs_path);
 
     // Generate setup script content using the template
@@ -150,7 +179,11 @@ pub fn setupEnvironment(allocator: Allocator, env_config: *const EnvironmentConf
     // Write setup script to file
     std.log.info("Writing setup script to {s}", .{script_rel_path});
     {
-        var script_file = try fs.cwd().createFile(script_rel_path, .{});
+        var script_file = if (is_absolute_base_dir)
+            try std.fs.createFileAbsolute(script_rel_path, .{})
+        else
+            try fs.cwd().createFile(script_rel_path, .{});
+            
         defer script_file.close();
         try script_file.writeAll(script_content);
         try script_file.chmod(0o755);

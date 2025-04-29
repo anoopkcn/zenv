@@ -375,7 +375,14 @@ pub const EnvironmentRegistry = struct {
         errdefer self.allocator.free(registry_target_machines_str);
 
         // Calculate the absolute venv_path
-        const venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{project_dir, base_dir, env_name});
+        var venv_path: []const u8 = undefined;
+        if (std.fs.path.isAbsolute(base_dir)) {
+            // For absolute base_dir, join directly with env_name
+            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{base_dir, env_name});
+        } else {
+            // For relative base_dir, join with project_dir first
+            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{project_dir, base_dir, env_name});
+        }
         // Free this path later if not used to update/create an entry
         errdefer self.allocator.free(venv_path);
 
@@ -732,12 +739,23 @@ pub const ZenvConfig = struct {
             std.log.info("'base_dir' not found, using default 'zenv'", .{});
             config.base_dir = try allocator.dupe(u8, "zenv");
         }
-        std.log.debug("Using virtual environment base directory: {s}", .{config.base_dir});
+        
+        // Log if base_dir is an absolute path
+        if (std.fs.path.isAbsolute(config.base_dir)) {
+            std.log.info("Using absolute path for virtual environment base directory: {s}", .{config.base_dir});
+        } else {
+            std.log.debug("Using relative virtual environment base directory: {s}", .{config.base_dir});
+        }
 
         var env_map_iter = root.object.iterator(); // Access the iterator via the .object payload
         while (env_map_iter.next()) |entry| {
             const env_name = entry.key_ptr.*; // Use pointer
             const env_obj_ptr = entry.value_ptr; // Value is already a pointer
+            
+            // Skip known top-level configuration keys (like base_dir)
+            if (std.mem.eql(u8, env_name, "base_dir")) {
+                continue; // Skip base_dir, it's already handled
+            }
 
             if (env_obj_ptr.* != .object) { // Dereference pointer
                 std.log.warn("Skipping non-object value for environment '{s}' in '{s}'", .{ env_name, config_path });

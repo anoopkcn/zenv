@@ -41,14 +41,15 @@ fn printUsage() void {
         \\Configuration (zenv.json):
         \\  The zenv.json file defines your environments. It can optionally include:
         \\  "base_dir": "path/to/venvs"  (Optional, top-level string. Specifies the base directory
-        \\                                relative to zenv.json for creating virtual environments.
+        \\                                for creating virtual environments. Can be relative to
+        \\                                zenv.json location or an absolute path.
         \\                                Defaults to "zenv" if omitted.)
         \\
         \\Commands:
         \\  init                   Create a new zenv.json template file in the current directory.
         \\
         \\  setup <env_name>       Set up the specified environment for the current machine.
-        \\                         Creates a Python virtual environment in zenv/<env_name>/.
+        \\                         Creates a Python virtual environment in <base_dir>/<env_name>/.
         \\                         Checks if current machine matches env_name's target_machine.
         \\
         \\  activate <env_name|id> Output the path to the activation script.
