@@ -8,7 +8,7 @@ const EnvironmentRegistry = utils.EnvironmentRegistry;
 const CommandFlags = utils.CommandFlags;
 
 pub fn handleInitCommand(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
 ) void {
     const cwd = std.fs.cwd();
     const config_path = "zenv.json";
