@@ -89,7 +89,7 @@ Provided `dependencies` will be installed in addition to the dependencies found 
 Then set up the environment:
 
 ```bash
-zenv setup <env_name>
+zenv setup env_name
 ```
 
 ### Listing Environments
@@ -136,7 +136,7 @@ source $(zenv activate 404dee1)
 
 Register an environment in the global registry:
 
-_This is done automatically when you run `zenv setup <env_name>`_
+_This is done automatically when you run `zenv setup env_name`_
 
 ```bash
 zenv register env_name
