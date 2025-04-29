@@ -285,20 +285,19 @@ pub fn handleListCommand(
         }
 
         // Get short ID (first 7 characters)
-        const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
+        // const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
 
         // Print environment name, short ID, and target machine string
-        stdout.print("- {s} (ID: {s}... Target: {s}", .{ env_name, short_id, target_machines_str }) catch {}; // Renamed
+        stdout.print("- {s} ({s})", .{ env_name, entry.id }) catch {};
+        stdout.print("\n  [target  : {s}]", .{ target_machines_str }) catch {};
+        stdout.print("\n  [project : {s}]", .{ entry.project_dir }) catch {};
+        stdout.print("\n  [venv    : {s}]", .{ entry.venv_path }) catch {};
 
         // Optionally print description
         if (entry.description) |desc| {
-            stdout.print(" - {s}", .{desc}) catch {};
+            stdout.print("\n  [desc    : {s}]\n\n", .{ desc }) catch {};
         }
-        // Print project and venv paths
-        stdout.print(")\n  [Project: {s}]\n  [Venv:    {s}]\n", .{ entry.project_dir, entry.venv_path }) catch {};
 
-        // Print full ID on a separate line for reference
-        // stdout.print("  Full ID: {s} (you can use the first 7+ characters)\n", .{entry.id}) catch {};
         count += 1;
     }
 
