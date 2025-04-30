@@ -17,7 +17,7 @@ zenv - A virtual environment manager for supercomputers
 Get the latest stable [release](https://github.com/anoopkcn/zenv/releases) of pre-built executable:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh)"
 ```
 
 _Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)_
