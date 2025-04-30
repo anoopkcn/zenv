@@ -70,11 +70,11 @@ Example of a `zenv.json` file:
 ```json
 {
   "env_name": {
-    "target_machines": ["login*.computer1", "cnode*"],
+    "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
     "python_executable": "python3",
     "requirements_file": "requirements.txt",
-    "description": "Basic environment for Computer1",
-    "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ]
+    "description": "Basic environment for jureca and juwels",
+    "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ],
     "dependencies": [ "numpy>=1.20.0", "tqdm" ]
   }
 }
@@ -96,13 +96,13 @@ Example output:
 
 ```
 Available zenv environments:
-- env_name (404dee1315fb7a2447e864ec029d6d06562afa68)
-  [target  : *.machine1, cnode*]
-  [project : /path/to/project]
-  [venv    : /path/to/project/zenv/env_name]
-  [desc    : My test environment for machine1]
+- env_name (3a0602e06cd760eca0c21054fa3350c8fb140122)
+  [target  : jrlogin*.jureca, *.juwels, jrc*]
+  [project : /p/project1/hai_matbind/chandran1/zenv/test]
+  [venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/env_name]
+  [desc    : Basic environment for jureca and juwels]
 
-Found 1 total registered environment(s).
+Found 1 environment(s) for the current machine ('jrlogin12.jureca').
 ```
 
 ### Activating environments
@@ -116,10 +116,10 @@ Example:
 source $(zenv activate env_name)
 
 # Activate by full ID
-source $(zenv activate 404dee1315fb7a2447e864ec029d6d06562afa68)
+source $(zenv activate 3a0602e06cd760eca0c21054fa3350c8fb140122)
 
 # Activate by partial ID (first 7+ characters)
-source $(zenv activate 404dee1)
+source $(zenv activate 3a0602e)
 ```
 
 ### Registering and Deregistering Environments
