@@ -1,11 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const utils = @import("utils.zig");
-const ZenvConfig = utils.ZenvConfig;
-const EnvironmentConfig = utils.EnvironmentConfig;
-const EnvironmentRegistry = utils.EnvironmentRegistry;
-const CommandFlags = utils.CommandFlags;
+const CommandFlags = @import("utils/flags.zig").CommandFlags;
+const env = @import("utils/environment.zig");
+const deps = @import("utils/parse_deps.zig");
+const aux = @import("utils/auxiliary.zig");
+const configurations = @import("utils/config.zig");
+const ZenvConfig = configurations.ZenvConfig;
+const EnvironmentConfig = configurations.EnvironmentConfig;
+const EnvironmentRegistry = configurations.EnvironmentRegistry;
 
 pub fn handleInitCommand(
     allocator: Allocator,
@@ -95,7 +98,7 @@ pub fn handleSetupCommand(
     }
 
     // Get and validate the environment config
-    const env_config = utils.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
+    const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
     const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
@@ -111,7 +114,7 @@ pub fn handleSetupCommand(
             // We need to free duped lines from parseRequirementsTxt if they exist
             for (all_required_deps.items) |item| {
                 // Free any item that was duped by utility functions
-                if (!utils.isConfigProvidedDependency(env_config, item)) {
+                if (!deps.isConfigProvidedDependency(env_config, item)) {
                     allocator.free(item);
                 }
             }
@@ -175,11 +178,11 @@ pub fn handleSetupCommand(
 
         if (is_toml) {
             std.log.info("Detected TOML file format, parsing as pyproject.toml", .{});
-            req_file_dep_count = try utils.parsePyprojectToml(allocator, req_content, &all_required_deps);
+            req_file_dep_count = try deps.parsePyprojectToml(allocator, req_content, &all_required_deps);
         } else {
             std.log.info("Parsing as requirements.txt format", .{});
             // Use the new utility function
-            req_file_dep_count = try utils.parseRequirementsTxt(allocator, req_content, &all_required_deps);
+            req_file_dep_count = try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
         }
 
         if (req_file_dep_count > 0) {
@@ -195,10 +198,10 @@ pub fn handleSetupCommand(
     const base_dir = config.base_dir;
 
     // 2. Create venv base directory structure using base_dir
-    try utils.setupEnvironmentDirectory(allocator, base_dir, env_name);
+    try aux.setupEnvironmentDirectory(allocator, base_dir, env_name);
 
     // 3. Install dependencies
-    utils.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps) catch |err| {
+    aux.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps) catch |err| {
         handleErrorFn(err);
         return;
     };
@@ -207,7 +210,7 @@ pub fn handleSetupCommand(
     // Optionally validate modules
     // if (env_config.modules.items.len > 0 and all_required_deps.items.len == 0) {
     //     std.log.info("Validating {d} modules...", .{env_config.modules.items.len});
-    //     utils.validateModules(allocator, env_config.modules.items) catch |err| {
+    //     env.validateModules(allocator, env_config.modules.items) catch |err| {
     //         handleErrorFn(err);
     //         return;
     //     };
@@ -215,7 +218,7 @@ pub fn handleSetupCommand(
     // }
 
     // 4. Create the final activation script (using a separate utility)
-    try utils.createActivationScript(allocator, env_config, env_name, base_dir);
+    try aux.createActivationScript(allocator, env_config, env_name, base_dir);
 
     // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -247,7 +250,7 @@ pub fn handleActivateCommand(
     const identifier = args[2];
 
     // Look up environment using the utility function
-    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
 
     // Get venv_path from registry entry
     const venv_path = entry.venv_path;
@@ -275,7 +278,7 @@ pub fn handleListCommand(
 
     if (use_hostname_filter) {
         // Get hostname directly using the utility function
-        current_hostname = utils.getSystemHostname(allocator) catch |err| {
+        current_hostname = env.getSystemHostname(allocator) catch |err| {
             std.log.warn("Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)});
             use_hostname_filter = false;
             current_hostname = null;
@@ -307,7 +310,7 @@ pub fn handleListCommand(
                 const target_pattern = std.mem.trim(u8, target_pattern_raw, " ");
                 if (target_pattern.len == 0) continue; // Skip empty patterns
 
-                if (utils.checkHostnameMatch(current_hostname.?, target_pattern)) {
+                if (env.checkHostnameMatch(current_hostname.?, target_pattern)) {
                     matches_any_target = true;
                     break; // Found a match, no need to check further patterns for this entry
                 }
@@ -384,7 +387,7 @@ pub fn handleRegisterCommand(
     };
 
     // Validate the environment config
-    if (utils.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
+    if (ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
         std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
         handleErrorFn(err);
         return;
@@ -392,7 +395,7 @@ pub fn handleRegisterCommand(
 
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
-        const hostname = utils.getSystemHostname(allocator) catch |err| {
+        const hostname = env.getSystemHostname(allocator) catch |err| {
             std.log.err("Failed to get current hostname: {s}", .{@errorName(err)});
             handleErrorFn(err);
             return;
@@ -400,7 +403,7 @@ pub fn handleRegisterCommand(
         defer allocator.free(hostname);
 
         // Use the dedicated function for hostname validation
-        const hostname_matches = utils.validateEnvironmentForMachine(env_config, hostname);
+        const hostname_matches = env.validateEnvironmentForMachine(env_config, hostname);
 
         if (!hostname_matches) {
             std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{ hostname, env_name });
@@ -455,7 +458,7 @@ pub fn handleDeregisterCommand(
 
     // Look up environment in registry first to check if it exists
     // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
-    const entry = utils.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
 
     // Store name for the success message - make a copy to ensure it remains valid
     const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {

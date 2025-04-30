@@ -3,8 +3,8 @@ const process = std.process;
 const Allocator = std.mem.Allocator;
 
 const options = @import("options");
-const utils = @import("utils.zig");
 const commands = @import("commands.zig");
+const configurations = @import("utils/config.zig");
 
 const Command = enum {
     setup,
@@ -207,7 +207,7 @@ pub fn main() anyerror!void {
     }.func;
 
     // Load the environment registry first, as we'll need it for all commands
-    var registry = utils.EnvironmentRegistry.load(allocator) catch |err| {
+    var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
         std.log.err("Failed to load environment registry: {s}", .{@errorName(err)});
         handleError(error.RegistryError);
         return;
@@ -216,12 +216,12 @@ pub fn main() anyerror!void {
 
     // Parse configuration if we're in a project directory with zenv.json
     // We'll only need this for setup and registering new environments
-    var config: ?utils.ZenvConfig = null;
+    var config: ?configurations.ZenvConfig = null;
     defer if (config != null) config.?.deinit();
 
     // Only try to load the config file for setup and register commands
     if (command == .setup or command == .register) {
-        config = utils.parse(allocator, config_path) catch |err| {
+        config = configurations.parse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
         };
