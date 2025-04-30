@@ -16,6 +16,16 @@ ohai() {
   printf '\033[1;34m==>\033[1;39m %s\033[0m\n' "$@"
 }
 
+# Print message in green
+success() {
+  printf '\033[1;32mSuccess\033[0m: %s\n' "$@"
+}
+
+# Print message in yellow
+info() {
+  printf '\033[1;33m==>\033[0m %s\n' "$@"
+}
+
 # Print warning message in red
 warn() {
   printf '\033[1;31mWarning\033[0m: %s\n' "$@" >&2
@@ -187,9 +197,9 @@ ohai "Installation successful!"
 
 # Check if the installation directory is in the PATH
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
-  warn "${INSTALL_DIR} is not currently in your PATH."
+  info "${INSTALL_DIR} is not currently in your PATH."
   ohai "Next steps:"
-  echo "- Add the installation directory to your PATH:"
+  info "Add the installation directory to your PATH:"
   echo
   # Provide specific instructions based on common shells
   case "${SHELL}" in
@@ -233,10 +243,10 @@ if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
   esac
 else
   ohai "Next steps:"
-  echo "- ${INSTALL_DIR} is already in your PATH."
+  info "${INSTALL_DIR} is already in your PATH."
 fi
 
 # Updated help command based on zenv's usage
-echo "- Run '${EXE_NAME} help' to get started."
+success "Run '${EXE_NAME} help' to get started."
 
 exit 0
