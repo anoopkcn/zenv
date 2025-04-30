@@ -49,7 +49,7 @@ _The linux versions are `musl` NOT `glibc`. Windows support is not planned_
 
 <summary>OR Build from Source</summary>
 
-### OR Build from source
+**OR Build from source**
 
 ```bash
 # Clone the repository
