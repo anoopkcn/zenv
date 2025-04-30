@@ -197,7 +197,7 @@ In the configuration `target_machines` and `python_executable` are required key-
 ## Help
 
 ```bash
-zenv --help
+zenv help
 ```
 
 Output:
