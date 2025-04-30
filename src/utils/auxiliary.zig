@@ -25,65 +25,20 @@ pub fn createActivationScript(
 
 // Executes a given shell script, inheriting stdio and handling errors
 pub fn executeShellScript(
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
     script_abs_path: []const u8,
-    script_rel_path: []const u8,
 ) !void {
     std.log.info("Running script: {s}", .{script_abs_path});
-    const argv = [_][]const u8{ "/bin/sh", script_abs_path };
-    var child = process.Child.init(&argv, allocator);
-
-    // Inherit stdio for real-time output
+    var argv = [_][]const u8{ "/bin/sh", script_abs_path };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
-    child.stdin_behavior = .Inherit;
 
-    const term = try child.spawnAndWait();
+    try child.spawn();
+    const term = try child.wait();
 
     if (term != .Exited or term.Exited != 0) {
-        // Just show a concise error message - since stdout/stderr is already inherited,
-        // the actual error output from the module command will have been displayed already
-        std.log.err("Script execution failed with exit code: {d}", .{term.Exited});
-
-        // Only log debug info when enabled via ZENV_DEBUG
-        const enable_debug_logs = errors.isDebugEnabled(allocator);
-
-        if (enable_debug_logs) {
-            const script_content_debug = fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024) catch |read_err| {
-                std.log.err("Failed to read script content for debug log: {s}", .{@errorName(read_err)});
-                return error.ProcessError;
-            };
-            defer allocator.free(script_content_debug);
-
-            // Log to a debug file instead of stderr
-            const debug_log_path = try std.fmt.allocPrint(allocator, "{s}.debug.log", .{script_rel_path});
-            defer allocator.free(debug_log_path);
-
-            var debug_file = fs.cwd().createFile(debug_log_path, .{}) catch |err| {
-                std.log.err("Could not create debug log file: {s}", .{@errorName(err)});
-                return error.ProcessError;
-            };
-            defer debug_file.close();
-
-            _ = debug_file.writeAll(script_content_debug) catch {};
-            errors.debugLog(allocator, "Script content written to debug log: {s}", .{debug_log_path});
-        }
-
-        // Check if this is a module load failure by reading the script content
-        // This is a heuristic but should work for our use case
-        const script_content = fs.cwd().readFileAlloc(allocator, script_rel_path, 1024 * 1024) catch |read_err| {
-            std.log.err("Failed to read script content: {s}", .{@errorName(read_err)});
-            return error.ProcessError;
-        };
-        defer allocator.free(script_content);
-
-        // Check if this script contains module load commands and the specific error text
-        if (std.mem.indexOf(u8, script_content, "module load") != null and
-            std.mem.indexOf(u8, script_content, "Error: Failed to load module") != null)
-        {
-            return error.ModuleLoadError;
-        }
-
         return error.ProcessError;
     }
 
@@ -269,7 +224,7 @@ pub fn setupEnvironment(
     std.log.info("Created setup script: {s}", .{script_abs_path});
 
     // Execute setup script
-    executeShellScript(allocator, script_abs_path, script_rel_path) catch |err| {
+    executeShellScript(allocator, script_abs_path) catch |err| {
         if (err == error.ModuleLoadError) {
             // Let this error propagate up as is
             return err;
