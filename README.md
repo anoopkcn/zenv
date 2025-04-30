@@ -24,11 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```bash
 # Replace <tag> with last stable release version:
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/<tag>/zenv-x86_64-linux-musl-small.tar.gz"
-```
 
-Extract the `zenv` executable and move it somewhere in your `PATH`
-
-```bash
+# Extract the 'zenv' executable and move it somewhere in your 'PATH'
 tar -xvf zenv-x86_64-linux-musl-small.tar.gz
 mv zenv ~/.local/bin/
 ```
