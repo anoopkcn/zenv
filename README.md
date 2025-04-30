@@ -16,17 +16,18 @@ zenv - A virtual environment manager for supercomputers
 
 ### Install a pre-built executable
 
-Get the latest [release](https://github.com/anoopkcn/zenv/releases)
+Get the latest stable [release](https://github.com/anoopkcn/zenv/releases):
 
-For example to get latest **pre-release** build for Linux x86_64 machine:
-
-```bash
-curl -LO "https://github.com/anoopkcn/zenv/releases/download/tip/zenv-x86_64-linux-musl-small.tar.gz"
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install/install.sh)"
 ```
 
-OR
+**Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)**
 
-Get the latest stable release:
+_The linux versions are `musl` NOT `glibc`. Windows support is not planned_
+
+<details>
+<summary> OR manual download of stable release: </summary>
 
 ```bash
 # Replace <tag> with last stable release version:
@@ -41,9 +42,7 @@ tar -xvf zenv-x86_64-linux-musl-small.tar.gz
 mv zenv ~/.local/bin/
 ```
 
-**Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)**
-
-_The linux versions are `musl` NOT `glibc`. Windows support is not planned_
+</details>
 
 <details>
 
