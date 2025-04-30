@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = @import("std").fs;
-const process = @import("std").process;
 
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
