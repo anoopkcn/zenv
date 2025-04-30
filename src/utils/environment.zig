@@ -492,3 +492,44 @@ pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, i
 
     return entry_copy;
 }
+
+pub fn validateModules(allocator: Allocator, modules: []const []const u8) !void {
+    if (modules.len == 0) return;
+
+    // Check if module command exists
+    const check_cmd = "command -v module";
+    const check_argv = [_][]const u8{ "sh", "-c", check_cmd };
+    var check_child = std.process.Child.init(&check_argv, allocator);
+    check_child.stdout_behavior = .Ignore;
+    check_child.stderr_behavior = .Ignore;
+    try check_child.spawn();
+    const check_term = try check_child.wait();
+    if (!(check_term == .Exited and check_term.Exited == 0)) {
+        std.log.warn("'module' command not found, skipping module validation.", .{});
+        return;
+    }
+
+    // Build the shell script: purge, then load each module
+    var script = try std.fmt.allocPrint(allocator, "module --force purge", .{});
+    defer allocator.free(script);
+    for (modules) |module_name| {
+        const line = try std.fmt.allocPrint(allocator, " && module load \"{s}\"", .{module_name});
+        defer allocator.free(line);
+        script = try std.fmt.allocPrint(allocator, "{s}{s}", .{script, line});
+    }
+
+    // Run the script in a single shell, inheriting all stdio
+    const argv = [_][]const u8{ "sh", "-c", script };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+
+    // If any module fails to load, the shell will exit with a nonzero status
+    if (!(term == .Exited and term.Exited == 0)) {
+        std.log.warn("One or more modules could not be loaded. See output above.", .{});
+        return error.ModuleLoadError;
+    }
+}

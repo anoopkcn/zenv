@@ -198,14 +198,21 @@ pub fn handleSetupCommand(
     try utils.setupEnvironmentDirectory(allocator, base_dir, env_name);
 
     // 3. Install dependencies
-    if (all_required_deps.items.len > 0) {
-        deps_need_cleanup = true;
-        try utils.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps);
-        // After this call, all_required_deps is empty and doesn't need cleanup
-        deps_need_cleanup = false;
-    } else {
-        std.log.info("No dependencies to install", .{});
-    }
+    utils.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps) catch |err| {
+        handleErrorFn(err);
+        return;
+    };
+    deps_need_cleanup = false;
+
+    // Optionally validate modules
+    // if (env_config.modules.items.len > 0 and all_required_deps.items.len == 0) {
+    //     std.log.info("Validating {d} modules...", .{env_config.modules.items.len});
+    //     utils.validateModules(allocator, env_config.modules.items) catch |err| {
+    //         handleErrorFn(err);
+    //         return;
+    //     };
+    //     std.log.info("All modules validated successfully.", .{});
+    // }
 
     // 4. Create the final activation script (using a separate utility)
     try utils.createActivationScript(allocator, env_config, env_name, base_dir);
@@ -331,11 +338,11 @@ pub fn handleListCommand(
     // Print summary message
     if (count == 0) {
         if (!list_all and current_hostname != null) {
-            stdout.print("No environments found configured for the current machine ('{s}'). Use 'zenv list --all' to see all registered environments.\n", .{current_hostname.?}) catch {};
+            stdout.print("No environments found configured for the current machine ('{s}').\nUse 'zenv list --all' to see all registered environments.\n", .{current_hostname.?}) catch {};
         } else if (!list_all and current_hostname == null) {
             stdout.print("No environments found. (Could not determine current hostname for filtering).\n", .{}) catch {};
         } else { // Listing all or hostname failed
-            stdout.print("No environments found in the registry. Use 'zenv register <env_name>' to register environments.\n", .{}) catch {};
+            stdout.print("No environments found in the registry.\nUse 'zenv register <env_name>' OR 'zenv setup <env_name>' to register environments.\n", .{}) catch {};
         }
     } else {
         if (!list_all and current_hostname != null) {
