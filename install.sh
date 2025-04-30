@@ -18,7 +18,7 @@ ohai() {
 
 # Print message in green
 success() {
-  printf '\033[1;32mSuccess\033[0m: %s\n' "$@"
+  printf '\033[1;32m==>\033[0m %s\n' "$@"
 }
 
 # Print message in yellow
@@ -193,12 +193,12 @@ ohai "Installed ${EXE_NAME} to ${INSTALL_PATH}"
 
 # --- Post-Installation ---
 
-ohai "Installation successful!"
+success "Installation successful!"
 
 # Check if the installation directory is in the PATH
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
-  info "${INSTALL_DIR} is not currently in your PATH."
   ohai "Next steps:"
+  info "${INSTALL_DIR} is not currently in your PATH."
   info "Add the installation directory to your PATH:"
   echo
   # Provide specific instructions based on common shells
@@ -209,23 +209,23 @@ if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
           # macOS prefers .bash_profile for login shells if it exists
           PROFILE_FILE=~/.bash_profile
       fi
-      echo "  # For Bash, add the following line to your ${PROFILE_FILE}:"
+      echo "  # Add the following line to your ${PROFILE_FILE}:"
       echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
       echo
       echo "  # Then, run this command to update your current session:"
-      echo "  source \"${PROFILE_FILE}\" || export PATH=\"${INSTALL_DIR}:\$PATH\""
+      echo "  source \"${PROFILE_FILE}\""
       ;;
     */zsh*)
       PROFILE_FILE=~/.zshrc
-      echo "  # For Zsh, add the following line to your ${PROFILE_FILE}:"
+      echo "  # Add the following line to your ${PROFILE_FILE}:"
       echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
       echo
       echo "  # Then, run this command to update your current session:"
-      echo "  source \"${PROFILE_FILE}\" || export PATH=\"${INSTALL_DIR}:\$PATH\""
+      echo "  source \"${PROFILE_FILE}\""
       ;;
     */fish*)
       PROFILE_FILE=~/.config/fish/config.fish
-      echo "  # For Fish, add the following line to your ${PROFILE_FILE} (if not already present):"
+      echo "  # Add the following line to your ${PROFILE_FILE} (if not already present):"
       echo "  if not string match -q -- \"${INSTALL_DIR}\" \$fish_user_paths"
       echo "      set -U fish_user_paths ${INSTALL_DIR} \$fish_user_paths"
       echo "  end"
