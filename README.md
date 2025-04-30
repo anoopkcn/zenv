@@ -45,7 +45,11 @@ mv zenv ~/.local/bin/
 
 _The linux versions are `musl` NOT `glibc`. Windows support is not planned_
 
-### Build from source
+<details>
+
+<summary>OR Build from Source</summary>
+
+### OR Build from source
 
 ```bash
 # Clone the repository
@@ -58,6 +62,8 @@ zig build
 # Optional: Add to your PATH
 export PATH="$PATH:path/to/zig-out/bin"
 ```
+
+</details>
 
 ## Usage
 
