@@ -46,8 +46,6 @@ mv zenv ~/.local/bin/
 
 <summary>OR Build from Source</summary>
 
-**OR Build from source**
-
 ```bash
 # Clone the repository
 git clone https://github.com/anoopkcn/zenv.git
