@@ -98,8 +98,8 @@ Example output:
 Available zenv environments:
 - env_name (3a0602e06cd760eca0c21054fa3350c8fb140122)
   [target  : jrlogin*.jureca, *.juwels, jrc*]
-  [project : /p/project1/hai_matbind/chandran1/zenv/test]
-  [venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/env_name]
+  [project : /path/to/project/]
+  [venv    : /path/to/project/zenv/env_name]
   [desc    : Basic environment for jureca and juwels]
 
 Found 1 environment(s) for the current machine ('jrlogin12.jureca').
