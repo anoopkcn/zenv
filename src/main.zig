@@ -40,9 +40,10 @@ fn printUsage() void {
         \\Manages environments based on zenv.json configuration.
         \\
         \\Configuration (zenv.json):
-        \\  The zenv.json file defines your environments. It can optionally include top-level key-value:
+        \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
         \\  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
-        \\  Can be relative to zenv.json location or an absolute path. Defaults to "zenv" if omitted.
+        \\  Can be relative to zenv.json location or an absolute path(starts with a /).
+        \\  Defaults to "base_dir": "zenv" if omitted.
         \\
         \\Commands:
         \\  init                      Create a new zenv.json template file in the current directory.
