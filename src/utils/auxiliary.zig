@@ -12,7 +12,6 @@ const parse_deps = @import("parse_deps.zig");
 const environment = @import("environment.zig");
 const template_activate = @import("template_activate.zig");
 const template_setup = @import("template_setup.zig");
-const filesystem = @import("filesystem.zig");
 
 // Create activation script for the environment
 pub fn createActivationScript(
@@ -96,12 +95,46 @@ pub fn setupEnvironmentDirectory(
     base_dir: []const u8,
     env_name: []const u8,
 ) !void {
-    // Validate input parameters
-    try filesystem.validatePath(base_dir);
-    try filesystem.validatePath(env_name);
+    _ = try std.fs.path.resolve(allocator, &[_][]const u8{base_dir});
 
-    // Create the environment directory structure
-    try filesystem.createVenvDir(allocator, base_dir, env_name);
+    if (std.fs.path.isAbsolute(base_dir)) {
+        std.log.info("Ensuring absolute virtual environment base directory '{s}' exists...", .{base_dir});
+
+        // For absolute paths, create the directory directly
+        std.fs.makeDirAbsolute(base_dir) catch |err| {
+            if (err == error.PathAlreadyExists) {
+                // Ignore this error, directory already exists
+            } else {
+                return err;
+            }
+        };
+
+        // Create environment-specific directory using absolute path and safe path joining
+        const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+        const env_dir_path = try std.fs.path.resolve(allocator, &[_][]const u8{joined});
+        allocator.free(joined);
+
+        std.log.info("Creating environment directory '{s}'...", .{env_dir_path});
+        std.fs.makeDirAbsolute(env_dir_path) catch |err| {
+            if (err == error.PathAlreadyExists) {
+                // Ignore this error, directory already exists
+            } else {
+                return err;
+            }
+        };
+    } else {
+        std.log.info("Ensuring relative virtual environment base directory '{s}' exists...", .{base_dir});
+
+        // For relative paths, create the directory relative to cwd
+        try fs.cwd().makePath(base_dir);
+
+        const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+        const env_dir_path = try std.fs.path.resolve(allocator, &[_][]const u8{joined});
+        allocator.free(joined);
+
+        std.log.info("Creating environment directory '{s}'...", .{env_dir_path});
+        try fs.cwd().makePath(env_dir_path);
+    }
 }
 
 pub fn installDependencies(
