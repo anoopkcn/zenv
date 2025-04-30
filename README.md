@@ -12,18 +12,16 @@
 
 ## Installation
 
-Install the latest stable [release](https://github.com/anoopkcn/zenv/releases) (pre-built executable)
-
 ```sh
 curl -fsSf https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```
 
-Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`)
+Run the above command to Install the latest stable [release](https://github.com/anoopkcn/zenv/releases). Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`). Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
 
-_note: linux versions are `musl` NOT `glibc`. Windows support is not planned_
+### Alternative methods of installation
 
 <details>
-<summary> OR manual download of stable release: </summary>
+<summary>Manual download of stable release</summary>
 
 ```bash
 # Replace <tag> with last stable release version:
@@ -42,7 +40,7 @@ mv zenv ~/.local/bin/
 
 <details>
 
-<summary>OR Build from Source</summary>
+<summary>Build from Source</summary>
 
 ```bash
 # Clone the repository
