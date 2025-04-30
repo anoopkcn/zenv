@@ -15,7 +15,7 @@
 Install the latest stable [release](https://github.com/anoopkcn/zenv/releases) (pre-built executable)
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh)"
+curl --proto '=https' -fsSf https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```
 
 Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`)
