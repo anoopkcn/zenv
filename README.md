@@ -1,8 +1,6 @@
 # zenv
 
-zenv - A virtual environment manager for supercomputers
-
-`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments.
+`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments **for supercomputers**
 
 ## Features
 
@@ -20,9 +18,9 @@ Install the latest stable [release](https://github.com/anoopkcn/zenv/releases) (
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh)"
 ```
 
-_Supported OS: Linux(aarch64, x86_64), MacOs(aarch64, x86_64)_
+Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`)
 
-_The linux versions are `musl` NOT `glibc`. Windows support is not planned_
+_note: linux versions are `musl` NOT `glibc`. Windows support is not planned_
 
 <details>
 <summary> OR manual download of stable release: </summary>
@@ -62,15 +60,16 @@ export PATH="$PATH:path/to/zig-out/bin"
 
 ## Usage
 
-### Creating an Environment
+### Initialize and setup an environment
 
 ```bash
 zenv init
+# This creates a `zenv.json` configuration file TEMPLATE in your project directory
+# You can then modify this json file according to your needs and run:
+zenv setup <name_of_your_environment>
 ```
 
-This creates a `zenv.json` configuration file in your project directory. You can then **modify this json file** according to your needs.
-
-Example:
+Example of a `zenv.json` file:
 
 ```json
 {
@@ -87,20 +86,14 @@ Example:
 
 Provided `dependencies` will be installed in addition to the dependencies found in the optional `requirements_file` which can be (`requirements.txt` or a `pyproject.toml` file)
 
-Then set up the environment:
-
-```bash
-zenv setup env_name
-```
-
-### Listing Environments
+### Listing environments
 
 List all environments registered for the current machine:
 
 ```bash
-zenv list
+zenv list # for listing envs configured for current computer
 # OR
-zenv list --all
+zenv list --all # for listing all available envs in the registry
 ```
 
 Example output:
@@ -116,7 +109,7 @@ Available zenv environments:
 Found 1 total registered environment(s).
 ```
 
-### Activating Environments
+### Activating environments
 
 Activate an environment by name or ID
 
@@ -137,7 +130,7 @@ source $(zenv activate 404dee1)
 
 Register an environment in the global registry:
 
-_This is done automatically when you run `zenv setup env_name`_
+**This is done automatically when you run `zenv setup env_name`**
 
 ```bash
 zenv register env_name
@@ -160,29 +153,17 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "target_machines": ["<machine_identifier>"],
     "python_executable": "<path_to_python>",
     "description": "<optional_description>",
-    "modules": [
-      "<module1>",
-      "<module2>"
-      // ...
-    ],
+    "modules": ["<module1>", "<module2>"],
     "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
-    "dependencies": [
-      "<package_name_version>"
-      //...
-    ],
+    "dependencies": ["<package_name_version>"],
     "custom_activate_vars": {
       "ENV_VAR_NAME": "value"
-      //...
     },
-    "setup_commands": [
-      "echo 'Running custom setup commands'"
-      //...
-    ]
+    "setup_commands": ["echo 'Running custom setup commands'"]
   },
   "<another_env_name>": {
     "target_machines": ["<anothor_machine_identifier>"],
     "python_executable": "<path_to_python>"
-    // ...
   }
 }
 ```
