@@ -13,12 +13,12 @@ EXE_NAME="zenv"
 
 # Print message in blue
 ohai() {
-  printf '\033[1;34m==>\033[1;39m %s\033[0m\n' "$@"
+  printf '\033[0;34m==>\033[0;39m %s\033[0m\n' "$@"
 }
 
 # Print message in green
 success() {
-  printf '\033[1;32m==>\033[0m %s\n' "$@"
+  printf '\033[1;32m==>\033[1;39m %s\033[0m\n' "$@"
 }
 
 # Print message in yellow
@@ -197,7 +197,7 @@ success "Installation successful!"
 
 # Check if the installation directory is in the PATH
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
-  ohai "Next steps:"
+  success "Next steps:"
   info "${INSTALL_DIR} is not currently in your PATH."
   info "Add the installation directory to your PATH:"
   echo
@@ -242,7 +242,7 @@ if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
       ;;
   esac
 else
-  ohai "Next steps:"
+  success "Next steps:"
   info "${INSTALL_DIR} is already in your PATH."
 fi
 
