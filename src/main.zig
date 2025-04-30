@@ -220,7 +220,7 @@ pub fn main() anyerror!void {
 
     // Only try to load the config file for setup and register commands
     if (command == .setup or command == .register) {
-        config = utils.ZenvConfig.parse(allocator, config_path) catch |err| {
+        config = utils.parse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
         };
