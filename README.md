@@ -13,7 +13,7 @@
 ## Installation
 
 ```sh
-curl -fsSf https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```
 
 Run the above command to Install the latest stable [release](https://github.com/anoopkcn/zenv/releases). Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`). Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
