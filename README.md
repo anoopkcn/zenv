@@ -16,11 +16,6 @@
 curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```
 
-Run the above command to install the latest stable [release](https://github.com/anoopkcn/zenv/releases).
-
-Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`).
-Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
-
 ### Alternative methods of installation
 
 <details>
@@ -28,7 +23,6 @@ Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
 
 ```bash
 # Replace <tag> with last stable release version:
-# Example tag = v0.5.4
 curl -LO "https://github.com/anoopkcn/zenv/releases/download/<tag>/zenv-x86_64-linux-musl-small.tar.gz"
 ```
 
@@ -58,6 +52,10 @@ export PATH="$PATH:path/to/zig-out/bin"
 ```
 
 </details>
+
+Check [release](https://github.com/anoopkcn/zenv/releases) for specific versions.
+Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`).
+Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
 
 ## Usage
 
