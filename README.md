@@ -71,11 +71,11 @@ Example of a `zenv.json` file:
 {
   "env_name": {
     "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
-    "python_executable": "python3",
+    "python_executable": null,
     "requirements_file": "requirements.txt",
     "description": "Basic environment for jureca and juwels",
     "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ],
-    "dependencies": [ "numpy>=1.20.0", "tqdm" ]
+    "dependencies": [ "numpy>=1.20.0", "pandas" ]
   }
 }
 ```
@@ -147,19 +147,19 @@ One can have multiple environment configurations in the same `zenv.json` file an
   "base_dir": "<opional_base_dir>",
   "<env_name>": {
     "target_machines": ["<machine_identifier>"],
-    "python_executable": "<path_to_python>",
-    "description": "<optional_description>",
+    "python_executable": "<path_to_python_or_null>",
+    "description": "<optional_description_or_null>",
     "modules": ["<module1>", "<module2>"],
-    "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml>",
+    "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
     "dependencies": ["<package_name_version>"],
     "custom_activate_vars": {
       "ENV_VAR_NAME": "value"
     },
-    "setup_commands": ["echo 'Running custom setup commands'"]
+    "setup_commands": ["<custom commands to run during setup process>"],
+    "activate_commands":["<custom commands to run during activation process>"]
   },
   "<another_env_name>": {
-    "target_machines": ["<anothor_machine_identifier>"],
-    "python_executable": "<path_to_python>"
+    "target_machines": ["<anothor_machine_identifier>"]
   }
 }
 ```
