@@ -2,7 +2,7 @@
   "base_dir": "zenv",
   "test": {
     "target_machines": ["jureca", "juwels", "*"],
-    "description": "Test python environment (uses module-provided Python by default)",
+    "description": "Test python environment",
     "fallback_python": null,
     "modules": [
         "Stages/2025",
@@ -11,12 +11,13 @@
     ],
     "dependencies": [],
     "requirements_file": null,
+    "setup_commands": [],
     "custom_activate_vars": {},
-    "setup_commands": []
+    "activate_commands": []
   },
   "dev": {
-    "target_machines": ["@@HOSTNAME@@", "any"],
-    "description": "Development environment with additional tools (fallback_python is used if module-provided Python is unavailable)",
+    "target_machines": ["@@HOSTNAME@@", "*"],
+    "description": "Development environment with additional tools",
     "fallback_python": "python3",
     "modules": [
         "Stages/2025",
@@ -25,12 +26,12 @@
     ],
     "dependencies": ["tqdm"],
     "requirements_file": "requirements.txt",
-    "custom_activate_vars": {
-      "DEVELOPMENT": "true"
-    },
     "setup_commands": [
       "echo 'Development environment setup complete!'"
     ],
+    "custom_activate_vars": {
+      "DEVELOPMENT": "true"
+    },
     "activate_commands": [
       "echo 'Running custom activation commands for development environment...'",
       "echo 'Current Python: '$(which python)"
