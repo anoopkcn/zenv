@@ -35,6 +35,13 @@ deactivate_all() {
     echo "Running venv deactivate..."
     deactivate
   fi
+  
+  # Purge modules if module command exists
+  if command -v module >/dev/null 2>&1; then
+    echo "Purging loaded modules..."
+    module --force purge || echo "Warning: Failed to purge modules" >&2
+  fi
+  
   # Then unset any custom environment variables
 @@CUSTOM_VAR_UNSET@@
   # Unset this function

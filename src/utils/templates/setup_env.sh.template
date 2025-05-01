@@ -128,38 +128,38 @@ if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" =
       echo "==> Creating virtual environment with $description"
       echo "==>   Executable: $(which "$python_exe")"
       echo "==>   Version: $("$python_exe" --version 2>&1)"
-      
+
       # Check if Python supports venv
       if ! "$python_exe" -c "import venv" 2>/dev/null; then
         echo "==> WARNING: $description does not support venv module"
         return 1
       fi
-      
+
       "$python_exe" -m venv "@@VENV_DIR@@" && return 0
     fi
     return 1
   }
 
   VENV_CREATED=false
-  
+
   # Try various Python interpreters in order of preference
   if [ -n "$MODULE_PYTHON" ]; then
-    create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true && 
+    create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true &&
     echo "==> Successfully created virtual environment using module-provided Python"
   fi
-  
+
   if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true && 
+    create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true &&
     echo "==> Successfully created virtual environment using fallback Python"
   fi
-  
+
   if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "python3" "system python3" && VENV_CREATED=true && 
+    create_venv "python3" "system python3" && VENV_CREATED=true &&
     echo "==> Successfully created virtual environment using system python3"
   fi
-  
+
   if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "python" "system python" && VENV_CREATED=true && 
+    create_venv "python" "system python" && VENV_CREATED=true &&
     echo "==> Successfully created virtual environment using system python"
   fi
 
@@ -289,5 +289,5 @@ rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
 
 echo '==> Setup completed successfully for Environment '@@ENV_NAME@@' '
-echo "To activate, run: source $(realpath @@ACTIVATE_SCRIPT_PATH@@)"
-echo "Or from anywhere: source $(zenv activate @@ENV_NAME@@)"
+# echo "To activate, run: source $(realpath @@ACTIVATE_SCRIPT_PATH@@)"
+# echo 'Or from anywhere: source $(zenv activate @@ENV_NAME@@)'
