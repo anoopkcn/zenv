@@ -1,12 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Json = std.json;
 const fs = std.fs;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const environment = @import("environment.zig");
+const mem = std.mem;
+const json = std.json;
 
 fn generateSHA1ID(
     allocator: Allocator,
@@ -18,18 +19,19 @@ fn generateSHA1ID(
     sha1.update(env_name);
     sha1.update(project_dir);
     sha1.update(target_machines_str);
-    var timestamp_buf: [20]u8 = undefined;
-    const timestamp_str = try std.fmt.bufPrint(&timestamp_buf, "{d}", .{std.time.milliTimestamp()});
+    
+    // Use ArenaAllocator for temporary allocations
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    
+    const timestamp_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.time.milliTimestamp()});
     sha1.update(timestamp_str);
+    
     var hash: [20]u8 = undefined;
     sha1.final(&hash);
-    var hex_buf: [40]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (hash, 0..) |byte, i| {
-        hex_buf[i * 2] = hex_chars[byte >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[byte & 15];
-    }
-    return try allocator.dupe(u8, &hex_buf);
+    
+    // Efficient hex conversion
+    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&hash)});
 }
 
 // =======================
@@ -60,24 +62,47 @@ pub const EnvironmentConfig = struct {
     }
 
     pub fn deinit(self: *EnvironmentConfig) void {
+        for (self.target_machines.items) |item| self.target_machines.allocator.free(item);
         self.target_machines.deinit();
+        
+        for (self.modules.items) |item| self.modules.allocator.free(item);
         self.modules.deinit();
+        
+        for (self.dependencies.items) |item| self.dependencies.allocator.free(item);
         self.dependencies.deinit();
+        
+        var iter = self.custom_activate_vars.iterator();
+        while (iter.next()) |entry| {
+            self.custom_activate_vars.allocator.free(entry.key_ptr.*);
+            self.custom_activate_vars.allocator.free(entry.value_ptr.*);
+        }
         self.custom_activate_vars.deinit();
-        if (self.setup_commands) |*cmds| cmds.deinit();
+        
+        if (self.description) |desc| self.target_machines.allocator.free(desc);
+        if (self.requirements_file) |req| self.target_machines.allocator.free(req);
+        
+        if (self.setup_commands) |*cmds| {
+            for (cmds.items) |item| cmds.allocator.free(item);
+            cmds.deinit();
+        }
+        
+        self.target_machines.allocator.free(self.python_executable);
     }
 };
 
 pub const ZenvConfig = struct {
     allocator: Allocator,
     environments: StringHashMap(EnvironmentConfig),
-    value_tree: Json.Parsed(Json.Value),
+    value_tree: json.Parsed(json.Value),
     base_dir: []const u8,
     cached_hostname: ?[]const u8 = null,
 
     pub fn deinit(self: *ZenvConfig) void {
         var iter = self.environments.iterator();
-        while (iter.next()) |entry| entry.value_ptr.deinit();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
+        }
         self.environments.deinit();
         self.value_tree.deinit();
         self.allocator.free(self.base_dir);
@@ -114,39 +139,65 @@ pub const ZenvConfig = struct {
 // =======================
 
 const Parse = struct {
-    fn requiredString(allocator: Allocator, v: *const Json.Value) ![]const u8 {
-        if (v.* != .string) return error.ConfigInvalid;
-        return try allocator.dupe(u8, v.string);
+    fn getString(allocator: Allocator, value: json.Value, default: ?[]const u8) !?[]const u8 {
+        return switch (value) {
+            .string => |str| try allocator.dupe(u8, str),
+            .null => default,
+            else => if (default) |def| 
+                try allocator.dupe(u8, def) 
+            else 
+                error.ConfigInvalid,
+        };
     }
 
-    fn optionalString(allocator: Allocator, v: *const Json.Value) !?[]const u8 {
-        return if (v.* == .null) null else if (v.* == .string) try allocator.dupe(u8, v.string) else error.ConfigInvalid;
-    }
-    fn stringArray(allocator: Allocator, arr: *ArrayList([]const u8), v: *const Json.Value) !void {
-        if (v.* != .array) return error.ConfigInvalid;
-        try arr.ensureTotalCapacity(v.array.items.len);
-        for (v.array.items) |item| {
-            if (item != .string) return error.ConfigInvalid;
-            try arr.append(try allocator.dupe(u8, item.string));
+    fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
+        var result = ArrayList([]const u8).init(allocator);
+        errdefer {
+            for (result.items) |item| allocator.free(item);
+            result.deinit();
         }
-    }
-    fn stringHashMap(allocator: Allocator, map: *StringHashMap([]const u8), v: *const Json.Value) !void {
-        if (v.* != .object) return error.ConfigInvalid;
-        var it = v.object.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* != .string) continue;
-            try map.put(entry.key_ptr.*, try allocator.dupe(u8, entry.value_ptr.string));
+
+        switch (value) {
+            .array => |array| {
+                try result.ensureTotalCapacityPrecise(array.items.len);
+                for (array.items) |item| {
+                    if (item == .string) {
+                        try result.append(try allocator.dupe(u8, item.string));
+                    }
+                }
+            },
+            .string => |str| {
+                try result.append(try allocator.dupe(u8, str));
+            },
+            else => {},
         }
+
+        return result;
     }
-    fn optionalStringArray(allocator: Allocator, v: *const Json.Value) !?ArrayList([]const u8) {
-        if (v.* == .null) return null;
-        if (v.* != .array) return error.ConfigInvalid;
-        var arr = ArrayList([]const u8).init(allocator);
-        for (v.array.items) |item| {
-            if (item != .string) continue;
-            try arr.append(try allocator.dupe(u8, item.string));
+
+    fn getStringMap(allocator: Allocator, value: json.Value) !StringHashMap([]const u8) {
+        var result = StringHashMap([]const u8).init(allocator);
+        errdefer {
+            var it = result.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            result.deinit();
         }
-        return arr;
+
+        if (value == .object) {
+            var it = value.object.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* == .string) {
+                    const key_dupe = try allocator.dupe(u8, entry.key_ptr.*);
+                    const value_dupe = try allocator.dupe(u8, entry.value_ptr.string);
+                    try result.put(key_dupe, value_dupe);
+                }
+            }
+        }
+
+        return result;
     }
 };
 
@@ -155,15 +206,20 @@ const Parse = struct {
 // =======================
 
 pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
+    // Use arena allocator for temporary allocations
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    
     const file = try fs.cwd().openFile(config_path, .{});
     defer file.close();
     const json_string = try file.readToEndAlloc(allocator, 1 * 1024 * 1024);
     defer allocator.free(json_string);
 
-    const value_tree = try std.json.parseFromSlice(Json.Value, allocator, json_string, .{});
-    const root = value_tree.value;
-    if (root != .object) return error.ConfigInvalid;
-
+    // Parse JSON using available API
+    const value_tree = try json.parseFromSlice(json.Value, arena.allocator(), json_string, .{
+        .allocate = .alloc_always,
+    });
+    
     var config = ZenvConfig{
         .allocator = allocator,
         .environments = StringHashMap(EnvironmentConfig).init(allocator),
@@ -172,44 +228,73 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     };
     errdefer config.deinit();
 
+    const root = value_tree.value;
+    if (root != .object) return error.ConfigInvalid;
+
     // Parse base_dir
-    config.base_dir = if (root.object.get("base_dir")) |v|
-        if (v == .string) try allocator.dupe(u8, v.string) else try allocator.dupe(u8, "zenv")
-    else
-        try allocator.dupe(u8, "zenv");
+    if (root.object.get("base_dir")) |base_dir| {
+        config.base_dir = try Parse.getString(
+            allocator, 
+            base_dir, 
+            "zenv"
+        ) orelse try allocator.dupe(u8, "zenv");
+    } else {
+        config.base_dir = try allocator.dupe(u8, "zenv");
+    }
 
     // Parse environments
-    var it = root.object.iterator();
-    while (it.next()) |entry| {
+    var env_iter = root.object.iterator();
+    while (env_iter.next()) |entry| {
         const env_name = entry.key_ptr.*;
-        const v = entry.value_ptr;
+        const env_value = entry.value_ptr.*;
+        
         if (std.mem.eql(u8, env_name, "base_dir")) continue;
-        if (v.* != .object) continue;
+        if (env_value != .object) continue;
 
         var env = EnvironmentConfig.init(allocator);
         errdefer env.deinit();
 
-        // Required: target_machines (array or string)
-        if (v.object.get("target_machines")) |tm_val| {
-            if (tm_val == .string) {
-                try env.target_machines.append(try allocator.dupe(u8, tm_val.string));
-            } else {
-                try Parse.stringArray(allocator, &env.target_machines, &tm_val);
-            }
+        // Required fields
+        if (env_value.object.get("target_machines")) |tm_val| {
+            env.target_machines = try Parse.getStringArray(allocator, tm_val);
+            if (env.target_machines.items.len == 0) return error.ConfigInvalid;
         } else return error.ConfigInvalid;
 
-        // Required: python_executable
-        env.python_executable = try Parse.requiredString(allocator, &(v.object.get("python_executable") orelse return error.ConfigInvalid));
+        if (env_value.object.get("python_executable")) |py_exec| {
+            env.python_executable = (try Parse.getString(allocator, py_exec, null)) orelse 
+                return error.ConfigInvalid;
+        } else return error.ConfigInvalid;
 
         // Optional fields
-        if (v.object.get("description")) |desc| env.description = try Parse.optionalString(allocator, &desc);
-        if (v.object.get("modules")) |mods| try Parse.stringArray(allocator, &env.modules, &mods);
-        if (v.object.get("requirements_file")) |req| env.requirements_file = try Parse.optionalString(allocator, &req);
-        if (v.object.get("dependencies")) |deps| try Parse.stringArray(allocator, &env.dependencies, &deps);
-        if (v.object.get("custom_activate_vars")) |vars| try Parse.stringHashMap(allocator, &env.custom_activate_vars, &vars);
-        if (v.object.get("setup_commands")) |cmds| env.setup_commands = try Parse.optionalStringArray(allocator, &cmds);
+        if (env_value.object.get("description")) |desc| {
+            env.description = try Parse.getString(allocator, desc, null);
+        }
+        
+        if (env_value.object.get("modules")) |mods| {
+            env.modules = try Parse.getStringArray(allocator, mods);
+        }
+        
+        if (env_value.object.get("requirements_file")) |req| {
+            env.requirements_file = try Parse.getString(allocator, req, null);
+        }
+        
+        if (env_value.object.get("dependencies")) |deps| {
+            env.dependencies = try Parse.getStringArray(allocator, deps);
+        }
+        
+        if (env_value.object.get("custom_activate_vars")) |vars| {
+            env.custom_activate_vars = try Parse.getStringMap(allocator, vars);
+        }
+        
+        if (env_value.object.get("setup_commands")) |cmds| {
+            if (cmds != .null) {
+                env.setup_commands = try Parse.getStringArray(allocator, cmds);
+            }
+        }
 
-        try config.environments.put(env_name, env);
+        // Add to environments with duped key
+        const env_key = try allocator.dupe(u8, env_name);
+        try config.environments.put(env_key, env);
     }
 
     if (config.environments.count() == 0) return error.ConfigInvalid;
@@ -238,6 +323,20 @@ pub const RegistryEntry = struct {
     }
 };
 
+// Helper struct for JSON serialization
+const RegistryJSON = struct {
+    environments: []const RegistryEntryJSON,
+
+    const RegistryEntryJSON = struct {
+        id: []const u8,
+        name: []const u8,
+        project_dir: []const u8,
+        target_machine: []const u8,
+        venv_path: []const u8,
+        description: ?[]const u8 = null,
+    };
+};
+
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
     entries: std.ArrayList(RegistryEntry),
@@ -257,6 +356,10 @@ pub const EnvironmentRegistry = struct {
     pub fn load(allocator: Allocator) !EnvironmentRegistry {
         var registry = EnvironmentRegistry.init(allocator);
         errdefer registry.deinit();
+
+        // Create a temporary arena for parsing
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
 
         const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
             std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
@@ -287,69 +390,98 @@ pub const EnvironmentRegistry = struct {
         };
         defer file.close();
 
-        const file_content = file.readToEndAlloc(allocator, 1 * 1024 * 1024) catch |err| {
+        const file_content = file.readToEndAlloc(arena.allocator(), 1 * 1024 * 1024) catch |err| {
             std.log.err("Failed to read registry file: {s}", .{@errorName(err)});
             return err;
         };
-        defer allocator.free(file_content);
 
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, file_content, .{}) catch |err| {
+        // Parse JSON using available API
+        const parsed = json.parseFromSlice(json.Value, arena.allocator(), file_content, .{
+            .allocate = .alloc_always,
+        }) catch |err| {
             std.log.err("Failed to parse registry JSON: {s}", .{@errorName(err)});
             return err;
         };
-        defer parsed.deinit();
 
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
             if (environments != .array) return error.InvalidRegistryFormat;
+            
+            try registry.entries.ensureTotalCapacityPrecise(environments.array.items.len);
+            
             for (environments.array.items) |entry_value| {
                 if (entry_value != .object) continue;
+                
                 const entry_obj = entry_value.object;
-                const env_name = entry_obj.get("name") orelse continue;
-                if (env_name != .string) continue;
-                const project_dir = entry_obj.get("project_dir") orelse continue;
-                if (project_dir != .string) continue;
-                const target_machines_str = entry_obj.get("target_machine") orelse continue;
-                if (target_machines_str != .string) continue;
+                
+                // Extract required fields
+                const env_name_val = entry_obj.get("name") orelse continue;
+                if (env_name_val != .string) continue;
+                
+                const project_dir_val = entry_obj.get("project_dir") orelse continue;
+                if (project_dir_val != .string) continue;
+                
+                const target_machines_val = entry_obj.get("target_machine") orelse continue;
+                if (target_machines_val != .string) continue;
+                
+                // Make duplicates for the registry
+                const env_name = try allocator.dupe(u8, env_name_val.string);
+                errdefer allocator.free(env_name);
+                
+                const project_dir = try allocator.dupe(u8, project_dir_val.string);
+                errdefer allocator.free(project_dir);
+                
+                const target_machines_str = try allocator.dupe(u8, target_machines_val.string);
+                errdefer allocator.free(target_machines_str);
+                
+                // Handle optional description
                 var description: ?[]const u8 = null;
                 if (entry_obj.get("description")) |desc_value| {
-                    if (desc_value == .string) description = try allocator.dupe(u8, desc_value.string);
+                    if (desc_value == .string) {
+                        description = try allocator.dupe(u8, desc_value.string);
+                    }
                 }
+                errdefer if (description) |desc| allocator.free(desc);
+                
+                // Get or generate ID
                 var id_owned: []const u8 = undefined;
                 if (entry_obj.get("id")) |id_value| {
                     if (id_value == .string) {
                         id_owned = try allocator.dupe(u8, id_value.string);
                     } else {
-                        id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
+                        id_owned = try generateSHA1ID(allocator, env_name, project_dir, target_machines_str);
                     }
                 } else {
-                    id_owned = try generateSHA1ID(allocator, env_name.string, project_dir.string, target_machines_str.string);
+                    id_owned = try generateSHA1ID(allocator, env_name, project_dir, target_machines_str);
                 }
                 errdefer allocator.free(id_owned);
-                var venv_path_owned: []const u8 = undefined;
-                var venv_path_found_or_reconstructed = false;
-                if (entry_obj.get("venv_path")) |venv_path_val| {
-                    if (venv_path_val == .string) {
-                        venv_path_owned = try allocator.dupe(u8, venv_path_val.string);
-                        venv_path_found_or_reconstructed = true;
+                
+                const venv_path_owned: []const u8 = blk: {
+                    if (entry_obj.get("venv_path")) |venv_path_val| {
+                        if (venv_path_val == .string) {
+                            break :blk try allocator.dupe(u8, venv_path_val.string);
+                        }
                     }
-                }
-                if (!venv_path_found_or_reconstructed) {
-                    venv_path_owned = std.fs.path.join(allocator, &[_][]const u8{
-                        project_dir.string, "zenv", env_name.string,
-                    }) catch continue;
-                }
+                    
+                    // Default reconstruction
+                    break :blk try std.fs.path.join(allocator, &[_][]const u8{
+                        project_dir, "zenv", env_name,
+                    });
+                };
                 errdefer allocator.free(venv_path_owned);
+                
+                // Add entry to registry
                 try registry.entries.append(.{
                     .id = id_owned,
-                    .env_name = try allocator.dupe(u8, env_name.string),
-                    .project_dir = try allocator.dupe(u8, project_dir.string),
+                    .env_name = env_name,
+                    .project_dir = project_dir,
                     .description = description,
-                    .target_machines_str = try allocator.dupe(u8, target_machines_str.string),
+                    .target_machines_str = target_machines_str,
                     .venv_path = venv_path_owned,
                 });
             }
         }
+        
         return registry;
     }
 
@@ -373,32 +505,45 @@ pub const EnvironmentRegistry = struct {
         const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
         defer self.allocator.free(registry_path);
 
-        var root = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
-        defer root.object.deinit();
-
-        var environments = std.json.Value{ .array = std.json.Array.init(self.allocator) };
-        defer environments.array.deinit();
-
+        // Create registry JSON object using helpers for structure
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        
+        // More efficient JSON creation using StringArrayHashMap
+        var root = json.ObjectMap.init(arena.allocator());
+        var entries_array = json.Array.init(arena.allocator());
+        
         for (self.entries.items) |entry| {
-            var entry_obj = std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
-            try entry_obj.object.put("id", std.json.Value{ .string = entry.id });
-            try entry_obj.object.put("name", std.json.Value{ .string = entry.env_name });
-            try entry_obj.object.put("project_dir", std.json.Value{ .string = entry.project_dir });
-            try entry_obj.object.put("target_machine", std.json.Value{ .string = entry.target_machines_str });
-            try entry_obj.object.put("venv_path", std.json.Value{ .string = entry.venv_path });
+            var entry_obj = json.ObjectMap.init(arena.allocator());
+            try entry_obj.put("id", json.Value{ .string = entry.id });
+            try entry_obj.put("name", json.Value{ .string = entry.env_name });
+            try entry_obj.put("project_dir", json.Value{ .string = entry.project_dir });
+            try entry_obj.put("target_machine", json.Value{ .string = entry.target_machines_str });
+            try entry_obj.put("venv_path", json.Value{ .string = entry.venv_path });
+            
             if (entry.description) |desc| {
-                try entry_obj.object.put("description", std.json.Value{ .string = desc });
+                try entry_obj.put("description", json.Value{ .string = desc });
             }
-            try environments.array.append(entry_obj);
+            
+            try entries_array.append(json.Value{ .object = entry_obj });
         }
-        try root.object.put("environments", environments);
-
-        const json_string = try std.json.stringifyAlloc(self.allocator, root, .{ .whitespace = .indent_2 });
-        defer self.allocator.free(json_string);
-
+        
+        try root.put("environments", json.Value{ .array = entries_array });
+        
+        // StringBuffer for creating the JSON string
+        var string_buffer = std.ArrayList(u8).init(self.allocator);
+        defer string_buffer.deinit();
+        
+        try json.stringify(
+            json.Value{ .object = root }, 
+            .{ .whitespace = .indent_2 },
+            string_buffer.writer(),
+        );
+        
+        // Write to file
         const file = try std.fs.createFileAbsolute(registry_path, .{});
         defer file.close();
-        try file.writeAll(json_string);
+        try file.writeAll(string_buffer.items);
     }
 
     pub fn register(
@@ -415,16 +560,12 @@ pub const EnvironmentRegistry = struct {
         } else if (target_machines.len == 1) {
             registry_target_machines_str = try self.allocator.dupe(u8, target_machines[0]);
         } else {
-            var buffer = std.ArrayList(u8).init(self.allocator);
-            defer buffer.deinit();
-            for (target_machines, 0..) |machine, i| {
-                if (i > 0) try buffer.appendSlice(", ");
-                try buffer.appendSlice(machine);
-            }
-            registry_target_machines_str = try self.allocator.dupe(u8, buffer.items);
+            // Use efficient string joining
+            registry_target_machines_str = try std.mem.join(self.allocator, ", ", target_machines);
         }
         errdefer self.allocator.free(registry_target_machines_str);
 
+        // Get virtual env path
         var venv_path: []const u8 = undefined;
         if (std.fs.path.isAbsolute(base_dir)) {
             venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir, env_name });
@@ -433,21 +574,29 @@ pub const EnvironmentRegistry = struct {
         }
         errdefer self.allocator.free(venv_path);
 
+        // Check for existing entry
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
+                // Update existing entry
                 self.allocator.free(entry.project_dir);
                 entry.project_dir = try self.allocator.dupe(u8, project_dir);
+                
                 if (entry.description) |desc| self.allocator.free(desc);
                 entry.description = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
+                
                 self.allocator.free(entry.target_machines_str);
                 entry.target_machines_str = registry_target_machines_str;
+                
                 self.allocator.free(entry.venv_path);
                 entry.venv_path = venv_path;
                 return;
             }
         }
+        
+        // Create new entry
         const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
         errdefer self.allocator.free(id);
+        
         try self.entries.append(.{
             .id = id,
             .env_name = try self.allocator.dupe(u8, env_name),
@@ -472,22 +621,28 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
+        // Fast lookup by name or id
         for (self.entries.items) |entry| {
             if (std.mem.eql(u8, entry.env_name, identifier) or std.mem.eql(u8, entry.id, identifier)) {
                 return entry;
             }
         }
+        
+        // Lookup by prefix if long enough
         if (identifier.len >= 7) {
             var matching_entry: ?RegistryEntry = null;
             var match_count: usize = 0;
+            
             for (self.entries.items) |entry| {
                 if (entry.id.len >= identifier.len and std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
                     matching_entry = entry;
                     match_count += 1;
                 }
             }
+            
             if (match_count == 1) return matching_entry;
         }
+        
         return null;
     }
 };
