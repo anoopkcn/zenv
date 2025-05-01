@@ -71,11 +71,11 @@ Example of a `zenv.json` file:
 {
   "env_name": {
     "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
-    "python_executable": null,
+    "fallback_python": null,
     "requirements_file": "requirements.txt",
     "description": "Basic environment for jureca and juwels",
-    "modules":[ "Stages/2025", "StdEnv", "Python", "CUDA" ],
-    "dependencies": [ "numpy>=1.20.0", "pandas" ]
+    "modules": ["Stages/2025", "StdEnv", "Python", "CUDA"],
+    "dependencies": ["numpy>=1.20.0", "pandas"]
   }
 }
 ```
@@ -96,11 +96,11 @@ Example output:
 
 ```
 Available zenv environments:
-- env_name (3a0602e06cd760eca0c21054fa3350c8fb140122)
-  [target  : jrlogin*.jureca, *.juwels, jrc*]
-  [project : /path/to/project/]
-  [venv    : /path/to/project/zenv/env_name]
-  [desc    : Basic environment for jureca and juwels]
+- test (fd15568424877584b01313de7b6a5a57be73b746)
+  [target  : jureca, juwels, *]
+  [project : /p/project1/hai_matbind/chandran1/zenv/test]
+  [venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/test]
+  [desc    : Test python environment]
 
 Found 1 environment(s) for the current machine ('jrlogin12.jureca').
 ```
@@ -116,10 +116,10 @@ Example:
 source $(zenv activate env_name)
 
 # Activate by full ID
-source $(zenv activate 3a0602e06cd760eca0c21054fa3350c8fb140122)
+source $(zenv activate fd15568424877584b01313de7b6a5a57be73b746)
 
 # Activate by partial ID (first 7+ characters)
-source $(zenv activate 3a0602e)
+source $(zenv activate fd15568)
 ```
 
 ### Registering and Deregistering Environments
@@ -147,16 +147,16 @@ One can have multiple environment configurations in the same `zenv.json` file an
   "base_dir": "<opional_base_dir>",
   "<env_name>": {
     "target_machines": ["<machine_identifier>"],
-    "python_executable": "<path_to_python_or_null>",
+    "fallback_python": "<path_to_python_or_null>",
     "description": "<optional_description_or_null>",
     "modules": ["<module1>", "<module2>"],
     "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
     "dependencies": ["<package_name_version>"],
+    "setup_commands": ["<custom commands to run during setup process>"],
     "custom_activate_vars": {
       "ENV_VAR_NAME": "value"
     },
-    "setup_commands": ["<custom commands to run during setup process>"],
-    "activate_commands":["<custom commands to run during activation process>"]
+    "activate_commands": ["<custom commands to run during activation process>"]
   },
   "<another_env_name>": {
     "target_machines": ["<anothor_machine_identifier>"]
