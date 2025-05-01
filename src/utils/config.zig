@@ -206,7 +206,7 @@ const Parse = struct {
 // =======================
 
 pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
-    // Use arena allocator for temporary allocations
+    // Use arena allocator ONLY for temporary allocations during parsing
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     
@@ -215,8 +215,9 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     const json_string = try file.readToEndAlloc(allocator, 1 * 1024 * 1024);
     defer allocator.free(json_string);
 
-    // Parse JSON using available API
-    const value_tree = try json.parseFromSlice(json.Value, arena.allocator(), json_string, .{
+    // Parse JSON using the main allocator, not the arena
+    // This ensures the value_tree can be properly freed later
+    const value_tree = try json.parseFromSlice(json.Value, allocator, json_string, .{
         .allocate = .alloc_always,
     });
     
@@ -395,13 +396,16 @@ pub const EnvironmentRegistry = struct {
             return err;
         };
 
-        // Parse JSON using available API
-        const parsed = json.parseFromSlice(json.Value, arena.allocator(), file_content, .{
+        // Parse JSON using the allocator directly, not the arena, to properly clean up
+        // This makes sure all parsed JSON data can be properly freed
+        const parsed = json.parseFromSlice(json.Value, allocator, file_content, .{
             .allocate = .alloc_always,
         }) catch |err| {
             std.log.err("Failed to parse registry JSON: {s}", .{@errorName(err)});
             return err;
         };
+        // Since we're using the main allocator, make sure we clean up
+        defer parsed.deinit();
 
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
