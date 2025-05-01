@@ -41,7 +41,7 @@ pub fn executeShellScript(
         return error.ProcessError;
     }
 
-    std.log.info("Script completed successfully: {s}", .{script_abs_path});
+    std.log.info("Setup script completed successfully",.{});
 }
 
 pub fn setupEnvironmentDirectory(
@@ -194,7 +194,7 @@ pub fn setupEnvironment(
                 errors.debugLog(allocator, "Wrote dependency to file: {s}", .{dep});
             }
         }
-        
+
         // Make sure to flush the buffered writer and check for errors
         try bw.flush();
         std.log.info("Requirements file successfully written and flushed", .{});
