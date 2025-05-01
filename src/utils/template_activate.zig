@@ -138,6 +138,22 @@ fn createActivationScript(
     try replacements.put("CUSTOM_VAR_EXPORTS", exports_slice);
     try replacements.put("CUSTOM_VAR_UNSET", unset_slice);
 
+    // Generate activate commands block
+    var activate_commands_block = std.ArrayList(u8).init(allocator);
+    defer activate_commands_block.deinit();
+
+    if (env_config.activate_commands != null and env_config.activate_commands.?.items.len > 0) {
+        try activate_commands_block.writer().print("# Run custom activation commands\n", .{});
+        for (env_config.activate_commands.?.items) |cmd| {
+            try activate_commands_block.writer().print("{s}\n", .{cmd});
+        }
+        try activate_commands_block.writer().print("\n", .{});
+    }
+
+    const activate_commands_slice = try activate_commands_block.toOwnedSlice();
+    defer allocator.free(activate_commands_slice);
+    try replacements.put("ACTIVATE_COMMANDS_BLOCK", activate_commands_slice);
+
     // Add optional description
     var description_text = std.ArrayList(u8).init(allocator);
     defer description_text.deinit();

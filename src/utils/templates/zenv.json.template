@@ -30,6 +30,10 @@
     },
     "setup_commands": [
       "echo 'Development environment setup complete!'"
+    ],
+    "activate_commands": [
+      "echo 'Running custom activation commands for development environment...'",
+      "echo 'Current Python: '$(which python)"
     ]
   }
 }

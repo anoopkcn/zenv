@@ -24,6 +24,8 @@ source @@VENV_PATH@@/bin/activate
 
 @@CUSTOM_VAR_EXPORTS@@
 
+@@ACTIVATE_COMMANDS_BLOCK@@
+
 echo "Environment '@@ENV_NAME@@' activated@@ENV_DESCRIPTION@@"
 
 # Add deactivate_all function to completely deactivate

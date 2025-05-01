@@ -47,6 +47,7 @@ pub const EnvironmentConfig = struct {
     python_executable: ?[]const u8 = null,
     custom_activate_vars: StringHashMap([]const u8),
     setup_commands: ?ArrayList([]const u8) = null,
+    activate_commands: ?ArrayList([]const u8) = null,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
@@ -57,6 +58,7 @@ pub const EnvironmentConfig = struct {
             .description = null,
             .requirements_file = null,
             .setup_commands = null,
+            .activate_commands = null,
             .python_executable = null,
         };
     }
@@ -82,6 +84,11 @@ pub const EnvironmentConfig = struct {
         if (self.requirements_file) |req| self.target_machines.allocator.free(req);
 
         if (self.setup_commands) |*cmds| {
+            for (cmds.items) |item| cmds.allocator.free(item);
+            cmds.deinit();
+        }
+
+        if (self.activate_commands) |*cmds| {
             for (cmds.items) |item| cmds.allocator.free(item);
             cmds.deinit();
         }
@@ -289,6 +296,12 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         if (env_value.object.get("setup_commands")) |cmds| {
             if (cmds != .null) {
                 env.setup_commands = try Parse.getStringArray(allocator, cmds);
+            }
+        }
+
+        if (env_value.object.get("activate_commands")) |cmds| {
+            if (cmds != .null) {
+                env.activate_commands = try Parse.getStringArray(allocator, cmds);
             }
         }
 
