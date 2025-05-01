@@ -16,3 +16,4 @@ zenv.json
 requirements.txt
 test/
 NOTES.md
+.DS_store
