@@ -210,7 +210,15 @@ pub fn handleSetupCommand(
     try aux.setupEnvironmentDirectory(allocator, base_dir, env_name);
 
     // 3. Install dependencies
-    aux.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps, flags.force_rebuild) catch |err| {
+    aux.installDependencies(
+        allocator,
+        env_config,
+        env_name,
+        base_dir,
+        &all_required_deps,
+        flags.force_deps,
+        flags.force_rebuild,
+    ) catch |err| {
         handleErrorFn(err);
         return;
     };
@@ -237,7 +245,13 @@ pub fn handleSetupCommand(
         return;
     };
 
-    try registry.register(env_name, cwd_path, base_dir, env_config.description, env_config.target_machines.items);
+    try registry.register(
+        env_name,
+        cwd_path,
+        base_dir,
+        env_config.description,
+        env_config.target_machines.items,
+    );
     try registry.save();
 
     std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
