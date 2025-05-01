@@ -28,7 +28,7 @@ const Command = enum {
 };
 
 fn printVersion() void {
-    std.io.getStdOut().writer().print("zenv version {s}\n", .{options.version}) catch |err| {
+    std.io.getStdOut().writer().print("{s}", .{options.version}) catch |err| {
         std.log.err("Error printing version: {s}", .{@errorName(err)});
     };
 }
