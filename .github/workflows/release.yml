@@ -18,10 +18,9 @@ jobs:
           fetch-depth: 0  # Fetch all history for tags
 
       - name: Set up Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v1
         with:
-          version: 0.14.0  # Use latest stable Zig version
-          cache: true
+          version: 0.14.0
 
       - name: Build size-optimized releases
         run: zig build release-small
