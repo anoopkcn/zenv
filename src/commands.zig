@@ -96,6 +96,9 @@ pub fn handleSetupCommand(
     if (flags.skip_hostname_check) {
         std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
     }
+    if (flags.force_rebuild) {
+        std.log.info("Force rebuild flag detected. Will recreate the virtual environment.", .{});
+    }
 
     // Get and validate the environment config
     const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
@@ -201,7 +204,7 @@ pub fn handleSetupCommand(
     try aux.setupEnvironmentDirectory(allocator, base_dir, env_name);
 
     // 3. Install dependencies
-    aux.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps) catch |err| {
+    aux.installDependencies(allocator, env_config, env_name, base_dir, &all_required_deps, flags.force_deps, flags.force_rebuild) catch |err| {
         handleErrorFn(err);
         return;
     };

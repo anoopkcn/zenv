@@ -221,6 +221,9 @@ Options:
                             regardless of the target_machine specified in the configuration.
                             Useful for portable environments or development machines.
 
+  --rebuild                 Force rebuild the virtual environment, even if it already exists.
+                            Useful when modules change or Python version needs to be updated.
+
 Registry:
   The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
   Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.

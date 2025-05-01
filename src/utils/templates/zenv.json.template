@@ -1,23 +1,20 @@
 {
   "base_dir": "zenv",
-  "default_env": {
-    "target_machines": ["jureca","juwels"],
-    "description": "Default python environment",
-    "python_executable": "python3",
+  "test": {
+    "target_machines": ["jureca", "juwels", "*"],
+    "description": "Test python environment",
+    "python_executable": null,
     "modules": [
         "Stages/2025",
-        "GCC",
-        "OpenMPI",
-        "CUDA",
-        "Python",
-        "CMake"
+        "StdEnv",
+        "Python"
     ],
     "dependencies": [],
     "requirements_file": null,
     "custom_activate_vars": {},
     "setup_commands": []
   },
-  "dev_env": {
+  "dev": {
     "target_machines": ["@@HOSTNAME@@", "any"],
     "description": "Development environment with additional tools",
     "python_executable": "python3",
