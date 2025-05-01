@@ -14,15 +14,15 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
-      
+
       - name: Set up Zig
-        uses: mlugg/setup-zig@v1
+        uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.14.0
-      
+
       - name: Force-build for all targets
         run: zig build release-small -Dforce-release=true
-      
+
       - name: Delete old 'tip' tag if it exists
         run: |
           git config --global user.name 'GitHub Actions'
@@ -30,16 +30,16 @@ jobs:
           git tag -d tip || true
           git push origin :refs/tags/tip || true
         continue-on-error: true
-      
+
       - name: Create new 'tip' tag
         run: |
           git tag -f tip
           git push origin tip -f
-      
+
       - name: Get short SHA
         id: sha
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      
+
       - name: Delete existing tip releases
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,7 +47,7 @@ jobs:
           # Get all releases
           RELEASES=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases")
-          
+
           # Find all releases with tag name 'tip' and delete them
           echo "$RELEASES" | jq -r '.[] | select(.tag_name == "tip") | .id' | while read -r RELEASE_ID; do
             if [ ! -z "$RELEASE_ID" ]; then
@@ -59,7 +59,7 @@ jobs:
             fi
           done
         continue-on-error: true
-      
+
       - name: Create/Update tip release
         uses: softprops/action-gh-release@v1
         with:
@@ -68,7 +68,7 @@ jobs:
           body: |
             This is the development tip build from the main branch.
             Commit: ${{ github.sha }}
-            
+
             **Note:** This release contains the latest code from the main branch and may be unstable.
             For stable releases, please use the versioned releases instead.
           files: ./zig-out/releases/*.tar.gz  # Updated extension to match new archive format
