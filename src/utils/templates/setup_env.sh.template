@@ -120,74 +120,50 @@ fi
 
 # Create virtual environment if it doesn't exist or needs to be rebuilt
 if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" = "true" ]; then
-  # Try Python in this order of preference:
-  # 1. Python from modules/PATH after loading modules
-  # 2. Configured Python from config file
-  # 3. python3 in PATH
-  # 4. python in PATH
-  VENV_CREATED=false
-
-  # 1. If we found Python after loading modules, use it first
-  if [ -n "$MODULE_PYTHON" ]; then
-    echo "==> Creating virtual environment with module-provided Python"
-    echo "==>   Executable: $MODULE_PYTHON"
-
-    # Check if Python supports venv
-    if ! $MODULE_PYTHON -c "import venv" 2>/dev/null; then
-      echo "==> WARNING: The module-provided Python does not support venv module"
-      echo "==>          Will try alternative Python executables"
-    else
-      $MODULE_PYTHON -m venv @@VENV_DIR@@ && VENV_CREATED=true
-      if [ "$VENV_CREATED" = true ]; then
-        echo "==> Successfully created virtual environment using module-provided Python"
-        if [ -n "@@FALLBACK_PYTHON@@" ] && [ "@@FALLBACK_PYTHON@@" != "python3" ]; then
-          echo "==>   (Fallback Python '@@FALLBACK_PYTHON@@' was not used)"
-        fi
+  # Function to create virtual environment with a specific Python
+  create_venv() {
+    local python_exe="$1"
+    local description="$2"
+    if [ -n "$python_exe" ] && command -v "$python_exe" >/dev/null 2>&1; then
+      echo "==> Creating virtual environment with $description"
+      echo "==>   Executable: $(which "$python_exe")"
+      echo "==>   Version: $("$python_exe" --version 2>&1)"
+      
+      # Check if Python supports venv
+      if ! "$python_exe" -c "import venv" 2>/dev/null; then
+        echo "==> WARNING: $description does not support venv module"
+        return 1
       fi
+      
+      "$python_exe" -m venv "@@VENV_DIR@@" && return 0
     fi
+    return 1
+  }
+
+  VENV_CREATED=false
+  
+  # Try various Python interpreters in order of preference
+  if [ -n "$MODULE_PYTHON" ]; then
+    create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true && 
+    echo "==> Successfully created virtual environment using module-provided Python"
+  fi
+  
+  if [ "$VENV_CREATED" = "false" ]; then
+    create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true && 
+    echo "==> Successfully created virtual environment using fallback Python"
+  fi
+  
+  if [ "$VENV_CREATED" = "false" ]; then
+    create_venv "python3" "system python3" && VENV_CREATED=true && 
+    echo "==> Successfully created virtual environment using system python3"
+  fi
+  
+  if [ "$VENV_CREATED" = "false" ]; then
+    create_venv "python" "system python" && VENV_CREATED=true && 
+    echo "==> Successfully created virtual environment using system python"
   fi
 
-  # 2. Then try fallback Python if module Python didn't work or isn't available
-  if [ "$VENV_CREATED" = false ] && command -v @@FALLBACK_PYTHON@@ >/dev/null 2>&1; then
-    if [ -n "$MODULE_PYTHON" ]; then
-      echo "==> Module-provided Python failed to create venv, trying fallback Python"
-    else
-      echo "==> No module Python available, using fallback Python"
-    fi
-    echo "==>   Executable: @@FALLBACK_PYTHON@@"
-    echo "==>   Version: $(@@FALLBACK_PYTHON@@ --version 2>&1)"
-
-    @@FALLBACK_PYTHON@@ -m venv @@VENV_DIR@@ && VENV_CREATED=true
-    if [ "$VENV_CREATED" = true ]; then
-      echo "==> Successfully created virtual environment using fallback Python"
-    fi
-  fi
-
-  # 3. Fallback to standard python3
-  if [ "$VENV_CREATED" = false ] && command -v python3 >/dev/null 2>&1; then
-    echo "==> Previous Python options unavailable, falling back to system 'python3'"
-    echo "==>   Executable: $(which python3)"
-    echo "==>   Version: $(python3 --version 2>&1)"
-
-    python3 -m venv @@VENV_DIR@@ && VENV_CREATED=true
-    if [ "$VENV_CREATED" = true ]; then
-      echo "==> Successfully created virtual environment using system python3"
-    fi
-  fi
-
-  # 4. Last resort - try python
-  if [ "$VENV_CREATED" = false ] && command -v python >/dev/null 2>&1; then
-    echo "==> Last resort: falling back to system 'python'"
-    echo "==>   Executable: $(which python)"
-    echo "==>   Version: $(python --version 2>&1)"
-
-    python -m venv @@VENV_DIR@@ && VENV_CREATED=true
-    if [ "$VENV_CREATED" = true ]; then
-      echo "==> Successfully created virtual environment using system python"
-    fi
-  fi
-
-  if [ "$VENV_CREATED" = false ]; then
+  if [ "$VENV_CREATED" = "false" ]; then
     echo "ERROR: Failed to find a suitable Python executable to create venv."
     echo "Please ensure at least one of the following is available:"
     echo "  - Python provided by loaded modules"
@@ -200,32 +176,20 @@ else
 fi
 
 echo '==> Step 4: Activating environment and installing dependencies'
-# Print out the exact paths we're trying to use for debugging
-echo "Virtual environment directory: @@VENV_DIR@@"
-echo "Looking for activate script at: @@VENV_DIR@@/bin/activate"
-
-# Check if the directory exists
-if [ ! -d "@@VENV_DIR@@" ]; then
-  echo "ERROR: Virtual environment directory does not exist at @@VENV_DIR@@"
-  echo "This could indicate a path issue in the setup script."
-  exit 1
-fi
-
-# Make sure the activate script exists
-if [ ! -f "@@VENV_DIR@@/bin/activate" ]; then
-  echo "ERROR: Virtual environment activation script not found at @@VENV_DIR@@/bin/activate"
-  if [ -d "@@VENV_DIR@@/bin" ]; then
+# Verify the virtual environment exists and is valid
+if [ ! -d "@@VENV_DIR@@" ] || [ ! -f "@@VENV_DIR@@/bin/activate" ]; then
+  echo "ERROR: Virtual environment not found or invalid at @@VENV_DIR@@"
+  if [ -d "@@VENV_DIR@@" ] && [ ! -d "@@VENV_DIR@@/bin" ]; then
+    echo "bin directory does not exist in @@VENV_DIR@@"
+  elif [ -d "@@VENV_DIR@@/bin" ]; then
     echo "bin directory contents:"
     ls -la "@@VENV_DIR@@/bin"
-  else
-    echo "bin directory does not exist in @@VENV_DIR@@"
   fi
   echo "This could indicate that the virtual environment was not created properly."
   exit 1
 fi
 
-# For the setup script, we use the standard bin/activate
-# (The custom activate.sh is only for user activation)
+# Activate the environment
 source "@@VENV_DIR@@/bin/activate"
 
 # Ensure pip is available and upgrade it
@@ -238,55 +202,34 @@ python -m pip install --upgrade pip
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
 
-# Check if requirements file exists and has content
-if [ -f "@@REQUIREMENTS_PATH@@" ]; then
-  echo "Requirements file exists at @@REQUIREMENTS_PATH@@"
-  if [ -s "@@REQUIREMENTS_PATH@@" ]; then
-    # echo "Requirements file is not empty"
-    # echo "File content:"
-    # cat "@@REQUIREMENTS_PATH@@"
-    REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
+# Resolve requirements file path
+REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
+if [ ! -f "$REQUIREMENTS_PATH" ] || [ ! -s "$REQUIREMENTS_PATH" ]; then
+  # Primary requirements file doesn't exist or is empty
+  ALT_REQUIREMENTS="$(dirname "@@VENV_DIR@@")/requirements.txt"
+  if [ -f "$ALT_REQUIREMENTS" ] && [ -s "$ALT_REQUIREMENTS" ]; then
+    echo "==> Using alternative requirements file: $ALT_REQUIREMENTS"
+    REQUIREMENTS_PATH="$ALT_REQUIREMENTS"
   else
-    echo "Requirements file exists but is empty, checking for alternative"
-    if [ -f "$(dirname "@@VENV_DIR@@")/requirements.txt" ] && [ -s "$(dirname "@@VENV_DIR@@")/requirements.txt" ]; then
-      echo "Found non-empty alternative requirements file in environment directory"
-      REQUIREMENTS_PATH="$(dirname "@@VENV_DIR@@")/requirements.txt"
-      echo "Using alternative requirements file: $REQUIREMENTS_PATH"
-      echo "File content:"
-      cat "$REQUIREMENTS_PATH"
-    else
-      echo "Creating empty requirements file"
-      touch "@@REQUIREMENTS_PATH@@"
-      REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
-    fi
-  fi
-else
-  echo "Warning: Requirements file not found at @@REQUIREMENTS_PATH@@"
-  if [ -f "$(dirname "@@VENV_DIR@@")/requirements.txt" ] && [ -s "$(dirname "@@VENV_DIR@@")/requirements.txt" ]; then
-    echo "Found alternative requirements file in environment directory"
-    REQUIREMENTS_PATH="$(dirname "@@VENV_DIR@@")/requirements.txt"
-    echo "Using alternative requirements file: $REQUIREMENTS_PATH"
-    # echo "File content:"
-    # cat "$REQUIREMENTS_PATH"
-  else
-    echo "Creating empty requirements file"
+    # Create empty requirements file if none exists
+    echo "==> No valid requirements file found. Creating empty one."
     touch "@@REQUIREMENTS_PATH@@"
     REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
   fi
 fi
 
+# Install dependencies
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   echo '==> Using --force-deps: Installing all specified dependencies'
-  if [ -f "$REQUIREMENTS_PATH" ] && [ -s "$REQUIREMENTS_PATH" ]; then
+  if [ -s "$REQUIREMENTS_PATH" ]; then
     python -m pip install -r "$REQUIREMENTS_PATH"
   else
-    echo '==> No requirements file found or file is empty. Skipping package installation.'
+    echo '==> No dependencies to install (empty requirements file)'
   fi
-  rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
 else
   # Filter dependencies based on what's provided by modules
-  if [ -n "$MODULE_PACKAGES_FILE" ] && [ -s "$MODULE_PACKAGES_FILE" ]; then
+  if [ -s "$MODULE_PACKAGES_FILE" ]; then
     echo '==> Filtering requirements against module-provided packages'
     FILTERED_REQUIREMENTS=$(mktemp)
     EXCLUDED_COUNT=0
@@ -320,25 +263,27 @@ else
 
     # Install the filtered dependencies
     echo "==> Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
-    if [ -f "$FILTERED_REQUIREMENTS" ] && [ -s "$FILTERED_REQUIREMENTS" ]; then
+    if [ -s "$FILTERED_REQUIREMENTS" ]; then
       python -m pip install -r "$FILTERED_REQUIREMENTS"
     else
       echo '==> No additional packages need to be installed'
     fi
 
-    # Clean up temp files
-    rm -f "$FILTERED_REQUIREMENTS" "$MODULE_PACKAGES_FILE"
+    # Clean up temp file
+    rm -f "$FILTERED_REQUIREMENTS"
   else
     # No module packages detected, install all requirements
     echo '==> Installing all dependencies from requirements file'
-    if [ -f "$REQUIREMENTS_PATH" ] && [ -s "$REQUIREMENTS_PATH" ]; then
+    if [ -s "$REQUIREMENTS_PATH" ]; then
       python -m pip install -r "$REQUIREMENTS_PATH"
     else
-      echo '==> No requirements file found or file is empty. Skipping package installation.'
+      echo '==> No dependencies to install (empty requirements file)'
     fi
-    rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
   fi
 fi
+
+# Clean up any temporary files
+rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
 
 # Run custom setup commands if provided
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
