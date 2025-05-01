@@ -8,7 +8,7 @@
 - **Module Support**: Integrate with HPC module systems, specified in the same `zenv.json`
 - **Machine-Specific Environments**: Configure environments for specific target machines
 - **Operations from any directory**: Environments can be located anywhere(project directory or a global location) but all are registered at `~/.zenv/registry.json`, so operations like activation, listing and changing directories can be done from any directory location
-- **Validation**: Input validation, module priority mode(by default)
+- **Validation**: Input validation, modules validation, intersection(dependecies, modules) validation
 
 ## Installation
 
