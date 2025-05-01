@@ -86,13 +86,13 @@ fn createSetupScript(
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_DIR", venv_dir);
     
-    // Get the python executable to use
-    const python_exec = if (env_config.python_executable) |py| 
+    // Get the fallback python to use
+    const fallback_python = if (env_config.fallback_python) |py| 
         py 
     else 
         "python3"; // Default to python3 if not specified
     
-    try replacements.put("PYTHON_EXECUTABLE", python_exec);
+    try replacements.put("FALLBACK_PYTHON", fallback_python);
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
 

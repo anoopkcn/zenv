@@ -44,7 +44,7 @@ pub const EnvironmentConfig = struct {
     modules: ArrayList([]const u8),
     requirements_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
-    python_executable: ?[]const u8 = null,
+    fallback_python: ?[]const u8 = null,
     custom_activate_vars: StringHashMap([]const u8),
     setup_commands: ?ArrayList([]const u8) = null,
     activate_commands: ?ArrayList([]const u8) = null,
@@ -59,7 +59,7 @@ pub const EnvironmentConfig = struct {
             .requirements_file = null,
             .setup_commands = null,
             .activate_commands = null,
-            .python_executable = null,
+            .fallback_python = null,
         };
     }
 
@@ -93,7 +93,7 @@ pub const EnvironmentConfig = struct {
             cmds.deinit();
         }
 
-        if (self.python_executable) |py_exec| self.target_machines.allocator.free(py_exec);
+        if (self.fallback_python) |py_exec| self.target_machines.allocator.free(py_exec);
     }
 };
 
@@ -265,11 +265,11 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         } else return error.ConfigInvalid;
 
         // Optional fields
-        if (env_value.object.get("python_executable")) |py_exec| {
-            env.python_executable = try Parse.getString(allocator, py_exec, null);
+        if (env_value.object.get("fallback_python")) |py_exec| {
+            env.fallback_python = try Parse.getString(allocator, py_exec, null);
         } else {
             // Default to null (will auto-detect in setup script)
-            env.python_executable = null;
+            env.fallback_python = null;
         }
 
         // Optional fields

@@ -2,8 +2,8 @@
   "base_dir": "zenv",
   "test": {
     "target_machines": ["jureca", "juwels", "*"],
-    "description": "Test python environment",
-    "python_executable": null,
+    "description": "Test python environment (uses module-provided Python by default)",
+    "fallback_python": null,
     "modules": [
         "Stages/2025",
         "StdEnv",
@@ -16,8 +16,8 @@
   },
   "dev": {
     "target_machines": ["@@HOSTNAME@@", "any"],
-    "description": "Development environment with additional tools",
-    "python_executable": "python3",
+    "description": "Development environment with additional tools (fallback_python is used if module-provided Python is unavailable)",
+    "fallback_python": "python3",
     "modules": [
         "Stages/2025",
         "StdEnv",
