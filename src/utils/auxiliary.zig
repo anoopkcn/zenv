@@ -205,7 +205,15 @@ pub fn setupEnvironment(
     defer allocator.free(script_abs_path);
 
     // Generate setup script content using the template
-    const script_content = try template_setup.createSetupScriptFromTemplate(allocator, env_config, env_name, base_dir, req_abs_path, valid_deps_list.items.len, force_deps);
+    const script_content = try template_setup.createSetupScriptFromTemplate(
+        allocator,
+        env_config,
+        env_name,
+        base_dir,
+        req_abs_path,
+        valid_deps_list.items.len,
+        force_deps,
+    );
     defer allocator.free(script_content);
 
     // Write setup script to file

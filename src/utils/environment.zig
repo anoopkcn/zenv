@@ -436,7 +436,11 @@ pub fn getAndValidateEnvironment(
 ///   - handleErrorFn: Callback function to handle errors
 ///
 /// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
-pub fn lookupRegistryEntry(registry: *const config_module.EnvironmentRegistry, identifier: []const u8, handleErrorFn: fn (anyerror) void) ?RegistryEntry {
+pub fn lookupRegistryEntry(
+    registry: *const config_module.EnvironmentRegistry,
+    identifier: []const u8,
+    handleErrorFn: fn (anyerror) void,
+) ?RegistryEntry {
     const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
 
     // Look up environment in registry (returns a copy)
@@ -515,7 +519,7 @@ pub fn validateModules(allocator: Allocator, modules: []const []const u8) !void 
     for (modules) |module_name| {
         const line = try std.fmt.allocPrint(allocator, " && module load \"{s}\"", .{module_name});
         defer allocator.free(line);
-        script = try std.fmt.allocPrint(allocator, "{s}{s}", .{script, line});
+        script = try std.fmt.allocPrint(allocator, "{s}{s}", .{ script, line });
     }
 
     // Run the script in a single shell, inheriting all stdio

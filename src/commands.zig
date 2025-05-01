@@ -341,11 +341,13 @@ pub fn handleListCommand(
     // Print summary message
     if (count == 0) {
         if (!list_all and current_hostname != null) {
-            stdout.print("No environments found configured for the current machine ('{s}').\nUse 'zenv list --all' to see all registered environments.\n", .{current_hostname.?}) catch {};
+            stdout.print("No environments found configured for the current machine ('{s}').\n" ++
+                "Use 'zenv list --all' to see all registered environments.\n", .{current_hostname.?}) catch {};
         } else if (!list_all and current_hostname == null) {
             stdout.print("No environments found. (Could not determine current hostname for filtering).\n", .{}) catch {};
         } else { // Listing all or hostname failed
-            stdout.print("No environments found in the registry.\nUse 'zenv register <env_name>' OR 'zenv setup <env_name>' to register environments.\n", .{}) catch {};
+            stdout.print("No environments found in the registry.\n" ++
+                "Use 'zenv register <env_name>' OR 'zenv setup <env_name>' to register environments.\n", .{}) catch {};
         }
     } else {
         if (!list_all and current_hostname != null) {

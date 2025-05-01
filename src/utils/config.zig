@@ -8,7 +8,12 @@ const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
 const environment = @import("environment.zig");
 
-fn generateSHA1ID(allocator: Allocator, env_name: []const u8, project_dir: []const u8, target_machines_str: []const u8) ![]const u8 {
+fn generateSHA1ID(
+    allocator: Allocator,
+    env_name: []const u8,
+    project_dir: []const u8,
+    target_machines_str: []const u8,
+) ![]const u8 {
     var sha1 = std.crypto.hash.Sha1.init(.{});
     sha1.update(env_name);
     sha1.update(project_dir);
@@ -396,7 +401,14 @@ pub const EnvironmentRegistry = struct {
         try file.writeAll(json_string);
     }
 
-    pub fn register(self: *EnvironmentRegistry, env_name: []const u8, project_dir: []const u8, base_dir: []const u8, description: ?[]const u8, target_machines: []const []const u8) !void {
+    pub fn register(
+        self: *EnvironmentRegistry,
+        env_name: []const u8,
+        project_dir: []const u8,
+        base_dir: []const u8,
+        description: ?[]const u8,
+        target_machines: []const []const u8,
+    ) !void {
         var registry_target_machines_str: []const u8 = undefined;
         if (target_machines.len == 0) {
             registry_target_machines_str = try self.allocator.dupe(u8, "any");

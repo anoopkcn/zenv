@@ -6,7 +6,12 @@ const errors = @import("errors.zig");
 
 // Helper function to parse a line containing potential dependencies (used by parsePyprojectToml)
 // Not marked pub as it's internal to this module
-fn parseDependenciesLine(allocator: Allocator, line: []const u8, deps_list: *std.ArrayList([]const u8), count: *usize) !void {
+fn parseDependenciesLine(
+    allocator: Allocator,
+    line: []const u8,
+    deps_list: *std.ArrayList([]const u8),
+    count: *usize,
+) !void {
     // Handle quoted strings in arrays: "package1", "package2"
     var pos: usize = 0;
     while (pos < line.len) {
@@ -39,7 +44,11 @@ fn parseDependenciesLine(allocator: Allocator, line: []const u8, deps_list: *std
 
 // Parse dependencies from pyproject.toml file
 // Returns the number of dependencies found
-pub fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
+pub fn parsePyprojectToml(
+    allocator: Allocator,
+    content: []const u8,
+    deps_list: *std.ArrayList([]const u8),
+) !usize {
     std.log.info("Parsing pyproject.toml for dependencies...", .{});
 
     var count: usize = 0;
@@ -159,7 +168,11 @@ pub fn parsePyprojectToml(allocator: Allocator, content: []const u8, deps_list: 
 
 // Parse dependencies from requirements.txt format content
 // Returns the number of dependencies found
-pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list: *std.ArrayList([]const u8)) !usize {
+pub fn parseRequirementsTxt(
+    allocator: Allocator,
+    content: []const u8,
+    deps_list: *std.ArrayList([]const u8),
+) !usize {
     std.log.info("Parsing requirements.txt for dependencies...", .{});
     var count: usize = 0;
 
@@ -197,7 +210,11 @@ pub fn parseRequirementsTxt(allocator: Allocator, content: []const u8, deps_list
 }
 
 // Validate raw dependencies, remove duplicates and invalid entries
-pub fn validateDependencies(allocator: Allocator, raw_deps: []const []const u8, env_name: []const u8) !std.ArrayList([]const u8) {
+pub fn validateDependencies(
+    allocator: Allocator,
+    raw_deps: []const []const u8,
+    env_name: []const u8,
+) !std.ArrayList([]const u8) {
     std.log.info("Validating dependencies for '{s}':", .{env_name});
     var valid_deps = std.ArrayList([]const u8).init(allocator);
     // Improved error handling with explicit cleanup of any added items

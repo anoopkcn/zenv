@@ -11,12 +11,36 @@ const template = @import("template.zig");
 const SETUP_ENV_TEMPLATE = @embedFile("templates/setup_env.sh.template");
 
 // Public function to export
-pub fn createSetupScriptFromTemplate(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, req_abs_path: []const u8, valid_deps_list_len: usize, force_deps: bool) ![]const u8 {
-    return try createSetupScript(allocator, env_config, env_name, base_dir, req_abs_path, valid_deps_list_len, force_deps);
+pub fn createSetupScriptFromTemplate(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+    req_abs_path: []const u8,
+    valid_deps_list_len: usize,
+    force_deps: bool,
+) ![]const u8 {
+    return try createSetupScript(
+        allocator,
+        env_config,
+        env_name,
+        base_dir,
+        req_abs_path,
+        valid_deps_list_len,
+        force_deps,
+    );
 }
 
 // Create setup script for the environment using templating
-fn createSetupScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8, req_abs_path: []const u8, valid_deps_list_len: usize, force_deps: bool) ![]const u8 {
+fn createSetupScript(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+    req_abs_path: []const u8,
+    valid_deps_list_len: usize,
+    force_deps: bool,
+) ![]const u8 {
     std.log.info("Creating setup script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory

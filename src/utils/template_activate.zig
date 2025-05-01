@@ -11,12 +11,22 @@ const template = @import("template.zig");
 const ACTIVATION_TEMPLATE = @embedFile("templates/activate.sh.template");
 
 // Public function to export
-pub fn createScriptFromTemplate(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8) !void {
+pub fn createScriptFromTemplate(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+) !void {
     return createActivationScript(allocator, env_config, env_name, base_dir);
 }
 
 // Create activation script for the environment using templating
-fn createActivationScript(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8, base_dir: []const u8) !void {
+fn createActivationScript(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    base_dir: []const u8,
+) !void {
     std.log.info("Creating activation script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory
