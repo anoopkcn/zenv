@@ -200,6 +200,12 @@ pub fn handleSetupCommand(
     // Get base_dir from config
     const base_dir = config.base_dir;
 
+    // Debug output - print the combined dependencies
+    std.log.info("Combined dependency list ({d} items):", .{all_required_deps.items.len});
+    for (all_required_deps.items) |dep| {
+        std.log.info("  - {s}", .{dep});
+    }
+
     // 2. Create venv base directory structure using base_dir
     try aux.setupEnvironmentDirectory(allocator, base_dir, env_name);
 

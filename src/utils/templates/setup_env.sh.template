@@ -12,11 +12,8 @@ handle_module_error() {
 # Handle force_rebuild flag
 @@FORCE_REBUILD_VALUE@@
 if [ "$FORCE_REBUILD" = "true" ]; then
-  echo '==> Force rebuild flag detected. Will recreate the virtual environment.'
-  if [ -d "@@VENV_DIR@@" ]; then
-    echo '==> Removing existing virtual environment'
-    rm -rf "@@VENV_DIR@@"
-  fi
+  echo '==> Force rebuild flag (--rebuild) detected'
+  echo '==> Will recreate the virtual environment if it exists'
 else
   echo '==> Normal setup mode (use --rebuild to force recreation)'
 fi
@@ -60,6 +57,8 @@ if command -v module >/dev/null 2>&1 && module list 2>&1 | grep -q "Python"; the
   elif command -v python >/dev/null 2>&1; then
     MODULE_PYTHON=$(which python)
     echo "==> Found Python from modules: $MODULE_PYTHON"
+  else
+    echo "==> Python module loaded but executable not found in PATH"
   fi
 fi
 
@@ -69,17 +68,19 @@ if [ -d "@@VENV_DIR@@" ]; then
   if [ -f "@@VENV_DIR@@/bin/activate" ] && [ -f "@@VENV_DIR@@/bin/python" ]; then
     echo "==> Virtual environment already exists and appears valid"
 
-    # If we have Python from modules and it's different from the configured one
-    if [ -n "$MODULE_PYTHON" ]; then
-      echo "==> Checking if environment needs to be rebuilt with module Python"
-
-      # Check if this is different from what we'd use
-      CURRENT_PYTHON="@@PYTHON_EXECUTABLE@@"
-      if [ "$MODULE_PYTHON" != "$CURRENT_PYTHON" ]; then
-        echo "==> Module Python ($MODULE_PYTHON) differs from configured Python (@@PYTHON_EXECUTABLE@@)"
-        echo "==> Rebuilding virtual environment with module Python"
-        REBUILD_VENV=true
-        rm -rf "@@VENV_DIR@@"
+    # Only rebuild if explicitly requested with --rebuild flag
+    if [ "$FORCE_REBUILD" = "true" ]; then
+      echo "==> Rebuild flag detected, recreating virtual environment"
+      REBUILD_VENV=true
+      rm -rf "@@VENV_DIR@@"
+    else
+      # If we have Python from modules, just notify the user but don't rebuild
+      if [ -n "$MODULE_PYTHON" ]; then
+        CURRENT_PYTHON="@@PYTHON_EXECUTABLE@@"
+        if [ "$MODULE_PYTHON" != "$CURRENT_PYTHON" ]; then
+          echo "==> Note: Module Python ($MODULE_PYTHON) differs from configured Python (@@PYTHON_EXECUTABLE@@)"
+          echo "==> Use --rebuild flag if you want to recreate the environment with module Python"
+        fi
       fi
     fi
   else
@@ -92,30 +93,34 @@ fi
 
 # Create virtual environment if it doesn't exist or needs to be rebuilt
 if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ]; then
-  # Try module Python first if available, then configured Python, then fallbacks
+  # Try Python in this order of preference:
+  # 1. Python from modules if available
+  # 2. Configured Python from config file
+  # 3. python3 in PATH
+  # 4. python in PATH
   VENV_CREATED=false
 
-  # If we found Python from the modules, use it first
+  # 1. If we found Python from the modules, use it first
   if [ -n "$MODULE_PYTHON" ]; then
-    echo "Using Python from modules: $MODULE_PYTHON"
+    echo "==> Using Python from modules: $MODULE_PYTHON"
     $MODULE_PYTHON -m venv @@VENV_DIR@@ && VENV_CREATED=true
   fi
 
-  # Then try configured Python if module Python didn't work or isn't available
+  # 2. Then try configured Python if module Python didn't work or isn't available
   if [ "$VENV_CREATED" = false ] && command -v @@PYTHON_EXECUTABLE@@ >/dev/null 2>&1; then
-    echo "Using configured Python: @@PYTHON_EXECUTABLE@@"
+    echo "==> Using configured Python: @@PYTHON_EXECUTABLE@@"
     @@PYTHON_EXECUTABLE@@ -m venv @@VENV_DIR@@ && VENV_CREATED=true
   fi
 
-  # Fallback to standard python3
+  # 3. Fallback to standard python3
   if [ "$VENV_CREATED" = false ] && command -v python3 >/dev/null 2>&1; then
-    echo "Falling back to 'python3' executable"
+    echo "==> Falling back to 'python3' executable"
     python3 -m venv @@VENV_DIR@@ && VENV_CREATED=true
   fi
 
-  # Last resort - try python
+  # 4. Last resort - try python
   if [ "$VENV_CREATED" = false ] && command -v python >/dev/null 2>&1; then
-    echo "Falling back to 'python' executable"
+    echo "==> Falling back to 'python' executable"
     python -m venv @@VENV_DIR@@ && VENV_CREATED=true
   fi
 
@@ -166,18 +171,48 @@ python -m pip install --upgrade pip
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
 
-# Check if requirements file exists
-if [ ! -f "@@REQUIREMENTS_PATH@@" ]; then
+# Check if requirements file exists and has content
+if [ -f "@@REQUIREMENTS_PATH@@" ]; then
+  echo "Requirements file exists at @@REQUIREMENTS_PATH@@"
+  if [ -s "@@REQUIREMENTS_PATH@@" ]; then
+    # echo "Requirements file is not empty"
+    # echo "File content:"
+    # cat "@@REQUIREMENTS_PATH@@"
+    REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
+  else
+    echo "Requirements file exists but is empty, checking for alternative"
+    if [ -f "$(dirname "@@VENV_DIR@@")/requirements.txt" ] && [ -s "$(dirname "@@VENV_DIR@@")/requirements.txt" ]; then
+      echo "Found non-empty alternative requirements file in environment directory"
+      REQUIREMENTS_PATH="$(dirname "@@VENV_DIR@@")/requirements.txt"
+      echo "Using alternative requirements file: $REQUIREMENTS_PATH"
+      echo "File content:"
+      cat "$REQUIREMENTS_PATH"
+    else
+      echo "Creating empty requirements file"
+      touch "@@REQUIREMENTS_PATH@@"
+      REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
+    fi
+  fi
+else
   echo "Warning: Requirements file not found at @@REQUIREMENTS_PATH@@"
-  echo "Creating empty requirements file"
-  touch "@@REQUIREMENTS_PATH@@"
+  if [ -f "$(dirname "@@VENV_DIR@@")/requirements.txt" ] && [ -s "$(dirname "@@VENV_DIR@@")/requirements.txt" ]; then
+    echo "Found alternative requirements file in environment directory"
+    REQUIREMENTS_PATH="$(dirname "@@VENV_DIR@@")/requirements.txt"
+    echo "Using alternative requirements file: $REQUIREMENTS_PATH"
+    # echo "File content:"
+    # cat "$REQUIREMENTS_PATH"
+  else
+    echo "Creating empty requirements file"
+    touch "@@REQUIREMENTS_PATH@@"
+    REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
+  fi
 fi
 
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   echo '==> Using --force-deps: Installing all specified dependencies'
-  if [ -f "@@REQUIREMENTS_PATH@@" ] && [ -s "@@REQUIREMENTS_PATH@@" ]; then
-    @@PIP_INSTALL_COMMAND@@
+  if [ -f "$REQUIREMENTS_PATH" ] && [ -s "$REQUIREMENTS_PATH" ]; then
+    python -m pip install -r "$REQUIREMENTS_PATH"
   else
     echo '==> No requirements file found or file is empty. Skipping package installation.'
   fi
@@ -191,7 +226,7 @@ else
     INSTALLED_COUNT=0
 
     # Process each line in the requirements file
-    if [ -s "@@REQUIREMENTS_PATH@@" ]; then
+    if [ -s "$REQUIREMENTS_PATH" ]; then
       while IFS= read -r line || [ -n "$line" ]; do
         # Skip comments and empty lines
         trimmed_line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -211,7 +246,7 @@ else
           echo "$line" >> "$FILTERED_REQUIREMENTS"
           INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         fi
-      done < "@@REQUIREMENTS_PATH@@"
+      done < "$REQUIREMENTS_PATH"
     else
       echo "==> Requirements file is empty or not readable"
     fi
@@ -229,8 +264,8 @@ else
   else
     # No module packages detected, install all requirements
     echo '==> Installing all dependencies from requirements file'
-    if [ -f "@@REQUIREMENTS_PATH@@" ] && [ -s "@@REQUIREMENTS_PATH@@" ]; then
-      @@PIP_INSTALL_COMMAND@@
+    if [ -f "$REQUIREMENTS_PATH" ] && [ -s "$REQUIREMENTS_PATH" ]; then
+      python -m pip install -r "$REQUIREMENTS_PATH"
     else
       echo '==> No requirements file found or file is empty. Skipping package installation.'
     fi
@@ -241,5 +276,6 @@ fi
 # Run custom setup commands if provided
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
 
-echo '==> Setup completed successfully!'
-echo 'To activate this environment, run: source @@ACTIVATE_SCRIPT_PATH@@'
+echo '==> Setup completed successfully for Environment '@@ENV_NAME@@' '
+echo "To activate, run: source $(realpath @@ACTIVATE_SCRIPT_PATH@@)"
+echo "Or from anywhere: source $(zenv activate @@ENV_NAME@@)"

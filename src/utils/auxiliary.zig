@@ -146,6 +146,7 @@ pub fn setupEnvironment(
 
     // Handle paths differently based on whether base_dir is absolute or relative
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+    std.log.info("Base directory is {s}: '{s}'", .{ if (is_absolute_base_dir) "absolute" else "relative", base_dir });
 
     // Create requirements file path using base_dir
     var req_rel_path: []const u8 = undefined;
@@ -160,6 +161,7 @@ pub fn setupEnvironment(
         req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
         req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
     }
+    std.log.info("Requirements file paths: relative='{s}', absolute='{s}'", .{ req_rel_path, req_abs_path });
 
     defer allocator.free(req_rel_path);
     defer allocator.free(req_abs_path);
@@ -172,7 +174,14 @@ pub fn setupEnvironment(
         else
             try fs.cwd().createFile(req_rel_path, .{});
 
-        defer req_file.close();
+        defer {
+            // Explicitly sync file content to disk before closing
+            req_file.sync() catch |err| {
+                std.log.err("Warning: Failed to sync requirements file: {s}", .{@errorName(err)});
+            };
+            req_file.close();
+        }
+
         var bw = std.io.bufferedWriter(req_file.writer());
         const writer = bw.writer();
 
@@ -185,7 +194,10 @@ pub fn setupEnvironment(
                 errors.debugLog(allocator, "Wrote dependency to file: {s}", .{dep});
             }
         }
+        
+        // Make sure to flush the buffered writer and check for errors
         try bw.flush();
+        std.log.info("Requirements file successfully written and flushed", .{});
     }
     std.log.info("Created requirements file: {s}", .{req_abs_path});
 
