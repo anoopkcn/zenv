@@ -18,9 +18,13 @@
     "target_machines": ["@@HOSTNAME@@", "any"],
     "description": "Development environment with additional tools",
     "python_executable": "python3",
-    "modules": [],
-    "dependencies": [],
-    "requirements_file": "pyproject.toml",
+    "modules": [
+        "Stages/2025",
+        "StdEnv",
+        "Python"
+    ],
+    "dependencies": ["tqdm"],
+    "requirements_file": "requirements.txt",
     "custom_activate_vars": {
       "DEVELOPMENT": "true"
     },
