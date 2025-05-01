@@ -82,7 +82,14 @@ fn createSetupScript(
     // Add basic replacements for the template
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_DIR", venv_dir);
-    try replacements.put("PYTHON_EXECUTABLE", env_config.python_executable);
+    
+    // Get the python executable to use
+    const python_exec = if (env_config.python_executable) |py| 
+        py 
+    else 
+        "python3"; // Default to python3 if not specified
+    
+    try replacements.put("PYTHON_EXECUTABLE", python_exec);
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
 

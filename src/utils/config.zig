@@ -19,17 +19,17 @@ fn generateSHA1ID(
     sha1.update(env_name);
     sha1.update(project_dir);
     sha1.update(target_machines_str);
-    
+
     // Use ArenaAllocator for temporary allocations
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    
+
     const timestamp_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.time.milliTimestamp()});
     sha1.update(timestamp_str);
-    
+
     var hash: [20]u8 = undefined;
     sha1.final(&hash);
-    
+
     // Efficient hex conversion
     return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&hash)});
 }
@@ -44,7 +44,7 @@ pub const EnvironmentConfig = struct {
     modules: ArrayList([]const u8),
     requirements_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
-    python_executable: []const u8,
+    python_executable: ?[]const u8 = null,
     custom_activate_vars: StringHashMap([]const u8),
     setup_commands: ?ArrayList([]const u8) = null,
 
@@ -57,36 +57,36 @@ pub const EnvironmentConfig = struct {
             .description = null,
             .requirements_file = null,
             .setup_commands = null,
-            .python_executable = undefined,
+            .python_executable = null,
         };
     }
 
     pub fn deinit(self: *EnvironmentConfig) void {
         for (self.target_machines.items) |item| self.target_machines.allocator.free(item);
         self.target_machines.deinit();
-        
+
         for (self.modules.items) |item| self.modules.allocator.free(item);
         self.modules.deinit();
-        
+
         for (self.dependencies.items) |item| self.dependencies.allocator.free(item);
         self.dependencies.deinit();
-        
+
         var iter = self.custom_activate_vars.iterator();
         while (iter.next()) |entry| {
             self.custom_activate_vars.allocator.free(entry.key_ptr.*);
             self.custom_activate_vars.allocator.free(entry.value_ptr.*);
         }
         self.custom_activate_vars.deinit();
-        
+
         if (self.description) |desc| self.target_machines.allocator.free(desc);
         if (self.requirements_file) |req| self.target_machines.allocator.free(req);
-        
+
         if (self.setup_commands) |*cmds| {
             for (cmds.items) |item| cmds.allocator.free(item);
             cmds.deinit();
         }
-        
-        self.target_machines.allocator.free(self.python_executable);
+
+        if (self.python_executable) |py_exec| self.target_machines.allocator.free(py_exec);
     }
 };
 
@@ -116,7 +116,7 @@ pub const ZenvConfig = struct {
     pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvError {
         _ = env_name;
         if (env_config.target_machines.items.len == 0) return ZenvError.ConfigInvalid;
-        if (env_config.python_executable.len == 0) return ZenvError.MissingPythonExecutable;
+        // python_executable is now optional, no validation needed
         return null;
     }
 
@@ -143,9 +143,9 @@ const Parse = struct {
         return switch (value) {
             .string => |str| try allocator.dupe(u8, str),
             .null => default,
-            else => if (default) |def| 
-                try allocator.dupe(u8, def) 
-            else 
+            else => if (default) |def|
+                try allocator.dupe(u8, def)
+            else
                 error.ConfigInvalid,
         };
     }
@@ -209,7 +209,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     // Use arena allocator ONLY for temporary allocations during parsing
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    
+
     const file = try fs.cwd().openFile(config_path, .{});
     defer file.close();
     const json_string = try file.readToEndAlloc(allocator, 1 * 1024 * 1024);
@@ -220,7 +220,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     const value_tree = try json.parseFromSlice(json.Value, allocator, json_string, .{
         .allocate = .alloc_always,
     });
-    
+
     var config = ZenvConfig{
         .allocator = allocator,
         .environments = StringHashMap(EnvironmentConfig).init(allocator),
@@ -234,11 +234,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
 
     // Parse base_dir
     if (root.object.get("base_dir")) |base_dir| {
-        config.base_dir = try Parse.getString(
-            allocator, 
-            base_dir, 
-            "zenv"
-        ) orelse try allocator.dupe(u8, "zenv");
+        config.base_dir = try Parse.getString(allocator, base_dir, "zenv") orelse try allocator.dupe(u8, "zenv");
     } else {
         config.base_dir = try allocator.dupe(u8, "zenv");
     }
@@ -248,7 +244,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     while (env_iter.next()) |entry| {
         const env_name = entry.key_ptr.*;
         const env_value = entry.value_ptr.*;
-        
+
         if (std.mem.eql(u8, env_name, "base_dir")) continue;
         if (env_value != .object) continue;
 
@@ -261,32 +257,35 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
             if (env.target_machines.items.len == 0) return error.ConfigInvalid;
         } else return error.ConfigInvalid;
 
+        // Optional fields
         if (env_value.object.get("python_executable")) |py_exec| {
-            env.python_executable = (try Parse.getString(allocator, py_exec, null)) orelse 
-                return error.ConfigInvalid;
-        } else return error.ConfigInvalid;
+            env.python_executable = try Parse.getString(allocator, py_exec, null);
+        } else {
+            // Default to null (will auto-detect in setup script)
+            env.python_executable = null;
+        }
 
         // Optional fields
         if (env_value.object.get("description")) |desc| {
             env.description = try Parse.getString(allocator, desc, null);
         }
-        
+
         if (env_value.object.get("modules")) |mods| {
             env.modules = try Parse.getStringArray(allocator, mods);
         }
-        
+
         if (env_value.object.get("requirements_file")) |req| {
             env.requirements_file = try Parse.getString(allocator, req, null);
         }
-        
+
         if (env_value.object.get("dependencies")) |deps| {
             env.dependencies = try Parse.getStringArray(allocator, deps);
         }
-        
+
         if (env_value.object.get("custom_activate_vars")) |vars| {
             env.custom_activate_vars = try Parse.getStringMap(allocator, vars);
         }
-        
+
         if (env_value.object.get("setup_commands")) |cmds| {
             if (cmds != .null) {
                 env.setup_commands = try Parse.getStringArray(allocator, cmds);
@@ -410,34 +409,34 @@ pub const EnvironmentRegistry = struct {
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
             if (environments != .array) return error.InvalidRegistryFormat;
-            
+
             try registry.entries.ensureTotalCapacityPrecise(environments.array.items.len);
-            
+
             for (environments.array.items) |entry_value| {
                 if (entry_value != .object) continue;
-                
+
                 const entry_obj = entry_value.object;
-                
+
                 // Extract required fields
                 const env_name_val = entry_obj.get("name") orelse continue;
                 if (env_name_val != .string) continue;
-                
+
                 const project_dir_val = entry_obj.get("project_dir") orelse continue;
                 if (project_dir_val != .string) continue;
-                
+
                 const target_machines_val = entry_obj.get("target_machine") orelse continue;
                 if (target_machines_val != .string) continue;
-                
+
                 // Make duplicates for the registry
                 const env_name = try allocator.dupe(u8, env_name_val.string);
                 errdefer allocator.free(env_name);
-                
+
                 const project_dir = try allocator.dupe(u8, project_dir_val.string);
                 errdefer allocator.free(project_dir);
-                
+
                 const target_machines_str = try allocator.dupe(u8, target_machines_val.string);
                 errdefer allocator.free(target_machines_str);
-                
+
                 // Handle optional description
                 var description: ?[]const u8 = null;
                 if (entry_obj.get("description")) |desc_value| {
@@ -446,7 +445,7 @@ pub const EnvironmentRegistry = struct {
                     }
                 }
                 errdefer if (description) |desc| allocator.free(desc);
-                
+
                 // Get or generate ID
                 var id_owned: []const u8 = undefined;
                 if (entry_obj.get("id")) |id_value| {
@@ -459,21 +458,21 @@ pub const EnvironmentRegistry = struct {
                     id_owned = try generateSHA1ID(allocator, env_name, project_dir, target_machines_str);
                 }
                 errdefer allocator.free(id_owned);
-                
+
                 const venv_path_owned: []const u8 = blk: {
                     if (entry_obj.get("venv_path")) |venv_path_val| {
                         if (venv_path_val == .string) {
                             break :blk try allocator.dupe(u8, venv_path_val.string);
                         }
                     }
-                    
+
                     // Default reconstruction
                     break :blk try std.fs.path.join(allocator, &[_][]const u8{
                         project_dir, "zenv", env_name,
                     });
                 };
                 errdefer allocator.free(venv_path_owned);
-                
+
                 // Add entry to registry
                 try registry.entries.append(.{
                     .id = id_owned,
@@ -485,7 +484,7 @@ pub const EnvironmentRegistry = struct {
                 });
             }
         }
-        
+
         return registry;
     }
 
@@ -512,11 +511,11 @@ pub const EnvironmentRegistry = struct {
         // Create registry JSON object using helpers for structure
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        
+
         // More efficient JSON creation using StringArrayHashMap
         var root = json.ObjectMap.init(arena.allocator());
         var entries_array = json.Array.init(arena.allocator());
-        
+
         for (self.entries.items) |entry| {
             var entry_obj = json.ObjectMap.init(arena.allocator());
             try entry_obj.put("id", json.Value{ .string = entry.id });
@@ -524,26 +523,26 @@ pub const EnvironmentRegistry = struct {
             try entry_obj.put("project_dir", json.Value{ .string = entry.project_dir });
             try entry_obj.put("target_machine", json.Value{ .string = entry.target_machines_str });
             try entry_obj.put("venv_path", json.Value{ .string = entry.venv_path });
-            
+
             if (entry.description) |desc| {
                 try entry_obj.put("description", json.Value{ .string = desc });
             }
-            
+
             try entries_array.append(json.Value{ .object = entry_obj });
         }
-        
+
         try root.put("environments", json.Value{ .array = entries_array });
-        
+
         // StringBuffer for creating the JSON string
         var string_buffer = std.ArrayList(u8).init(self.allocator);
         defer string_buffer.deinit();
-        
+
         try json.stringify(
-            json.Value{ .object = root }, 
+            json.Value{ .object = root },
             .{ .whitespace = .indent_2 },
             string_buffer.writer(),
         );
-        
+
         // Write to file
         const file = try std.fs.createFileAbsolute(registry_path, .{});
         defer file.close();
@@ -584,23 +583,23 @@ pub const EnvironmentRegistry = struct {
                 // Update existing entry
                 self.allocator.free(entry.project_dir);
                 entry.project_dir = try self.allocator.dupe(u8, project_dir);
-                
+
                 if (entry.description) |desc| self.allocator.free(desc);
                 entry.description = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
-                
+
                 self.allocator.free(entry.target_machines_str);
                 entry.target_machines_str = registry_target_machines_str;
-                
+
                 self.allocator.free(entry.venv_path);
                 entry.venv_path = venv_path;
                 return;
             }
         }
-        
+
         // Create new entry
         const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
         errdefer self.allocator.free(id);
-        
+
         try self.entries.append(.{
             .id = id,
             .env_name = try self.allocator.dupe(u8, env_name),
@@ -631,22 +630,22 @@ pub const EnvironmentRegistry = struct {
                 return entry;
             }
         }
-        
+
         // Lookup by prefix if long enough
         if (identifier.len >= 7) {
             var matching_entry: ?RegistryEntry = null;
             var match_count: usize = 0;
-            
+
             for (self.entries.items) |entry| {
                 if (entry.id.len >= identifier.len and std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
                     matching_entry = entry;
                     match_count += 1;
                 }
             }
-            
+
             if (match_count == 1) return matching_entry;
         }
-        
+
         return null;
     }
 };
