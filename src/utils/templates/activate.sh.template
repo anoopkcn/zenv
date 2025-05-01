@@ -13,7 +13,7 @@ handle_module_error() {
 if command -v module >/dev/null 2>&1; then
   echo '==> Purging all modules'
   module --force purge || echo "Warning: Failed to purge modules, continuing anyway" >&2
-  
+
   @@MODULE_LOADING_BLOCK@@
 else
   echo '==> Module command not found, skipping module operations'
@@ -35,15 +35,15 @@ deactivate_all() {
     echo "Running venv deactivate..."
     deactivate
   fi
-  
+
   # Purge modules if module command exists
   if command -v module >/dev/null 2>&1; then
     echo "Purging loaded modules..."
     module --force purge || echo "Warning: Failed to purge modules" >&2
   fi
-  
+
   # Then unset any custom environment variables
-@@CUSTOM_VAR_UNSET@@
+  @@CUSTOM_VAR_UNSET@@
   # Unset this function
   unset -f deactivate_all
   echo "Environment fully deactivated"
