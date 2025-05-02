@@ -107,6 +107,31 @@ pub fn handleSetupCommand(
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
     std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
 
+    // 0. Check the availability of modules
+    if (env_config.modules.items.len > 0) {
+        std.log.info("Step 0: Checking availability of {d} required modules...", .{env_config.modules.items.len});
+        const module_check = env.checkModulesAvailability(allocator, env_config.modules.items) catch |err| {
+            std.log.err("Failed to check module availability: {s}", .{@errorName(err)});
+            handleErrorFn(error.ModuleLoadError);
+            return;
+        };
+        // Ensure cleanup of missing modules if they were returned
+        defer if (module_check.missing) |missing| allocator.free(missing);
+            
+        if (!module_check.available and module_check.missing != null) {
+            std.log.err("The following modules are not available:", .{});
+            for (module_check.missing.?) |module_name| {
+                std.log.err("  - {s}", .{module_name});
+            }
+            std.log.err("Aborting setup because required modules are not available.", .{});
+            std.log.err("Please ensure the specified modules are installed on this system.", .{});
+            handleErrorFn(error.ModuleLoadError);
+            return;
+        } else {
+            std.log.info("All modules appear to be available.", .{});
+        }
+    }
+
     // 1. Combine Dependencies
     var all_required_deps = std.ArrayList([]const u8).init(allocator);
     // Track ownership of item strings properly
@@ -223,16 +248,6 @@ pub fn handleSetupCommand(
         return;
     };
     deps_need_cleanup = false;
-
-    // Optionally validate modules
-    // if (env_config.modules.items.len > 0 and all_required_deps.items.len == 0) {
-    //     std.log.info("Validating {d} modules...", .{env_config.modules.items.len});
-    //     env.validateModules(allocator, env_config.modules.items) catch |err| {
-    //         handleErrorFn(err);
-    //         return;
-    //     };
-    //     std.log.info("All modules validated successfully.", .{});
-    // }
 
     // 4. Create the final activation script (using a separate utility)
     try aux.createActivationScript(allocator, env_config, env_name, base_dir);

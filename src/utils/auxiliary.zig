@@ -37,7 +37,14 @@ pub fn executeShellScript(
     try child.spawn();
     const term = try child.wait();
 
-    if (term != .Exited or term.Exited != 0) {
+    // Check if the command was successful
+    const success = blk: {
+        if (term != .Exited) break :blk false;
+        if (term.Exited != 0) break :blk false;
+        break :blk true;
+    };
+    
+    if (!success) {
         return error.ProcessError;
     }
 

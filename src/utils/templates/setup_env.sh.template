@@ -40,7 +40,7 @@ if [ "$FORCE_REBUILD" = "true" ]; then
   ohai "Force rebuild flag (--rebuild) detected"
   info "Will recreate the virtual environment if it exists"
 else
-  ohai "Normal setup mode (use --rebuild to force recreation)"
+  ohai "Normal setup mode"
 fi
 
 # Check if module command exists
