@@ -40,7 +40,7 @@ if [ "$FORCE_REBUILD" = "true" ]; then
   ohai "Force rebuild flag (--rebuild) detected"
   info "Will recreate the virtual environment if it exists"
 else
-  ohai "Normal setup mode (use --rebuild to force recreation)"
+  ohai "Normal setup mode"
 fi
 
 # Handle modules_verified flag
@@ -53,7 +53,7 @@ if command -v module >/dev/null 2>&1; then
 
   # Load modules based on verification status
   if [ "$MODULES_VERIFIED" = "true" ]; then
-    ohai "Modules were pre-verified, proceeding with loading"
+    # ohai "Modules were pre-verified, proceeding with loading"
     # We still need to load the modules to access the Python they provide
     # But if any fails, we'll continue since we verified they should work
     @@MODULE_LOADING_BLOCK@@
