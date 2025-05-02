@@ -1,14 +1,19 @@
 # zenv
+zenv: Python Environment Manager for HPC and Development Systems
 
-`zenv` is a flexible python environment manager that simplifies the setup, activation, and management of project environments **for supercomputers**
+`zenv`  is a command-line tool written in Zig that manages Python virtual environments, primarily designed for High-Performance Computing (HPC) environments and development systems.
 
 ## Features
 
-- **Environment Setup**: Creates a virtual environment with specific dependencies with a single `zenv.json` file.
-- **Module Support**: Integrate with HPC module systems, specified in the same `zenv.json`
-- **Machine-Specific Environments**: Configure environments for specific target machines
-- **Operations from any directory**: Environments can be located anywhere(project directory or a global location) but all are registered at `~/.zenv/registry.json`, so operations like activation, listing and changing directories can be done from any directory location
-- **Validation**: Input validation, modules validation, intersection(dependecies, modules) validation
+### Core Functionality
+
+The tool provides several key features:
+
+1. **Environment Management**: Create, activate, and manage Python virtual environments with configurations stored in `zenv.json`
+2. **Registry**: Track environments globally so they can be activated from any directory
+3. **System Targeting**: Configure environments for specific machines or clusters
+4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules
+5. **Module Integration**: Load HPC modules required for environment setup
 
 ## Installation
 
@@ -53,6 +58,28 @@ export PATH="$PATH:path/to/zig-out/bin"
 Check [release](https://github.com/anoopkcn/zenv/releases) for specific versions.
 Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`).
 Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
+
+## Configuration
+
+`zenv` uses a JSON configuration file (`zenv.json`) that defines:
+
+1. **Base Directory**: Where virtual environments are stored
+2. **Environment Definitions**:
+   - Target machines they should run on
+   - Python modules to load
+   - Dependencies to install
+   - Custom activation variables and commands
+
+### Registry Mechanism
+
+The global registry (`~/.zenv/registry.json`) tracks all environments with:
+- Unique IDs (SHA-1 hash)
+- Environment names
+- Project directories
+- Virtual environment paths
+- Target machine definitions
+
+This enables activating environments from any directory with `source $(zenv activate <env_name>)`.
 
 ## Usage
 
