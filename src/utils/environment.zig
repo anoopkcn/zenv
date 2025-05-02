@@ -197,7 +197,7 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
         if (term.Exited != 0) break :blk false;
         break :blk true;
     };
-    
+
     if (!success) {
         std.log.err("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr });
         return error.ProcessError;
@@ -523,7 +523,7 @@ pub fn checkModulesAvailability(
         if (check_term.Exited != 0) break :blk false;
         break :blk true;
     };
-    
+
     if (!module_exists) {
         std.log.warn("'module' command not found, skipping module availability check.", .{});
         return .{ .available = false, .missing = null };
@@ -535,11 +535,9 @@ pub fn checkModulesAvailability(
 
     // Check each module individually
     for (modules) |module_name| {
-        // Try both common module systems (Environment Modules and Lmod)
-        const avail_cmd = try std.fmt.allocPrint(allocator,
-            "module --terse avail {s} 2>/dev/null || module --terse spider {s} 2>/dev/null",
-            .{ module_name, module_name });
+        const avail_cmd = try std.fmt.allocPrint(allocator, "module --terse avail {s} 2>&1", .{module_name});
         defer allocator.free(avail_cmd);
+        errors.debugLog(allocator, "Checking module: {s}", .{avail_cmd});
 
         const avail_argv = [_][]const u8{ "sh", "-c", avail_cmd };
         var avail_child = std.process.Child.init(&avail_argv, allocator);
@@ -547,26 +545,24 @@ pub fn checkModulesAvailability(
         avail_child.stderr_behavior = .Pipe;
         try avail_child.spawn();
 
-        // Capture output (we'll need it only if we want to parse versions)
-        const stdout = try avail_child.stdout.?.reader().readAllAlloc(allocator, 10*1024);
-        defer allocator.free(stdout);
+        var stdout_content: []const u8 = "";
+        var has_stdout = false;
+        defer if (has_stdout) allocator.free(stdout_content);
 
-        // Drain stderr (don't need it but must be read)
-        const stderr = try avail_child.stderr.?.reader().readAllAlloc(allocator, 1024);
-        defer allocator.free(stderr);
+        if (avail_child.stdout) |stdout_pipe| {
+            stdout_content = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
+            has_stdout = true;
+        }
 
         const term = try avail_child.wait();
 
-        // If module check failed or no output, module isn't available
-        const module_available = blk: {
-            // Check if termination was successful
-            if (term != .Exited) break :blk false;
-            if (term.Exited != 0) break :blk false;
-            // Check if we got any output
-            if (stdout.len == 0) break :blk false;
-            // Module appears to be available
-            break :blk true;
-        };
+        errors.debugLog(allocator, "stdout for module '{s}': '{s}'", .{ module_name, stdout_content });
+        errors.debugLog(allocator, "Module '{s}' command exit code: {}", .{ module_name, term.Exited });
+
+        // Based on observed behavior: for --terse avail
+        // 1. If module exists: Returns output with module info
+        // 2. If module doesn't exist: Returns no output (exit code 0)
+        const module_available = stdout_content.len > 0;
 
         if (!module_available) {
             try missing_modules.append(module_name);
@@ -582,57 +578,39 @@ pub fn checkModulesAvailability(
     return .{ .available = true, .missing = null };
 }
 
-pub fn validateModules(allocator: Allocator, modules: []const []const u8) !void {
-    if (modules.len == 0) return;
-
-    // Check if module command exists
-    const check_cmd = "command -v module";
-    const check_argv = [_][]const u8{ "sh", "-c", check_cmd };
-    var check_child = std.process.Child.init(&check_argv, allocator);
-    check_child.stdout_behavior = .Ignore;
-    check_child.stderr_behavior = .Ignore;
-    try check_child.spawn();
-    const check_term = try check_child.wait();
-    
-    // Check if module command exists
-    const module_exists = blk: {
-        if (check_term != .Exited) break :blk false;
-        if (check_term.Exited != 0) break :blk false;
-        break :blk true;
-    };
-    
-    if (!module_exists) {
-        std.log.warn("'module' command not found, skipping module validation.", .{});
-        return;
+pub fn validateModules(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    force_deps: bool,
+) !bool {
+    const modules = env_config.modules.items;
+    if (modules.len == 0) {
+        // No modules required, that's fine
+        return true;
     }
 
-    // Build the shell script: purge, then load each module
-    var script = try std.fmt.allocPrint(allocator, "module --force purge", .{});
-    defer allocator.free(script);
-    for (modules) |module_name| {
-        const line = try std.fmt.allocPrint(allocator, " && module load \"{s}\"", .{module_name});
-        defer allocator.free(line);
-        script = try std.fmt.allocPrint(allocator, "{s}{s}", .{ script, line });
-    }
+    std.log.info("Step 0: Checking availability of {} required modules...", .{modules.len});
+    const result = try checkModulesAvailability(allocator, modules);
 
-    // Run the script in a single shell, inheriting all stdio
-    const argv = [_][]const u8{ "sh", "-c", script };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
+    if (!result.available) {
+        // If force_deps is true, we can continue even with missing modules
+        if (force_deps) {
+            std.log.warn("The following modules are not available but will be skipped due to --force-deps:", .{});
+            for (result.missing.?) |module| {
+                std.log.warn("  - {s}", .{module});
+            }
+            return true;
+        }
 
-    // If any module fails to load, the shell will exit with a nonzero status
-    const success = blk: {
-        if (term != .Exited) break :blk false;
-        if (term.Exited != 0) break :blk false;
-        break :blk true;
-    };
-    
-    if (!success) {
-        std.log.warn("One or more modules could not be loaded. See output above.", .{});
+        // Otherwise, error out
+        std.log.err("The following modules are not available:", .{});
+        for (result.missing.?) |module| {
+            std.log.err("  - {s}", .{module});
+        }
+        std.log.err("Aborting setup because required modules are not available.", .{});
+        std.log.err("Please ensure the specified modules are installed on this system.", .{});
         return error.ModuleLoadError;
     }
+
+    return true;
 }
