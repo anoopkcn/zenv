@@ -108,6 +108,7 @@ pub fn handleSetupCommand(
     std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
 
     // 0. Check the availability of modules
+    var modules_verified = false;
     if (env_config.modules.items.len > 0) {
         std.log.info("Step 0: Checking availability of {d} required modules...", .{env_config.modules.items.len});
         const module_check = env.checkModulesAvailability(allocator, env_config.modules.items) catch |err| {
@@ -129,6 +130,7 @@ pub fn handleSetupCommand(
             return;
         } else {
             std.log.info("All modules appear to be available.", .{});
+            modules_verified = true;
         }
     }
 
@@ -243,6 +245,7 @@ pub fn handleSetupCommand(
         &all_required_deps,
         flags.force_deps,
         flags.force_rebuild,
+        modules_verified,
     ) catch |err| {
         handleErrorFn(err);
         return;

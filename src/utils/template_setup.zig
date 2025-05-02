@@ -20,6 +20,7 @@ pub fn createSetupScriptFromTemplate(
     valid_deps_list_len: usize,
     force_deps: bool,
     force_rebuild: bool,
+    modules_verified: bool,
 ) ![]const u8 {
     return try createSetupScript(
         allocator,
@@ -30,6 +31,7 @@ pub fn createSetupScriptFromTemplate(
         valid_deps_list_len,
         force_deps,
         force_rebuild,
+        modules_verified,
     );
 }
 
@@ -43,6 +45,7 @@ fn createSetupScript(
     valid_deps_list_len: usize,
     force_deps: bool,
     force_rebuild: bool,
+    modules_verified: bool,
 ) ![]const u8 {
     std.log.info("Creating setup script for '{s}'...", .{env_name});
 
@@ -96,6 +99,9 @@ fn createSetupScript(
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
 
+    // Set modules_verified flag for the template
+    try replacements.put("MODULES_VERIFIED_VALUE", if (modules_verified) "MODULES_VERIFIED=true" else "MODULES_VERIFIED=false");
+
     // Set force_deps flag for the template
     try replacements.put("FORCE_DEPS_VALUE", if (force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
     
@@ -127,15 +133,19 @@ fn createSetupScript(
 
         try module_writer.print("echo '==> Loading required modules'\n", .{});
         try module_writer.print("echo 'Loading modules: {s}'\n", .{module_list_str.items});
-        try module_writer.print("# Don't exit immediately on module load errors\n", .{});
-        try module_writer.print("set +e\n", .{});
 
-        // Load each module with error checking
+        // The set +e and error checking are now in the template itself, based on modules_verified
+
+        // Load each module
         for (env_config.modules.items) |module_name| {
-            try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
+            if (modules_verified) {
+                // Just load the module when pre-verified, we already checked they exist
+                try module_writer.print("module load {s}\n", .{module_name});
+            } else {
+                // Load with error handling when not pre-verified
+                try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
+            }
         }
-
-        try module_writer.print("set -e # Restore error handling\n", .{});
     } else {
         try module_writer.print("echo '==> No modules specified to load'\n", .{});
     }

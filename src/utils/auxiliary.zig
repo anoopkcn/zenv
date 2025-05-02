@@ -106,6 +106,7 @@ pub fn installDependencies(
     all_required_deps: *std.ArrayList([]const u8),
     force_deps: bool,
     force_rebuild: bool,
+    modules_verified: bool,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice();
@@ -121,7 +122,16 @@ pub fn installDependencies(
     }
 
     // Call the main environment setup function
-    try setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps, force_rebuild);
+    try setupEnvironment(
+        allocator, 
+        env_config, 
+        env_name, 
+        base_dir, 
+        deps_slice, 
+        force_deps, 
+        force_rebuild,
+        modules_verified
+    );
 }
 
 // Sets up the full environment: creates files, generates and runs setup script.
@@ -133,6 +143,7 @@ pub fn setupEnvironment(
     deps: []const []const u8,
     force_deps: bool,
     force_rebuild: bool,
+    modules_verified: bool,
 ) !void {
     std.log.info("Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir });
 
@@ -235,6 +246,7 @@ pub fn setupEnvironment(
         valid_deps_list.items.len,
         force_deps,
         force_rebuild,
+        modules_verified,
     );
     defer allocator.free(script_content);
 
