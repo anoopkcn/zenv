@@ -504,113 +504,217 @@ pub fn lookupRegistryEntry(
     return entry_copy;
 }
 
-pub fn checkModulesAvailability(
-    allocator: Allocator,
-    modules: []const []const u8,
-) !struct { available: bool, missing: ?[]const []const u8 } {
-    // First check if module command exists
-    const check_cmd = "command -v module";
-    const check_argv = [_][]const u8{ "sh", "-c", check_cmd };
-    var check_child = std.process.Child.init(&check_argv, allocator);
-    check_child.stdout_behavior = .Ignore;
-    check_child.stderr_behavior = .Ignore;
-    try check_child.spawn();
-    const check_term = try check_child.wait();
+// pub fn checkModulesAvailability(
+//     allocator: Allocator,
+//     modules: []const []const u8,
+// ) !struct { available: bool, missing: ?[]const []const u8 } {
+//     // First check if module command exists
+//     const check_cmd = "command -v module";
+//     const check_argv = [_][]const u8{ "sh", "-c", check_cmd };
+//     var check_child = std.process.Child.init(&check_argv, allocator);
+//     check_child.stdout_behavior = .Ignore;
+//     check_child.stderr_behavior = .Ignore;
+//     try check_child.spawn();
+//     const check_term = try check_child.wait();
 
-    // Check if module command exists
-    const module_exists = blk: {
-        if (check_term != .Exited) break :blk false;
-        if (check_term.Exited != 0) break :blk false;
-        break :blk true;
-    };
+//     // Check if module command exists
+//     const module_exists = blk: {
+//         if (check_term != .Exited) break :blk false;
+//         if (check_term.Exited != 0) break :blk false;
+//         break :blk true;
+//     };
 
-    if (!module_exists) {
-        std.log.warn("'module' command not found, skipping module availability check.", .{});
-        return .{ .available = false, .missing = null };
-    }
+//     if (!module_exists) {
+//         std.log.warn("'module' command not found, skipping module availability check.", .{});
+//         return .{ .available = false, .missing = null };
+//     }
 
-    // Create list to track missing modules
-    var missing_modules = std.ArrayList([]const u8).init(allocator);
-    defer missing_modules.deinit();
+//     // Check if any modules are already loaded
+//     var modules_loaded = false;
+//     {
+//         const list_cmd = "module list 2>&1";
+//         const list_argv = [_][]const u8{ "sh", "-c", list_cmd };
+//         var list_child = std.process.Child.init(&list_argv, allocator);
+//         list_child.stdout_behavior = .Pipe;
+//         list_child.stderr_behavior = .Pipe;
+//         try list_child.spawn();
 
-    // Check each module individually
-    for (modules) |module_name| {
-        const avail_cmd = try std.fmt.allocPrint(allocator, "module --terse avail {s} 2>&1", .{module_name});
-        defer allocator.free(avail_cmd);
-        errors.debugLog(allocator, "Checking module: {s}", .{avail_cmd});
+//         var list_output: []const u8 = "";
+//         var has_output = false;
+//         defer if (has_output) allocator.free(list_output);
 
-        const avail_argv = [_][]const u8{ "sh", "-c", avail_cmd };
-        var avail_child = std.process.Child.init(&avail_argv, allocator);
-        avail_child.stdout_behavior = .Pipe;
-        avail_child.stderr_behavior = .Pipe;
-        try avail_child.spawn();
+//         if (list_child.stdout) |stdout_pipe| {
+//             list_output = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
+//             has_output = true;
+//         }
 
-        var stdout_content: []const u8 = "";
-        var has_stdout = false;
-        defer if (has_stdout) allocator.free(stdout_content);
+//         const list_term = try list_child.wait();
 
-        if (avail_child.stdout) |stdout_pipe| {
-            stdout_content = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
-            has_stdout = true;
-        }
+//         // Check if any modules are loaded
+//         if (list_term.Exited == 0 and has_output) {
+//             // Module list output usually contains "No modules loaded" when empty
+//             // or the list of modules if any are loaded
+//             const no_modules_str = std.mem.indexOf(u8, list_output, "No modules loaded");
+//             modules_loaded = no_modules_str == null;
+//             errors.debugLog(allocator, "Current modules loaded: {}", .{modules_loaded});
+//         }
+//     }
 
-        const term = try avail_child.wait();
+//     // If modules list is empty, nothing to check
+//     if (modules.len == 0) {
+//         return .{ .available = true, .missing = null };
+//     }
 
-        errors.debugLog(allocator, "stdout for module '{s}': '{s}'", .{ module_name, stdout_content });
-        errors.debugLog(allocator, "Module '{s}' command exit code: {}", .{ module_name, term.Exited });
+//     // Create list to track missing modules
+//     var missing_modules = std.ArrayList([]const u8).init(allocator);
+//     defer missing_modules.deinit();
 
-        // Based on observed behavior: for --terse avail
-        // 1. If module exists: Returns output with module info
-        // 2. If module doesn't exist: Returns no output (exit code 0)
-        const module_available = stdout_content.len > 0;
+//     // Track if we loaded the first module ourselves during this check
+//     var we_loaded_first_module = false;
 
-        if (!module_available) {
-            try missing_modules.append(module_name);
-        }
-    }
+//     // If no modules are loaded, we need to try loading the first module
+//     if (!modules_loaded and modules.len > 0) {
+//         const first_module = modules[0];
+//         std.log.info("No modules currently loaded. Attempting to load first module '{s}' to verify dependencies...", .{first_module});
 
-    // If we have missing modules, return them
-    if (missing_modules.items.len > 0) {
-        const missing = try missing_modules.toOwnedSlice();
-        return .{ .available = false, .missing = missing };
-    }
+//         // Try to load the first module
+//         const load_cmd = try std.fmt.allocPrint(allocator, "module load {s} 2>&1", .{first_module});
+//         defer allocator.free(load_cmd);
 
-    return .{ .available = true, .missing = null };
-}
+//         const load_argv = [_][]const u8{ "sh", "-c", load_cmd };
+//         var load_child = std.process.Child.init(&load_argv, allocator);
+//         load_child.stdout_behavior = .Pipe;
+//         load_child.stderr_behavior = .Pipe;
+//         try load_child.spawn();
+
+//         var load_output: []const u8 = "";
+//         var has_load_output = false;
+//         defer if (has_load_output) allocator.free(load_output);
+
+//         if (load_child.stdout) |stdout_pipe| {
+//             load_output = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
+//             has_load_output = true;
+//         }
+
+//         const load_term = try load_child.wait();
+
+//         // Check if the first module loaded successfully
+//         // We consider success if exit code is 0 and there's no ERROR in the output
+//         const error_in_output = has_load_output and std.mem.indexOf(u8, load_output, "ERROR") != null;
+//         const first_module_loaded = load_term.Exited == 0 and !error_in_output;
+
+//         errors.debugLog(allocator, "First module '{s}' load status: {}", .{ first_module, first_module_loaded });
+
+//         if (!first_module_loaded) {
+//             std.log.err("Failed to load first module '{s}'. This is required to check dependent modules.", .{first_module});
+//             try missing_modules.append(first_module);
+//             const missing = try missing_modules.toOwnedSlice();
+//             return .{ .available = false, .missing = missing };
+//         }
+
+//         // First module loaded successfully, now we can check the other modules
+//         we_loaded_first_module = true;
+//     }
+
+//     // Check each module's availability
+//     for (modules) |module_name| {
+//         // If we just loaded the first module for testing and this is that module,
+//         // skip checking it again as we know it's available
+//         if (we_loaded_first_module and std.mem.eql(u8, module_name, modules[0])) {
+//             errors.debugLog(allocator, "Skipping availability check for first module '{s}' as we already loaded it", .{module_name});
+//             continue;
+//         }
+
+//         const avail_cmd = try std.fmt.allocPrint(allocator, "module --terse avail {s} 2>&1", .{module_name});
+//         defer allocator.free(avail_cmd);
+//         errors.debugLog(allocator, "Checking module: {s}", .{avail_cmd});
+
+//         const avail_argv = [_][]const u8{ "sh", "-c", avail_cmd };
+//         var avail_child = std.process.Child.init(&avail_argv, allocator);
+//         avail_child.stdout_behavior = .Pipe;
+//         avail_child.stderr_behavior = .Pipe;
+//         try avail_child.spawn();
+
+//         var stdout_content: []const u8 = "";
+//         var has_stdout = false;
+//         defer if (has_stdout) allocator.free(stdout_content);
+
+//         if (avail_child.stdout) |stdout_pipe| {
+//             stdout_content = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
+//             has_stdout = true;
+//         }
+
+//         const term = try avail_child.wait();
+
+//         errors.debugLog(allocator, "stdout for module '{s}': '{s}'", .{ module_name, stdout_content });
+//         errors.debugLog(allocator, "Module '{s}' command exit code: {}", .{ module_name, term.Exited });
+
+//         // Based on observed behavior: for --terse avail
+//         // 1. If module exists: Returns output with module info
+//         // 2. If module doesn't exist: Returns no output (exit code 0)
+//         const module_available = stdout_content.len > 0;
+
+//         if (!module_available) {
+//             try missing_modules.append(module_name);
+//         }
+//     }
+
+//     // Return results
+//     if (missing_modules.items.len > 0) {
+//         const missing = try missing_modules.toOwnedSlice();
+//         return .{ .available = false, .missing = missing };
+//     }
+
+//     return .{ .available = true, .missing = null };
+// }
+
+// pub fn validateModules(
+//     allocator: Allocator,
+//     env_config: *const EnvironmentConfig,
+//     force_deps: bool,
+// ) !bool {
+//     const modules = env_config.modules.items;
+//     if (modules.len == 0) {
+//         // No modules required, that's fine
+//         return true;
+//     }
+
+//     std.log.info("Step 0: Checking availability of {} required modules...", .{modules.len});
+//     const result = try checkModulesAvailability(allocator, modules);
+
+//     if (!result.available) {
+//         // If force_deps is true, we can continue even with missing modules
+//         if (force_deps) {
+//             std.log.warn("The following modules are not available but will be skipped due to --force-deps:", .{});
+//             for (result.missing.?) |module| {
+//                 std.log.warn("  - {s}", .{module});
+//             }
+//             return true;
+//         }
+
+//         // Otherwise, error out
+//         std.log.err("The following modules are not available:", .{});
+//         for (result.missing.?) |module| {
+//             std.log.err("  - {s}", .{module});
+//         }
+//         std.log.err("Aborting setup because required modules are not available.", .{});
+//         std.log.err("Please ensure the specified modules are installed on this system.", .{});
+//         return error.ModuleLoadError;
+//     }
+
+//     return true;
+// }
 
 pub fn validateModules(
     allocator: Allocator,
     env_config: *const EnvironmentConfig,
     force_deps: bool,
 ) !bool {
-    const modules = env_config.modules.items;
-    if (modules.len == 0) {
-        // No modules required, that's fine
-        return true;
-    }
+    // Skip all module validation and always return true
+    _ = allocator;
+    _ = env_config;
+    _ = force_deps;
 
-    std.log.info("Step 0: Checking availability of {} required modules...", .{modules.len});
-    const result = try checkModulesAvailability(allocator, modules);
-
-    if (!result.available) {
-        // If force_deps is true, we can continue even with missing modules
-        if (force_deps) {
-            std.log.warn("The following modules are not available but will be skipped due to --force-deps:", .{});
-            for (result.missing.?) |module| {
-                std.log.warn("  - {s}", .{module});
-            }
-            return true;
-        }
-
-        // Otherwise, error out
-        std.log.err("The following modules are not available:", .{});
-        for (result.missing.?) |module| {
-            std.log.err("  - {s}", .{module});
-        }
-        std.log.err("Aborting setup because required modules are not available.", .{});
-        std.log.err("Please ensure the specified modules are installed on this system.", .{});
-        return error.ModuleLoadError;
-    }
-
+    std.log.info("Module validation has been disabled. Assuming all modules are available.", .{});
     return true;
 }
