@@ -99,7 +99,7 @@ Example of a `zenv.json` file:
   "env_name": {
     "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
     "fallback_python": null,
-    "requirements_file": "requirements.txt",
+    "dependency_file": "requirements.txt",
     "description": "Basic environment for jureca and juwels",
     "modules": ["Stages/2025", "StdEnv", "Python", "CUDA"],
     "dependencies": ["numpy>=1.20.0", "pandas"]
@@ -107,7 +107,7 @@ Example of a `zenv.json` file:
 }
 ```
 
-Provided `dependencies` will be installed in addition to the dependencies found in the optional `requirements_file` which can be (`requirements.txt` or a `pyproject.toml` file)
+Provided `dependencies` will be installed in addition to the dependencies found in the optional `dependency_file` which can be (`requirements.txt` or a `pyproject.toml` file)
 
 ### Listing environments
 
@@ -177,7 +177,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "fallback_python": "<path_to_python_or_null>",
     "description": "<optional_description_or_null>",
     "modules": ["<module1>", "<module2>"],
-    "requirements_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
+    "dependency_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
     "dependencies": ["<package_name_version>"],
     "setup_commands": ["<custom commands to run during setup process>"],
     "custom_activate_vars": {
@@ -191,7 +191,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
 }
 ```
 
-In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `requirements_file` is the same directory as `zenv.json`.
+In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
 ## Help
 

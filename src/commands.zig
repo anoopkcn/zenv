@@ -116,13 +116,13 @@ pub fn handleSetupCommand(
             handleErrorFn(error.ModuleLoadError);
             return;
         };
-        
+
         if (!modules_available) {
             // Error messages already printed by validateModules
             handleErrorFn(error.ModuleLoadError);
             return;
         }
-        
+
         std.log.info("All modules appear to be available.", .{});
         modules_verified = true;
     }
@@ -161,7 +161,7 @@ pub fn handleSetupCommand(
     }
 
     // Add dependencies from requirements file if specified
-    if (env_config.requirements_file) |req_file| {
+    if (env_config.dependency_file) |req_file| {
         // Check if the specified requirements file actually exists
         std.fs.cwd().access(req_file, .{}) catch |err| {
             if (err == error.FileNotFound) {

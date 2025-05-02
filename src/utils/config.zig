@@ -42,7 +42,7 @@ pub const EnvironmentConfig = struct {
     target_machines: ArrayList([]const u8),
     description: ?[]const u8 = null,
     modules: ArrayList([]const u8),
-    requirements_file: ?[]const u8 = null,
+    dependency_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
     fallback_python: ?[]const u8 = null,
     custom_activate_vars: StringHashMap([]const u8),
@@ -56,7 +56,7 @@ pub const EnvironmentConfig = struct {
             .dependencies = ArrayList([]const u8).init(allocator),
             .custom_activate_vars = StringHashMap([]const u8).init(allocator),
             .description = null,
-            .requirements_file = null,
+            .dependency_file = null,
             .setup_commands = null,
             .activate_commands = null,
             .fallback_python = null,
@@ -81,7 +81,7 @@ pub const EnvironmentConfig = struct {
         self.custom_activate_vars.deinit();
 
         if (self.description) |desc| self.target_machines.allocator.free(desc);
-        if (self.requirements_file) |req| self.target_machines.allocator.free(req);
+        if (self.dependency_file) |req| self.target_machines.allocator.free(req);
 
         if (self.setup_commands) |*cmds| {
             for (cmds.items) |item| cmds.allocator.free(item);
@@ -281,8 +281,8 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
             env.modules = try Parse.getStringArray(allocator, mods);
         }
 
-        if (env_value.object.get("requirements_file")) |req| {
-            env.requirements_file = try Parse.getString(allocator, req, null);
+        if (env_value.object.get("dependency_file")) |req| {
+            env.dependency_file = try Parse.getString(allocator, req, null);
         }
 
         if (env_value.object.get("dependencies")) |deps| {

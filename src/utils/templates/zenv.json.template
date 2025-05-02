@@ -10,7 +10,7 @@
         "Python"
     ],
     "dependencies": [],
-    "requirements_file": null,
+    "dependency_file": null,
     "setup_commands": [],
     "custom_activate_vars": {},
     "activate_commands": []
@@ -25,7 +25,7 @@
         "Python"
     ],
     "dependencies": ["tqdm"],
-    "requirements_file": "requirements.txt",
+    "dependency_file": "requirements.txt",
     "setup_commands": [
       "echo 'Development environment setup complete!'"
     ],
