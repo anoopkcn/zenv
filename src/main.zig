@@ -39,12 +39,6 @@ fn printUsage() void {
         \\
         \\Manages environments based on zenv.json configuration.
         \\
-        \\Configuration (zenv.json):
-        \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
-        \\  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
-        \\  Can be relative to zenv.json location or an absolute path(starts with a /).
-        \\  Defaults to "base_dir": "zenv" if omitted.
-        \\
         \\Commands:
         \\  init                      Create a new zenv.json template file in the current directory.
         \\
@@ -84,8 +78,14 @@ fn printUsage() void {
         \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
         \\                            Useful when modules change or Python version needs to be updated.
         \\
-        \\Registry:
-        \\  The global registry (~/.zenv/registry.json) allows you to manage environments from any directory.
+        \\Configuration (zenv.json):
+        \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
+        \\  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
+        \\  Can be relative to zenv.json location or an absolute path(starts with a /).
+        \\  Defaults to "base_dir": "zenv" if omitted.
+        \\
+        \\Registry (~/.zenv/registry.json):
+        \\  The global registry allows you to manage environments from any directory.
         \\  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
         \\  Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
         \\  Also the project directory can be 'cd' into from anywhere using 'source $(zenv cd <env_name|id>)'
