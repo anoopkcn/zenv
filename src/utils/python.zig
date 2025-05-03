@@ -374,5 +374,5 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     std.log.info("Python {s} has been successfully installed!", .{python_version});
     std.log.info("Installation path: {s}", .{install_dir});
     std.log.info("To set this as the default Python for new environments:", .{});
-    std.log.info("  zenv python use {s}", .{python_version});
+    std.log.info("zenv python use {s}", .{python_version});
 }
