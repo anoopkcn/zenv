@@ -62,7 +62,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     const default_path = try getDefaultPythonPath(allocator);
     defer if (default_path) |path| allocator.free(path);
 
-    std.log.info("Installed Python versions:\n", .{});
+    std.log.info("Installed Python versions:", .{});
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
