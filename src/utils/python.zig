@@ -113,7 +113,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         std.log.info("No Python versions installed yet", .{});
         std.log.info("Use 'zenv python install <version>' to install a Python version", .{});
     } else {
-        std.log.info("Use 'zenv python use <version>' to set a version as default\n", .{});
+        std.log.info("Use 'zenv python use <version>' to set a version as default", .{});
     }
 }
 
