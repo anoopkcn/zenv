@@ -90,7 +90,7 @@ fn printUsage() void {
         \\  Can be relative to zenv.json location or an absolute path(starts with a /).
         \\  Defaults to "base_dir": "zenv" if omitted.
         \\
-        \\Registry (~/.zenv/registry.json):
+        \\Registry (ZENV_DIR/registry.json):
         \\  The global registry allows you to manage environments from any directory.
         \\  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
         \\  Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
@@ -200,7 +200,7 @@ pub fn main() anyerror!void {
                     },
                     error.RegistryError => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> Failed to access the environment registry. Check permissions for ~/.zenv directory.\n", .{}) catch {};
+                        stderr.print(" -> Failed to access the environment registry. Check permissions for the zenv directory (ZENV_DIR or ~/.zenv).\n", .{}) catch {};
                     },
                     else => {
                         stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};

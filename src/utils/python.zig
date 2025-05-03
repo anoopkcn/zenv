@@ -2,21 +2,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = std.fs;
 const process = std.process;
+const paths = @import("paths.zig");
 
 // Define Python versions we know work well
 const DEFAULT_PYTHON_VERSION = "3.10.8";
-const KNOWN_GOOD_VERSIONS = [_][]const u8{"3.8.15", "3.9.16", "3.10.8", "3.11.5", "3.12.0"};
 
-// Default installation dir is ~/.zenv/python
+// Default installation dir is in the zenv dir/python
 pub fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
-    // Get home directory
-    const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
-        std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
-        return error.HomeDirectoryNotFound;
-    };
-    defer allocator.free(home_dir);
-
-    return std.fs.path.join(allocator, &[_][]const u8{home_dir, ".zenv", "python"});
+    return paths.getPythonInstallDir(allocator);
 }
 
 // Get path to the Python version for "use" command
@@ -119,20 +112,9 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
 
 // Write the default Python path to a file
 pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
-    const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
-        std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
-        return error.HomeDirectoryNotFound;
-    };
-    defer allocator.free(home_dir);
-
-    // Ensure .zenv directory exists
-    const zenv_dir = try std.fs.path.join(allocator, &[_][]const u8{home_dir, ".zenv"});
+    // Ensure zenv directory exists
+    const zenv_dir = try paths.ensureZenvDir(allocator);
     defer allocator.free(zenv_dir);
-
-    fs.cwd().makePath(zenv_dir) catch |err| {
-        std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
-        return err;
-    };
 
     // Get the full path to the Python installation
     const python_path = try getPythonVersionPath(allocator, version);
@@ -154,13 +136,7 @@ pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
 
 // Get the default Python path from the saved file
 pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
-    const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
-        std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
-        return error.HomeDirectoryNotFound;
-    };
-    defer allocator.free(home_dir);
-
-    const default_file_path = try std.fs.path.join(allocator, &[_][]const u8{home_dir, ".zenv", "default-python"});
+    const default_file_path = try paths.getDefaultPythonFilePath(allocator);
     defer allocator.free(default_file_path);
 
     const content = fs.cwd().readFileAlloc(allocator, default_file_path, 1024) catch |err| {

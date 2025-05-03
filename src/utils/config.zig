@@ -8,6 +8,7 @@ const ZenvError = errors.ZenvError;
 const environment = @import("environment.zig");
 const mem = std.mem;
 const json = std.json;
+const paths = @import("paths.zig");
 
 fn generateSHA1ID(
     allocator: Allocator,
@@ -374,21 +375,8 @@ pub const EnvironmentRegistry = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
-            std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer allocator.free(home_dir);
-
-        const zenv_dir_path = try std.fmt.allocPrint(allocator, "{s}/.zenv", .{home_dir});
+        const zenv_dir_path = try paths.ensureZenvDir(allocator);
         defer allocator.free(zenv_dir_path);
-
-        std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
-                return err;
-            }
-        };
 
         const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
         defer allocator.free(registry_path);
@@ -502,21 +490,8 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn save(self: *const EnvironmentRegistry) !void {
-        const home_dir = std.process.getEnvVarOwned(self.allocator, "HOME") catch |err| {
-            std.log.err("Failed to get HOME environment variable: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer self.allocator.free(home_dir);
-
-        const zenv_dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.zenv", .{home_dir});
+        const zenv_dir_path = try paths.ensureZenvDir(self.allocator);
         defer self.allocator.free(zenv_dir_path);
-
-        std.fs.makeDirAbsolute(zenv_dir_path) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                std.log.err("Failed to create .zenv directory: {s}", .{@errorName(err)});
-                return err;
-            }
-        };
 
         const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
         defer self.allocator.free(registry_path);
