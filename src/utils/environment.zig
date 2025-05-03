@@ -14,10 +14,8 @@ const CommandFlags = flags_module.CommandFlags;
 // Normalizes a hostname for better matching
 // Handles common variations like ".local" suffix on macOS
 fn normalizeHostname(hostname: []const u8) []const u8 {
-    // Remove ".local" suffix common in macOS environments
-    if (std.mem.endsWith(u8, hostname, ".local")) {
-        return hostname[0 .. hostname.len - 6];
-    }
+    // When the target pattern is explicitly "local", we want to keep the ".local" suffix
+    // to allow for pattern matching "local" to match hosts with ".local" suffix
     return hostname;
 }
 
@@ -114,6 +112,11 @@ pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostn
             std.mem.eql(u8, target, "any") or
             std.mem.eql(u8, target, "*"))
         {
+            return true;
+        }
+        
+        // Special case for "local" which should match any hostname with ".local" suffix
+        if (std.mem.eql(u8, target, "local") and std.mem.endsWith(u8, hostname, ".local")) {
             return true;
         }
 
@@ -267,6 +270,11 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
         std.mem.eql(u8, target_machine, "any") or
         std.mem.eql(u8, target_machine, "*"))
     {
+        return true;
+    }
+    
+    // Special case for "local" which should match any hostname with ".local" suffix
+    if (std.mem.eql(u8, target_machine, "local") and std.mem.endsWith(u8, hostname, ".local")) {
         return true;
     }
 
