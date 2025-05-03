@@ -18,3 +18,4 @@ requirements.txt
 test/
 NOTES.md
 .DS_store
+.envrc
