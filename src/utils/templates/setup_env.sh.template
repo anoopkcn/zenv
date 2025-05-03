@@ -43,6 +43,13 @@ else
   ohai "Normal setup mode"
 fi
 
+# Handle use_default_python flag
+@@USE_DEFAULT_PYTHON_VALUE@@
+if [ "$USE_DEFAULT_PYTHON" = "true" ]; then
+  ohai "Python flag (--python) detected"
+  info "Will use only the default Python from ZENV_DIR/default-python"
+fi
+
 # Handle modules_verified flag
 @@MODULES_VERIFIED_VALUE@@
 
@@ -178,35 +185,45 @@ if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" =
 
   VENV_CREATED=false
 
-  # Try various Python interpreters in order of preference
-  if [ -n "$MODULE_PYTHON" ]; then
-    create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true &&
-    success "Successfully created virtual environment using module-provided Python"
-  fi
-
-  if [ "$VENV_CREATED" = "false" ]; then
-    # Check if this is a custom Python path (potentially from zenv python install)
+  # When --python flag is used, only use the default Python
+  if [ "$USE_DEFAULT_PYTHON" = "true" ]; then
     if [ -n "@@FALLBACK_PYTHON@@" ] && [ "@@FALLBACK_PYTHON@@" != "python3" ]; then
-      if [[ "@@FALLBACK_PYTHON@@" == *".zenv/python/"* ]]; then
-        # This is a zenv managed Python
-        version=$(basename $(dirname $(dirname "@@FALLBACK_PYTHON@@")))
-        ohai "Using zenv-managed Python $version"
-      else
-        # This is a user-specified fallback Python
-        ohai "Using fallback Python: @@FALLBACK_PYTHON@@"
-      fi
-      create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true &&
-      success "Successfully created virtual environment using fallback Python"
+      create_venv "@@FALLBACK_PYTHON@@" "default configured Python" && VENV_CREATED=true &&
+      success "Successfully created virtual environment using default Python"
     else
-      # Fall back to system Python
-      create_venv "python3" "system python3" && VENV_CREATED=true &&
-      success "Successfully created virtual environment using system python3"
+      abort "Default Python not found but --python flag was specified.\nUse 'zenv python use <version>' to set a default Python first."
     fi
-  fi
+  else
+    # Try various Python interpreters in order of preference
+    if [ -n "$MODULE_PYTHON" ]; then
+      create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true &&
+      success "Successfully created virtual environment using module-provided Python"
+    fi
 
-  if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "python" "system python" && VENV_CREATED=true &&
-    success "Successfully created virtual environment using system python"
+    if [ "$VENV_CREATED" = "false" ]; then
+      # Check if this is a custom Python path (potentially from zenv python install)
+      if [ -n "@@FALLBACK_PYTHON@@" ] && [ "@@FALLBACK_PYTHON@@" != "python3" ]; then
+        if [[ "@@FALLBACK_PYTHON@@" == *".zenv/python/"* ]]; then
+          # This is a zenv managed Python
+          version=$(basename $(dirname $(dirname "@@FALLBACK_PYTHON@@")))
+          ohai "Using zenv-managed Python $version"
+        else
+          # This is a user-specified fallback Python
+          ohai "Using fallback Python: @@FALLBACK_PYTHON@@"
+        fi
+        create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true &&
+        success "Successfully created virtual environment using fallback Python"
+      else
+        # Fall back to system Python
+        create_venv "python3" "system python3" && VENV_CREATED=true &&
+        success "Successfully created virtual environment using system python3"
+      fi
+    fi
+
+    if [ "$VENV_CREATED" = "false" ]; then
+      create_venv "python" "system python" && VENV_CREATED=true &&
+      success "Successfully created virtual environment using system python"
+    fi
   fi
 
   if [ "$VENV_CREATED" = "false" ]; then

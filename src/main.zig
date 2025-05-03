@@ -66,7 +66,7 @@ fn printUsage() void {
         \\
         \\  python <subcommand>       Python management commands:
         \\    install <version>       Install a specified Python version (e.g., 3.10.8)
-        \\    use <version>           Set the specified version as the fallback_python for new environments
+        \\    use <version>           Set the specified version as the pinned python version.
         \\    list                    List all installed Python versions
         \\
         \\  version, -v, --version    Print the zenv version.
@@ -83,6 +83,10 @@ fn printUsage() void {
         \\
         \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
         \\                            Useful when modules change or Python version needs to be updated.
+        \\
+        \\  --python                  Use only the default Python set with 'zenv python use <version>'.
+        \\                            This ignores any module-provided Python and other configuration.
+        \\                            Will error if no default Python is configured.
         \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:

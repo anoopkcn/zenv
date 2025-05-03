@@ -107,6 +107,7 @@ pub fn installDependencies(
     force_deps: bool,
     force_rebuild: bool,
     modules_verified: bool,
+    use_default_python: bool,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice();
@@ -130,7 +131,8 @@ pub fn installDependencies(
         deps_slice, 
         force_deps, 
         force_rebuild,
-        modules_verified
+        modules_verified,
+        use_default_python
     );
 }
 
@@ -144,6 +146,7 @@ pub fn setupEnvironment(
     force_deps: bool,
     force_rebuild: bool,
     modules_verified: bool,
+    use_default_python: bool,
 ) !void {
     std.log.info("Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir });
 
@@ -247,6 +250,7 @@ pub fn setupEnvironment(
         force_deps,
         force_rebuild,
         modules_verified,
+        use_default_python,
     );
     defer allocator.free(script_content);
 

@@ -21,6 +21,7 @@ pub fn createSetupScriptFromTemplate(
     force_deps: bool,
     force_rebuild: bool,
     modules_verified: bool,
+    use_default_python: bool,
 ) ![]const u8 {
     return try createSetupScript(
         allocator,
@@ -32,6 +33,7 @@ pub fn createSetupScriptFromTemplate(
         force_deps,
         force_rebuild,
         modules_verified,
+        use_default_python,
     );
 }
 
@@ -46,6 +48,7 @@ fn createSetupScript(
     force_deps: bool,
     force_rebuild: bool,
     modules_verified: bool,
+    use_default_python: bool,
 ) ![]const u8 {
     std.log.info("Creating setup script for '{s}'...", .{env_name});
 
@@ -91,23 +94,46 @@ fn createSetupScript(
     
     // Get the fallback python to use
     var fallback_python: []const u8 = undefined;
-    if (env_config.fallback_python) |py| {
-        // Use the explicitly configured fallback Python
-        fallback_python = py;
-    } else {
+
+    // When --python flag is used, try to get the default Python
+    if (use_default_python) {
         // Try to get the default Python path
-        if (@import("python.zig").getDefaultPythonPath(allocator)) |default_python| {
-            if (default_python) |path| {
-                // Build the full path to the Python binary
-                const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
-                defer allocator.free(python_bin);
-                fallback_python = try allocator.dupe(u8, python_bin);
-            } else {
-                fallback_python = "python3"; // No default Python path found
+        const default_python = @import("python.zig").getDefaultPythonPath(allocator) catch |err| {
+            std.log.err("Failed to read default Python path with --python flag: {s}", .{@errorName(err)});
+            return error.MissingPythonExecutable;
+        };
+
+        if (default_python) |path| {
+            // Build the full path to the Python binary
+            const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
+            defer allocator.free(python_bin);
+            fallback_python = try allocator.dupe(u8, python_bin);
+            std.log.info("Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
+        } else {
+            std.log.err("--python flag specified but no default Python configured", .{});
+            std.log.err("Set a default Python first: zenv python use <version>", .{});
+            return error.MissingPythonExecutable;
+        }
+    } else {
+        // Normal behavior without --python flag
+        if (env_config.fallback_python) |py| {
+            // Use the explicitly configured fallback Python
+            fallback_python = py;
+        } else {
+            // Try to get the default Python path
+            if (@import("python.zig").getDefaultPythonPath(allocator)) |default_python| {
+                if (default_python) |path| {
+                    // Build the full path to the Python binary
+                    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
+                    defer allocator.free(python_bin);
+                    fallback_python = try allocator.dupe(u8, python_bin);
+                } else {
+                    fallback_python = "python3"; // No default Python path found
+                }
+            } else |err| {
+                std.log.warn("Failed to get default Python path: {s}", .{@errorName(err)});
+                fallback_python = "python3"; // Default to python3 if no default is configured
             }
-        } else |err| {
-            std.log.warn("Failed to get default Python path: {s}", .{@errorName(err)});
-            fallback_python = "python3"; // Default to python3 if no default is configured
         }
     }
     
@@ -123,6 +149,9 @@ fn createSetupScript(
     
     // Set force_rebuild flag for the template
     try replacements.put("FORCE_REBUILD_VALUE", if (force_rebuild) "FORCE_REBUILD=true" else "FORCE_REBUILD=false");
+
+    // Set use_default_python flag for the template
+    try replacements.put("USE_DEFAULT_PYTHON_VALUE", if (use_default_python) "USE_DEFAULT_PYTHON=true" else "USE_DEFAULT_PYTHON=false");
 
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)
