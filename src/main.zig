@@ -66,7 +66,7 @@ fn printUsage() void {
         \\
         \\  python <subcommand>       Python management commands:
         \\    install <version>       Install a specified Python version (e.g., 3.10.8)
-        \\    use <version>           Set the specified version as the default for new environments
+        \\    use <version>           Set the specified version as the fallback_python for new environments
         \\    list                    List all installed Python versions
         \\
         \\  version, -v, --version    Print the zenv version.
