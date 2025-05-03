@@ -35,7 +35,7 @@ fn printVersion() void {
 }
 
 fn printUsage() void {
-    const usage = 
+    const usage =
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -64,10 +64,10 @@ fn printUsage() void {
         \\  deregister <env_name|id>  Remove an environment from the global registry.
         \\                            It does not remove the environment itself.
         \\
-        \\  python <subcommand>        Python management commands:
-        \\    install <version>        Install a specified Python version (e.g., 3.10.8)
-        \\    use <version>            Set the specified version as the default for new environments
-        \\    list                     List all installed Python versions
+        \\  python <subcommand>       Python management commands:
+        \\    install <version>       Install a specified Python version (e.g., 3.10.8)
+        \\    use <version>           Set the specified version as the default for new environments
+        \\    list                    List all installed Python versions
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
