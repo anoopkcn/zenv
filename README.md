@@ -59,28 +59,6 @@ Check [release](https://github.com/anoopkcn/zenv/releases) for specific versions
 Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`).
 Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
 
-## Configuration
-
-`zenv` uses a JSON configuration file (`zenv.json`) that defines:
-
-1. **Base Directory**: Where virtual environments are stored
-2. **Environment Definitions**:
-   - Target machines they should run on
-   - Python modules to load
-   - Dependencies to install
-   - Custom activation variables and commands
-
-### Registry Mechanism
-
-The global registry (`~/.zenv/registry.json`) tracks all environments with:
-- Unique IDs (SHA-1 hash)
-- Environment names
-- Project directories
-- Virtual environment paths
-- Target machine definitions
-
-This enables activating environments from any directory with `source $(zenv activate <env_name>)`.
-
 ## Usage
 
 ### Initialize and setup an environment
