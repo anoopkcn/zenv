@@ -129,6 +129,9 @@ source $(zenv activate fd15568)
 
 ### Registering and Deregistering Environments
 
+A metadata information about the environments are stored at `ZENV_DIR/registry.json`. by default `ZENV_DIR` is `$HOME/.zenv`.
+But one can set `ZENV_DIR` environment variable as any directory with write permission.
+
 Register an environment in the global registry:
 
 **This is done automatically when you run `zenv setup env_name`**
@@ -142,6 +145,22 @@ Remove an environment from the registry:
 ```bash
 zenv deregister env_name     # Remove by name or ID
 ```
+
+## Python Management
+The default priority of the Python is as follows:
+
+1. Module-provided Python (if HPC modules are loaded)
+2. Explicitly configured fallback_python from zenv.json (if specified)
+3. zenv-managed default Python (if set with `zenv python use <version>`)
+4. System python3
+5. System python
+
+If you would like to use zenv-managed default Python for the environment the use:
+```bash
+zenv setup <env_name> --python
+```
+Note that this command assumes you have already installed a python version using `zenv python install <version>` and run the command `zenv python use <version>` to pin a python version(`ZENV_DIR/default-python`)
+
 
 ## Configuration Reference
 
@@ -208,6 +227,11 @@ Commands:
   deregister <env_name|id>  Remove an environment from the global registry.
                             It does not remove the environment itself.
 
+  python <subcommand>       Python management commands:
+    install <version>       Install a specified Python version (e.g., 3.10.8)
+    use <version>           Set the specified version as the pinned python version.
+    list                    List all installed Python versions
+
   version, -v, --version    Print the zenv version.
 
   help, --help              Show this help message.
@@ -223,13 +247,17 @@ Options:
   --rebuild                 Force rebuild the virtual environment, even if it already exists.
                             Useful when modules change or Python version needs to be updated.
 
+  --python                  Use only the default Python set with 'zenv python use <version>'.
+                            This ignores any module-provided Python and other configuration.
+                            Will error if no default Python is configured.
+
 Configuration (zenv.json):
   The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
   "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
   Can be relative to zenv.json location or an absolute path(starts with a /).
   Defaults to "base_dir": "zenv" if omitted.
 
-Registry (~/.zenv/registry.json):
+Registry (ZENV_DIR/registry.json):
   The global registry allows you to manage environments from any directory.
   Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
   Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
