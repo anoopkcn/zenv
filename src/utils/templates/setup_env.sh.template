@@ -185,13 +185,23 @@ if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" =
   fi
 
   if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true &&
-    success "Successfully created virtual environment using fallback Python"
-  fi
-
-  if [ "$VENV_CREATED" = "false" ]; then
-    create_venv "python3" "system python3" && VENV_CREATED=true &&
-    success "Successfully created virtual environment using system python3"
+    # Check if this is a custom Python path (potentially from zenv python install)
+    if [ -n "@@FALLBACK_PYTHON@@" ] && [ "@@FALLBACK_PYTHON@@" != "python3" ]; then
+      if [[ "@@FALLBACK_PYTHON@@" == *".zenv/python/"* ]]; then
+        # This is a zenv managed Python
+        version=$(basename $(dirname $(dirname "@@FALLBACK_PYTHON@@")))
+        ohai "Using zenv-managed Python $version"
+      else
+        # This is a user-specified fallback Python
+        ohai "Using fallback Python: @@FALLBACK_PYTHON@@"
+      fi
+      create_venv "@@FALLBACK_PYTHON@@" "fallback Python" && VENV_CREATED=true &&
+      success "Successfully created virtual environment using fallback Python"
+    else
+      # Fall back to system Python
+      create_venv "python3" "system python3" && VENV_CREATED=true &&
+      success "Successfully created virtual environment using system python3"
+    fi
   fi
 
   if [ "$VENV_CREATED" = "false" ]; then

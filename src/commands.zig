@@ -5,6 +5,7 @@ const CommandFlags = @import("utils/flags.zig").CommandFlags;
 const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
+const python = @import("utils/python.zig");
 const configurations = @import("utils/config.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -582,4 +583,60 @@ pub fn handleCdCommand(
         std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
         return;
     };
+}
+
+pub fn handlePythonCommand(
+    allocator: Allocator,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) !void {
+    // Check if we have a subcommand
+    if (args.len < 3) {
+        std.log.err("Missing subcommand for 'python' command", .{});
+        std.log.info("Available subcommands: install, use, list", .{});
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const subcommand = args[2];
+
+    if (std.mem.eql(u8, subcommand, "install")) {
+        // Python install [version] command
+        var version: ?[]const u8 = null;
+        if (args.len >= 4) {
+            version = args[3];
+            std.log.info("Installing Python version: {s}", .{version.?});
+        } else {
+            std.log.info("No version specified, will install default version", .{});
+        }
+
+        // Install Python
+        python.installPython(allocator, version) catch |err| {
+            std.log.err("Python installation failed: {s}", .{@errorName(err)});
+            handleErrorFn(err);
+            return;
+        };
+
+    } else if (std.mem.eql(u8, subcommand, "use")) {
+        // Python use [version] command
+        if (args.len < 4) {
+            std.log.err("Missing version argument for 'python use' command", .{});
+            std.log.info("Usage: zenv python use <version>", .{});
+            handleErrorFn(error.ArgsError);
+            return;
+        }
+
+        const version = args[3];
+        try python.setDefaultPythonPath(allocator, version);
+
+    } else if (std.mem.eql(u8, subcommand, "list")) {
+        // Python list command - list all installed versions
+        try python.listInstalledVersions(allocator);
+
+    } else {
+        std.log.err("Unknown subcommand '{s}' for 'python' command", .{subcommand});
+        std.log.info("Available subcommands: install, use, list", .{});
+        handleErrorFn(error.ArgsError);
+        return;
+    }
 }

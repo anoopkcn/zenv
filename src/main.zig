@@ -14,6 +14,7 @@ const Command = enum {
     deregister,
     cd,
     init,
+    python,
     help,
     version,
     @"-v",
@@ -34,7 +35,7 @@ fn printVersion() void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -62,6 +63,11 @@ fn printUsage() void {
         \\
         \\  deregister <env_name|id>  Remove an environment from the global registry.
         \\                            It does not remove the environment itself.
+        \\
+        \\  python <subcommand>        Python management commands:
+        \\    install <version>        Install a specified Python version (e.g., 3.10.8)
+        \\    use <version>            Set the specified version as the default for new environments
+        \\    list                     List all installed Python versions
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
@@ -130,7 +136,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .python, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -240,6 +246,7 @@ pub fn main() anyerror!void {
         .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
         .deregister => commands.handleDeregisterCommand(&registry, args_const, handleError),
         .cd => commands.handleCdCommand(&registry, args_const, handleError),
+        .python => try commands.handlePythonCommand(allocator, args_const, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

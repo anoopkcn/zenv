@@ -90,10 +90,26 @@ fn createSetupScript(
     try replacements.put("VENV_DIR", venv_dir);
     
     // Get the fallback python to use
-    const fallback_python = if (env_config.fallback_python) |py| 
-        py 
-    else 
-        "python3"; // Default to python3 if not specified
+    var fallback_python: []const u8 = undefined;
+    if (env_config.fallback_python) |py| {
+        // Use the explicitly configured fallback Python
+        fallback_python = py;
+    } else {
+        // Try to get the default Python path
+        if (@import("python.zig").getDefaultPythonPath(allocator)) |default_python| {
+            if (default_python) |path| {
+                // Build the full path to the Python binary
+                const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
+                defer allocator.free(python_bin);
+                fallback_python = try allocator.dupe(u8, python_bin);
+            } else {
+                fallback_python = "python3"; // No default Python path found
+            }
+        } else |err| {
+            std.log.warn("Failed to get default Python path: {s}", .{@errorName(err)});
+            fallback_python = "python3"; // Default to python3 if no default is configured
+        }
+    }
     
     try replacements.put("FALLBACK_PYTHON", fallback_python);
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
