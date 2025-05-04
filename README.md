@@ -62,8 +62,7 @@ export PATH="$PATH:path/to/zig-out/bin"
 </details>
 
 Check [release](https://github.com/anoopkcn/zenv/releases) for specific versions.
-Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`).
-Linux versions are `musl` NOT `glibc`. _Windows support is not planned_
+Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`). _Windows support is not planned_
 
 ## Usage
 
