@@ -5,7 +5,6 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const fs = std.fs;
 const output = @import("output.zig");
-
 const template = @import("template.zig");
 
 // Embed the template file at compile time
@@ -106,7 +105,7 @@ fn createSetupScript(
 
         if (default_python) |path| {
             // Build the full path to the Python binary
-            const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
+            const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
             defer allocator.free(python_bin);
             fallback_python = try allocator.dupe(u8, python_bin);
             try output.print("Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
@@ -125,7 +124,7 @@ fn createSetupScript(
             if (@import("python.zig").getDefaultPythonPath(allocator)) |default_python| {
                 if (default_python) |path| {
                     // Build the full path to the Python binary
-                    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
+                    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
                     defer allocator.free(python_bin);
                     fallback_python = try allocator.dupe(u8, python_bin);
                 } else {

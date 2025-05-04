@@ -48,14 +48,14 @@ pub fn processTemplateString(
     while (pos < template_content.len) {
         const placeholder_start = std.mem.indexOfPos(u8, template_content, pos, "@@") orelse break;
         const placeholder_end = std.mem.indexOfPos(u8, template_content, placeholder_start + 2, "@@") orelse break;
-        
+
         // Extract placeholder name
         const placeholder_name = template_content[placeholder_start + 2 .. placeholder_end];
         if (replacements.get(placeholder_name)) |replacement| {
             // Adjust the estimated size: remove placeholder size, add replacement size
             estimated_size = estimated_size - (placeholder_end + 2 - placeholder_start) + replacement.len;
         }
-        
+
         pos = placeholder_end + 2;
     }
 
@@ -94,7 +94,7 @@ pub fn processTemplateString(
         } else {
             // No replacement found, leave the placeholder as is
             try writer.writeAll(template_content[placeholder_start .. placeholder_end + 2]);
-            try output.print("Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name});
+            output.print("Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name}) catch {};
         }
 
         // Move position to after the placeholder

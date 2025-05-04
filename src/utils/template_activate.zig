@@ -28,12 +28,14 @@ fn createActivationScript(
     env_name: []const u8,
     base_dir: []const u8,
 ) !void {
-    try output.print("Creating activation script for '{s}'...", .{env_name});
+    output.print("Creating activation script for '{s}'...", .{env_name}) catch {};
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
-    errdefer { _ = output.printError("Failed to get CWD realpath in createActivationScript", .{}) catch {}; } // Add error context
+    errdefer {
+        _ = output.printError("Failed to get CWD realpath in createActivationScript", .{}) catch {};
+    } // Add error context
 
     // Check if base_dir is absolute
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
@@ -181,5 +183,5 @@ fn createActivationScript(
     // Make executable
     try file.chmod(0o755);
 
-    try output.print("Activation script created at {s}", .{script_abs_path});
+    output.print("Activation script created at {s}", .{script_abs_path}) catch {};
 }
