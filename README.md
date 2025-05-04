@@ -20,7 +20,7 @@ The tool provides several key features:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
 ```
-
+Run the same command to update already insalled `zenv` version
 ### Alternative methods of installation
 
 <details>
