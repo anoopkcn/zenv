@@ -33,11 +33,11 @@ fn parseDependenciesLine(
                 // Keep the version specifier for pip compatibility
                 const dep = try allocator.dupe(u8, quoted_content);
                 // errdefer allocator.free(dep); // Ensure cleanup if append fails - handled by caller's defer usually
-                try output.print("  - TOML array dependency: {s}", .{dep});
+                output.print("  - TOML array dependency: {s}", .{dep}) catch {};
                 try deps_list.append(dep);
                 count.* += 1;
             } else if (quoted_content.len > 0) {
-                try output.print("  - Skipping non-package entry: {s}", .{quoted_content});
+                output.print("  - Skipping non-package entry: {s}", .{quoted_content}) catch {};
             }
         }
 
@@ -48,12 +48,7 @@ fn parseDependenciesLine(
 // Helper to check if a string is a common metadata field, not a dependency
 fn isLikelyPythonPackageName(package_name: []const u8) bool {
     // Skip common metadata fields
-    const meta_fields = [_][]const u8{
-        "name", "version", "description", "authors", "license",
-        "keywords", "classifiers", "readme", "homepage", "repository",
-        "documentation", "requires-python", "python-requires", "url",
-        "project", "tool", "build-system", "dev-dependencies"
-    };
+    const meta_fields = [_][]const u8{ "name", "version", "description", "authors", "license", "keywords", "classifiers", "readme", "homepage", "repository", "documentation", "requires-python", "python-requires", "url", "project", "tool", "build-system", "dev-dependencies" };
 
     // If it's a known metadata field, it's not a package
     for (meta_fields) |field| {
@@ -81,17 +76,17 @@ pub fn parsePyprojectToml(
     content: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
-    try output.print("Parsing pyproject.toml for dependencies...", .{});
+    output.print("Parsing pyproject.toml for dependencies...", .{}) catch {};
 
     var count: usize = 0;
 
     // Create a state machine for parsing
     const ParseState = enum {
-        searching,          // Looking for dependency sections
-        in_project_deps,    // In [project.dependencies] section (PEP 621)
-        in_poetry_deps,     // In [tool.poetry.dependencies] section
-        in_deps_array,      // Inside a dependencies = [...] array
-        in_table,           // In a table like dependencies = { ... }
+        searching, // Looking for dependency sections
+        in_project_deps, // In [project.dependencies] section (PEP 621)
+        in_poetry_deps, // In [tool.poetry.dependencies] section
+        in_deps_array, // Inside a dependencies = [...] array
+        in_table, // In a table like dependencies = { ... }
     };
 
     var state = ParseState.searching;
@@ -170,17 +165,17 @@ pub fn parsePyprojectToml(
             .searching => {
                 // Match various dependency section patterns
                 if (std.mem.indexOf(u8, trimmed, "[project.dependencies]") != null) {
-                    try output.print("Found PEP 621 dependencies section at line {d}", .{line_number});
+                    output.print("Found PEP 621 dependencies section at line {d}", .{line_number}) catch {};
                     state = ParseState.in_project_deps;
                     found_content = true;
                     continue;
                 } else if (std.mem.indexOf(u8, trimmed, "[tool.poetry.dependencies]") != null) {
-                    try output.print("Found Poetry dependencies section at line {d}", .{line_number});
+                    output.print("Found Poetry dependencies section at line {d}", .{line_number}) catch {};
                     state = ParseState.in_poetry_deps;
                     found_content = true;
                     continue;
                 } else if (isStandaloneDepArray(trimmed)) {
-                    try output.print("Found standalone dependencies array at line {d}", .{line_number});
+                    output.print("Found standalone dependencies array at line {d}", .{line_number}) catch {};
                     state = ParseState.in_deps_array;
                     bracket_depth = 1; // We're inside one array bracket
 
@@ -191,7 +186,7 @@ pub fn parsePyprojectToml(
                     found_content = true;
                     continue;
                 } else if (isStandaloneDepTable(trimmed)) {
-                    try output.print("Found dependencies table at line {d}", .{line_number});
+                    output.print("Found dependencies table at line {d}", .{line_number}) catch {};
                     state = ParseState.in_table;
                     brace_depth = 1; // We're inside one table brace
                     found_content = true;
@@ -242,11 +237,11 @@ pub fn parsePyprojectToml(
     }
 
     if (count > 0) {
-        try output.print("Found {d} dependencies in pyproject.toml", .{count});
+        output.print("Found {d} dependencies in pyproject.toml", .{count}) catch {};
     } else if (found_content) {
-        try output.print("Processed TOML content but found no valid dependencies", .{});
+        output.print("Processed TOML content but found no valid dependencies", .{}) catch {};
     } else {
-        try output.print("No recognized dependency sections found in pyproject.toml", .{});
+        output.print("No recognized dependency sections found in pyproject.toml", .{}) catch {};
     }
 
     return count;
@@ -259,7 +254,7 @@ fn isStandaloneDepArray(line: []const u8) bool {
 
     if (std.mem.indexOf(u8, line, deps_str)) |pos| {
         // Ensure it's at the start of the line or after whitespace
-        if (pos == 0 or std.ascii.isWhitespace(line[pos-1])) {
+        if (pos == 0 or std.ascii.isWhitespace(line[pos - 1])) {
             // Check that = and [ appear after dependencies
             const eq_pos = std.mem.indexOfPos(u8, line, pos + deps_str.len, "=");
             if (eq_pos) |eq| {
@@ -278,7 +273,7 @@ fn isStandaloneDepTable(line: []const u8) bool {
 
     if (std.mem.indexOf(u8, line, deps_str)) |pos| {
         // Ensure it's at the start of the line or after whitespace
-        if (pos == 0 or std.ascii.isWhitespace(line[pos-1])) {
+        if (pos == 0 or std.ascii.isWhitespace(line[pos - 1])) {
             // Check that = and { appear after dependencies
             const eq_pos = std.mem.indexOfPos(u8, line, pos + deps_str.len, "=");
             if (eq_pos) |eq| {
@@ -311,12 +306,12 @@ fn processPackageLine(
             } else {
                 // Simple dependency, no inline table
                 const dep = try allocator.dupe(u8, package_name);
-                try output.print("  - TOML individual dependency: {s}", .{dep});
+                output.print("  - TOML individual dependency: {s}", .{dep}) catch {};
                 try deps_list.append(dep);
                 count.* += 1;
             }
         } else if (package_name.len > 0) {
-            try output.print("  - Skipping non-package key: {s}", .{package_name});
+            output.print("  - Skipping non-package key: {s}", .{package_name}) catch {};
         }
     }
 }
@@ -335,7 +330,7 @@ fn processTableEntries(
 
             if (package_name.len > 0 and isLikelyPythonPackageName(package_name)) {
                 const dep = try allocator.dupe(u8, package_name);
-                try output.print("  - TOML table dependency: {s}", .{dep});
+                output.print("  - TOML table dependency: {s}", .{dep}) catch {};
                 try deps_list.append(dep);
                 count.* += 1;
             }
@@ -350,7 +345,7 @@ pub fn parseRequirementsTxt(
     content: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
-    try output.print("Parsing requirements.txt for dependencies...", .{});
+    output.print("Parsing requirements.txt for dependencies...", .{}) catch {};
     var count: usize = 0;
 
     // Create a reusable buffer to minimize allocations
@@ -359,27 +354,27 @@ pub fn parseRequirementsTxt(
 
     // Split lines more efficiently with iterator directly
     var line_iter = std.mem.splitScalar(u8, content, '\n');
-    
+
     while (line_iter.next()) |line| {
         // Skip empty lines and comments early
         if (line.len == 0) continue;
-        
+
         const trimmed_line = std.mem.trim(u8, line, " \t\r");
         if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
             continue;
         }
 
         // For valid dependencies, add directly
-        try output.print("  - Requirements file dependency: {s}", .{trimmed_line});
+        output.print("  - Requirements file dependency: {s}", .{trimmed_line}) catch {};
 
         // Create a duplicate of the trimmed line
         const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
-        
+
         // Add the dependency
         try deps_list.append(trimmed_dupe);
         count += 1;
     }
-    try output.print("Found {d} dependencies in requirements.txt format", .{count});
+    output.print("Found {d} dependencies in requirements.txt format", .{count}) catch {};
     return count;
 }
 
@@ -389,7 +384,7 @@ pub fn validateDependencies(
     raw_deps: []const []const u8,
     env_name: []const u8,
 ) !std.ArrayList([]const u8) {
-    try output.print("Validating dependencies for '{s}':", .{env_name});
+    output.print("Validating dependencies for '{s}':", .{env_name}) catch {};
     var valid_deps = std.ArrayList([]const u8).init(allocator);
     // Improved error handling with explicit cleanup of any added items
     errdefer {
@@ -407,13 +402,13 @@ pub fn validateDependencies(
 
     for (raw_deps) |dep| {
         if (dep.len == 0) {
-            try output.print("Warning: Skipping empty dependency", .{});
+            output.print("Warning: Skipping empty dependency", .{}) catch {};
             continue;
         }
 
         // Skip deps that look like file paths
         if (std.mem.indexOf(u8, dep, "/") != null) {
-            try output.print("Warning: Skipping dependency that looks like a path: '{s}'", .{dep});
+            output.print("Warning: Skipping dependency that looks like a path: '{s}'", .{dep}) catch {};
             continue;
         }
 
@@ -433,7 +428,7 @@ pub fn validateDependencies(
         }
 
         if (!valid or !has_alpha) {
-            try output.print("Warning: Skipping invalid dependency: '{s}'", .{dep});
+            output.print("Warning: Skipping invalid dependency: '{s}'", .{dep}) catch {};
             continue;
         }
 
@@ -458,12 +453,12 @@ pub fn validateDependencies(
 
         // Check if we've already seen this package (case-insensitive)
         if (seen_packages.contains(lowercase_buf.items)) {
-            try output.print("Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep});
+            output.print("Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep}) catch {};
             continue;
         }
 
         // Accept this dependency as valid
-        try output.print("Including dependency: '{s}'", .{dep});
+        output.print("Including dependency: '{s}'", .{dep}) catch {};
         try valid_deps.append(dep);
 
         // Add the lowercase name to the seen set using a key we create and own
