@@ -122,7 +122,7 @@ Example:
 
 ```bash
 # Activate by name
-source $(zenv activate name)
+source $(zenv activate test)
 
 # Activate by full ID
 source $(zenv activate fd15568424877584b01313de7b6a5a57be73b746)
