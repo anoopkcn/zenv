@@ -28,7 +28,7 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
                 break :blk false;
             }
             // For any other error, we'll assume the file doesn't exist
-            try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
+            output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)}) catch {};
             break :blk false;
         };
         break :blk true;
@@ -83,7 +83,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
                     break :blk false;
                 }
                 // For any other error, we'll assume the file doesn't exist
-                try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
+                output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)}) catch {};
                 break :blk false;
             };
             break :blk true;
@@ -164,7 +164,7 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
     const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
     defer allocator.free(filename);
 
-    try output.print("Downloading Python {s} from {s}", .{version, url});
+    output.print("Downloading Python {s} from {s}", .{version, url}) catch {};
 
     // Create a temporary directory for downloads
     const temp_dir = "/tmp";
@@ -189,7 +189,7 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
         return err;
     };
 
-    try output.print("Extracting {s} to {s}", .{tarball_path, target_dir});
+    output.print("Extracting {s} to {s}", .{tarball_path, target_dir}) catch {};
 
     // Run tar to extract the file
     var tar_args = [_][]const u8{"tar", "-xzf", tarball_path, "-C", target_dir};
@@ -209,8 +209,8 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
 
 // Configure and build Python
 pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []const u8) !void {
-    try output.print("Configuring Python build in {s}", .{source_dir});
-    try output.print("Python will be installed to {s}", .{install_dir});
+    output.print("Configuring Python build in {s}", .{source_dir}) catch {};
+    output.print("Python will be installed to {s}", .{install_dir}) catch {};
 
     // Create a clean directory for the build
     fs.cwd().makePath(install_dir) catch |err| {
@@ -290,14 +290,14 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         }
     }
 
-    try output.print("Python installation completed successfully", .{});
+    output.print("Python installation completed successfully", .{}) catch {};
 }
 
 // Main function to install Python
 pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const python_version = version orelse DEFAULT_PYTHON_VERSION;
 
-    try output.print("Installing Python version {s}", .{python_version});
+    output.print("Installing Python version {s}", .{python_version}) catch {};
 
     // Get the installation directory
     const base_install_dir = try getDefaultInstallDir(allocator);
@@ -316,15 +316,15 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
                 break :blk false;
             }
             // For any other error, we'll assume the file doesn't exist
-            try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
+            output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)}) catch {};
             break :blk false;
         };
         break :blk true;
     };
 
     if (python_exists) {
-        try output.print("Python {s} is already installed at {s}", .{python_version, install_dir});
-        try output.print("To reinstall, first remove the directory manually: rm -rf {s}", .{install_dir});
+        output.print("Python {s} is already installed at {s}", .{python_version, install_dir}) catch {};
+        output.print("To reinstall, first remove the directory manually: rm -rf {s}", .{install_dir}) catch {};
         return;
     }
 
