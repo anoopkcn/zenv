@@ -36,8 +36,8 @@ pub fn handleInitCommand(
         std.process.exit(1);
     }
 
-    // Use a static string as the default target_machine - now supporting patterns
-    const hostname = "localhost";
+    // Use a static string as the default target_machine
+    const hostname = "*";
 
     // Import the template module for JSON
     const template_json = @import("utils/template_json.zig");
