@@ -396,8 +396,7 @@ pub fn handleRegisterCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv register <env_name>\n", .{}) catch {};
+        output.printError("Error: Missing environment name argument. Usage: zenv register <name>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -470,8 +469,8 @@ pub fn handleRegisterCommand(
         return;
     };
 
-    std.io.getStdOut().writer().print("Environment '{s}' registered successfully.\n", .{env_name}) catch {};
-    std.io.getStdOut().writer().print("You can now activate it from any directory with: source $(zenv activate {s})\n", .{env_name}) catch {};
+    output.print("Environment '{s}' registered successfully.", .{env_name}) catch {};
+    output.print("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name}) catch {};
 }
 
 pub fn handleDeregisterCommand(
@@ -480,8 +479,7 @@ pub fn handleDeregisterCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv deregister <env_name|env_id>\n", .{}) catch {};
+        output.printError("Error: Missing environment name or ID argument. Usage: zenv deregister <name|id>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -510,9 +508,9 @@ pub fn handleDeregisterCommand(
             return;
         };
 
-        std.io.getStdOut().writer().print("Environment '{s}' unregistered successfully.\n", .{env_name}) catch {};
+        output.print("Environment '{s}' unregistered successfully.", .{env_name}) catch {};
     } else {
-        std.io.getStdErr().writer().print("Error: Failed to unregister environment '{s}'.\n", .{env_name}) catch {};
+        output.printError("Failed to unregister environment '{s}'.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
     }
 }
@@ -523,8 +521,7 @@ pub fn handleCdCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv cd <env_name|env_id>\n", .{}) catch {};
+        output.printError("Missing environment name or ID argument. Usage: zenv cd <name|id>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -551,19 +548,18 @@ pub fn handleCdCommand(
             }
 
             if (match_found and matching_envs.items.len > 1) {
-                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
+                output.printError("Ambiguous ID prefix '{s}' matches multiple environments:", .{identifier}) catch {};
                 for (matching_envs.items) |env_name| {
-                    std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
+                    output.printError("  - {s}", .{env_name}) catch {};
                 }
-                std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
+                output.printError("Please use more characters to make the ID unique.", .{}) catch {};
                 handleErrorFn(error.AmbiguousIdentifier);
                 return;
             }
         }
 
         // Default error for no matches
-        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
-        std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
+        output.printError("Environment with name or ID '{s}' not found in registry. Check: 'zenv list --all' ", .{identifier}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     };
@@ -571,10 +567,8 @@ pub fn handleCdCommand(
     // Get project directory from registry entry
     const project_dir = entry.project_dir;
 
-    const writer = std.io.getStdOut().writer();
-
     // Output just the project directory path
-    writer.print("{s}\n", .{project_dir}) catch |e| {
+    std.io.getStdOut().writer().print("{s}\n", .{project_dir}) catch |e| {
         output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
