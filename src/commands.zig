@@ -398,7 +398,7 @@ pub fn handleListCommand(
     } else {
         if (!list_all and current_hostname != null) {
             stdout.print(
-                \\Found {d} environment(s) for the current machine ('{s}').
+                \\Found {d} environment(s) for the current machine ('{s}')
                 \\
             , .{ count, current_hostname.? }) catch {};
         } else { // Listing all or hostname failed

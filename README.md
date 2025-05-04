@@ -105,13 +105,14 @@ zenv list --all # for listing all available envs in the registry
 Example output:
 
 ```
-- test (fd15568424877584b01313de7b6a5a57be73b746)
-  [target  : jureca, juwels, *]
-  [project : /p/project1/hai_matbind/chandran1/zenv/test]
-  [venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/test]
-  [desc    : Test python environment]
+- test
+    id      : c3c494547b40f070b4c080f95c707622d84fe749
+    target  : jureca, juwels, *
+    project : /p/project1/hai_matbind/chandran1/zenv/test
+    venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/test
+    desc    : Test python environment
 
-Found 1 environment(s) for the current machine ('jrlogin12.jureca').
+Found 1 environment(s) for the current machine ('jrlogin01.jureca').
 ```
 
 ### Activating environments
@@ -125,10 +126,10 @@ Example:
 source $(zenv activate test)
 
 # Activate by full ID
-source $(zenv activate fd15568424877584b01313de7b6a5a57be73b746)
+source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 
 # Activate by partial ID (first 7+ characters)
-source $(zenv activate fd15568)
+source $(zenv activate c3c4945)
 ```
 
 ### Registering and Deregistering Environments
