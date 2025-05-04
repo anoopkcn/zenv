@@ -85,7 +85,7 @@ fn printUsage() void {
         \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
         \\                            Useful when modules change or Python version needs to be updated.
         \\
-        \\  --python                  Use only the pinned Python which is set with 'zenv python use <version>'.
+        \\  --python                  Use only the pinned Python set with 'use' subcommand.
         \\                            This ignores the default python priority list.
         \\                            Will error if no pinned Python is configured.
         \\
