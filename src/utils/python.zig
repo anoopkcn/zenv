@@ -50,6 +50,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     defer allocator.free(base_install_dir);
 
     // Get stdout writer
+    const stdout = std.io.getStdOut().writer();
 
     var dir = fs.cwd().openDir(base_install_dir, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
@@ -65,7 +66,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     const default_path = try getDefaultPythonPath(allocator);
     defer if (default_path) |path| allocator.free(path);
 
-    output.print("Installed Python versions:", .{}) catch {};
+    // output.print("Installed Python versions:", .{}) catch {};
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
@@ -98,19 +99,20 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         }
 
         if (is_default) {
-            output.print("{s} (default)", .{version_dir}) catch {};
+            stdout.print("{s} (pinned)\n", .{version_dir}) catch {};
         } else {
-            output.print("{s}", .{version_dir}) catch {};
+            stdout.print("{s}\n", .{version_dir}) catch {};
         }
         installed_count += 1;
     }
 
     if (installed_count == 0) {
-        output.print("No Python versions installed yet\n", .{}) catch {};
+        output.print("No Python versions installed yet", .{}) catch {};
         output.print("Use 'zenv python install <version>' to install a Python version", .{}) catch {};
-    } else {
-        output.print("Use 'zenv python use <version>' to set a version as default", .{}) catch {};
     }
+    // else {
+    //     output.print("Use 'zenv python use <version>' to set a version as default", .{}) catch {};
+    // }
 }
 
 // Write the default Python path to a file

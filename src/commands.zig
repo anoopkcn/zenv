@@ -71,9 +71,8 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    std.io.getStdOut().writer().print("Created zenv.json template in the current directory.\n", .{}) catch {};
-    std.io.getStdOut().writer().print("Edit it to customize your environments.\n", .{}) catch {};
-    // std.io.getStdOut().writer().print("You can use an absolute path for base_dir (e.g., '/home/user/venvs') to store environments outside the project directory.\n", .{}) catch {};
+    output.print("Created zenv.json template in the current directory.\n", .{}) catch {};
+    output.print("Edit it to customize your environments.\n", .{}) catch {};
 }
 
 pub fn handleSetupCommand(
@@ -278,24 +277,17 @@ pub fn handleActivateCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        std.io.getStdErr().writer().print("Error: Missing environment name or ID argument.\n", .{}) catch {};
-        std.io.getStdErr().writer().print("Usage: zenv activate <env_name|env_id>\n", .{}) catch {};
+        output.printError("Missing environment name or ID argument. Usage: zenv activate <name|id>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
 
     const identifier = args[2];
 
-    // Look up environment using the utility function
     const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
-
-    // Get venv_path from registry entry
     const venv_path = entry.venv_path;
 
-    const writer = std.io.getStdOut().writer();
-
-    // Output the absolute path to our custom activation script
-    writer.print("{s}/activate.sh\n", .{venv_path}) catch |e| {
+    output.print("{s}/activate.sh", .{venv_path}) catch |e| {
         output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -306,7 +298,7 @@ pub fn handleListCommand(
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) void {
-    const stdout = std.io.getStdOut().writer();
+    const stdout = std.io.getStdOut().writer(); // special case for using standard writter
     const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
 
     var current_hostname: ?[]const u8 = null;
@@ -331,7 +323,7 @@ pub fn handleListCommand(
     // Ensure hostname is freed if allocated using optional chaining
     defer if (hostname_allocd) if (current_hostname) |hostname| allocator.free(hostname);
 
-    stdout.print("Available zenv environments:\n", .{}) catch {};
+    // stdout.print("Available zenv environments:\n", .{}) catch {};
 
     var count: usize = 0;
     for (registry.entries.items) |entry| {
@@ -362,14 +354,15 @@ pub fn handleListCommand(
         // const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
 
         // Print environment name, short ID, and target machine string
-        stdout.print("- {s} ({s})", .{ env_name, entry.id }) catch {};
-        stdout.print("\n  [target  : {s}]", .{target_machines_str}) catch {};
-        stdout.print("\n  [project : {s}]", .{entry.project_dir}) catch {};
-        stdout.print("\n  [venv    : {s}]", .{entry.venv_path}) catch {};
+        stdout.print("- {s}", .{env_name}) catch {};
+        stdout.print("\n    id      : {s}", .{entry.id}) catch {};
+        stdout.print("\n    target  : {s}", .{target_machines_str}) catch {};
+        stdout.print("\n    project : {s}", .{entry.project_dir}) catch {};
+        stdout.print("\n    venv    : {s}", .{entry.venv_path}) catch {};
 
         // Optionally print description
         if (entry.description) |desc| {
-            stdout.print("\n  [desc    : {s}]\n\n", .{desc}) catch {};
+            stdout.print("\n    desc    : {s}\n\n", .{desc}) catch {};
         }
 
         count += 1;
@@ -384,7 +377,7 @@ pub fn handleListCommand(
             stdout.print("No environments found. (Could not determine current hostname for filtering).\n", .{}) catch {};
         } else { // Listing all or hostname failed
             stdout.print("No environments found in the registry.\n" ++
-                "Use 'zenv register <env_name>' OR 'zenv setup <env_name>' to register environments.\n", .{}) catch {};
+                "Use 'zenv register <name>' OR 'zenv setup <name>' to register environments.\n", .{}) catch {};
         }
     } else {
         if (!list_all and current_hostname != null) {

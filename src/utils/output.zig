@@ -11,7 +11,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) !void {
 /// Prints a formatted error message to stderr with a newline appended
 pub fn printError(comptime fmt: []const u8, args: anytype) !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.print("err: " ++  fmt ++ "\n", args);
+    try stderr.print("error: " ++  fmt ++ "\n", args);
 }
 
 /// Prints a formatted message to stdout, and doesn't append a newline
