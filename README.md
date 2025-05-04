@@ -293,7 +293,7 @@ If you encounter any bugs open an Issue. To use the debug logging feature, users
 Example:
 
 ```bash
-ZENV_DEBUG=1 zenv setup name
+ZENV_DEBUG=1 zenv setup <name>
 ```
 
 ## License
