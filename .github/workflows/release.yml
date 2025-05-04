@@ -22,8 +22,8 @@ jobs:
         with:
           version: 0.14.0
 
-      - name: Build releases
-        run: zig build release
+      - name: Build size optmized releases
+        run: zig build release-small
 
       - name: Create GitHub Release
         id: create_release

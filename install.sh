@@ -87,7 +87,7 @@ get_arch() {
 
 OS=$(get_os)
 ARCH=$(get_arch)
-OPT_BUILD='' #-small
+OPT_BUILD='-small'
 
 ohai "Detected OS: ${OS}"
 ohai "Detected Arch: ${ARCH}"
