@@ -362,14 +362,14 @@ pub fn handleListCommand(
 
         // Print environment name, short ID, and target machine string
         stdout.print("- {s}", .{env_name}) catch {};
-        stdout.print("\n    id      : {s}", .{entry.id}) catch {};
-        stdout.print("\n    target  : {s}", .{target_machines_str}) catch {};
-        stdout.print("\n    project : {s}", .{entry.project_dir}) catch {};
-        stdout.print("\n    venv    : {s}", .{entry.venv_path}) catch {};
+        stdout.print("\n  id      : {s}", .{entry.id}) catch {};
+        stdout.print("\n  target  : {s}", .{target_machines_str}) catch {};
+        stdout.print("\n  project : {s}", .{entry.project_dir}) catch {};
+        stdout.print("\n  venv    : {s}", .{entry.venv_path}) catch {};
 
         // Optionally print description
         if (entry.description) |desc| {
-            stdout.print("\n    desc    : {s}\n\n", .{desc}) catch {};
+            stdout.print("\n  desc    : {s}\n\n", .{desc}) catch {};
         }
 
         count += 1;

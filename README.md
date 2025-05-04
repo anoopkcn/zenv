@@ -106,11 +106,11 @@ Example output:
 
 ```
 - test
-    id      : c3c494547b40f070b4c080f95c707622d84fe749
-    target  : jureca, juwels, *
-    project : /p/project1/hai_matbind/chandran1/zenv/test
-    venv    : /p/project1/hai_matbind/chandran1/zenv/test/zenv/test
-    desc    : Test python environment
+  id      : c3c494547b40f070b4c080f95c707622d84fe749
+  target  : jureca, juwels, *
+  project : /path/to/project/
+  venv    : /path/to/project/zenv/test
+  desc    : Test python environment
 
 Found 1 environment(s) for the current machine ('jrlogin01.jureca').
 ```
