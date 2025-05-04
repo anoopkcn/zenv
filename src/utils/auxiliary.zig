@@ -57,9 +57,9 @@ pub fn setupEnvironmentDirectory(
     base_dir: []const u8,
     env_name: []const u8,
 ) !void {
-    _ = try std.fs.path.resolve(allocator, &[_][]const u8{base_dir});
-
-    if (std.fs.path.isAbsolute(base_dir)) {
+    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+    
+    if (is_absolute_base_dir) {
         try output.print("Ensuring absolute virtual environment base directory '{s}' exists...", .{base_dir});
 
         // For absolute paths, create the directory directly
@@ -71,13 +71,12 @@ pub fn setupEnvironmentDirectory(
             }
         };
 
-        // Create environment-specific directory using absolute path and safe path joining
+        // Create environment-specific directory using absolute path
         const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
-        const env_dir_path = try std.fs.path.resolve(allocator, &[_][]const u8{joined});
-        allocator.free(joined);
-
-        try output.print("Creating environment directory '{s}'...", .{env_dir_path});
-        std.fs.makeDirAbsolute(env_dir_path) catch |err| {
+        defer allocator.free(joined);
+                
+        try output.print("Creating environment directory '{s}'...", .{joined});
+        std.fs.makeDirAbsolute(joined) catch |err| {
             if (err == error.PathAlreadyExists) {
                 // Ignore this error, directory already exists
             } else {
@@ -88,14 +87,15 @@ pub fn setupEnvironmentDirectory(
         try output.print("Ensuring relative virtual environment base directory '{s}' exists...", .{base_dir});
 
         // For relative paths, create the directory relative to cwd
+        // First make sure base dir exists
         try fs.cwd().makePath(base_dir);
-
+        
+        // Create the environment directory
         const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
-        const env_dir_path = try std.fs.path.resolve(allocator, &[_][]const u8{joined});
-        allocator.free(joined);
-
-        try output.print("Creating environment directory '{s}'...", .{env_dir_path});
-        try fs.cwd().makePath(env_dir_path);
+        defer allocator.free(joined);
+        
+        try output.print("Creating environment directory '{s}'...", .{joined});
+        try fs.cwd().makePath(joined);
     }
 }
 

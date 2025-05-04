@@ -25,7 +25,30 @@ const Command = enum {
     unknown,
 
     fn fromString(s: []const u8) Command {
-        return std.meta.stringToEnum(Command, s) orelse Command.unknown;
+        const command_map = .{
+            .{ "setup", .setup },
+            .{ "activate", .activate },
+            .{ "list", .list },
+            .{ "register", .register },
+            .{ "deregister", .deregister },
+            .{ "cd", .cd },
+            .{ "init", .init },
+            .{ "python", .python },
+            .{ "help", .help },
+            .{ "version", .version },
+            .{ "-v", .@"-v" },
+            .{ "-V", .@"-V" },
+            .{ "--version", .@"--version" },
+            .{ "--help", .@"--help" },
+        };
+
+        // Linear search through the command_map
+        inline for (command_map) |entry| {
+            if (std.mem.eql(u8, s, entry[0])) {
+                return entry[1];
+            }
+        }
+        return Command.unknown;
     }
 };
 
@@ -36,7 +59,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage =
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -120,20 +143,12 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Allocate args properly now for command handlers that might need ownership
-    const args_owned = try process.argsAlloc(allocator);
-    // Defer freeing args_owned *after* potential early exits and config parsing
-    // defer process.argsFree(allocator, args_owned); // Moved lower
+    // Get args with ownership - we'll use these directly and cast as needed
+    const args = try process.argsAlloc(allocator);
+    // Defer freeing is moved lower to ensure args remain valid throughout execution
 
-    // Convert [][]u8 to [][]const u8
-    const args_const = try allocator.alloc([]const u8, args_owned.len);
-    for (args_owned, 0..) |arg, i| {
-        args_const[i] = arg; // Implicit cast from []u8 to []const u8 happens here
-    }
-    // No need to free args_const separately, it uses the arena allocator
-
-    // Command parsing logic - Use args_const for reading, args_owned for potential modification/freeing later
-    const command: Command = if (args_const.len < 2) .help else Command.fromString(args_const[1]);
+    // Command parsing logic - Use args directly for command parsing
+    const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
 
     // Handle simple commands directly
     switch (command) {
@@ -162,63 +177,50 @@ pub fn main() anyerror!void {
 
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
+                stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                
+                // Handle specific errors
                 switch (err) {
                     error.ConfigFileNotFound => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
                     },
-                    error.FileNotFound => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                    },
+                    error.FileNotFound => {}, // No additional message
                     error.ClusterNotFound => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
                     },
                     error.EnvironmentNotFound => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Environment name not found in configuration or argument missing.\n", .{}) catch {};
                     },
                     error.JsonParseError => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {};
                     },
                     error.ConfigInvalid => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
                     },
+                    error.MissingHostname => {
+                        stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
+                    },
+                    error.PathResolutionFailed => {
+                        stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
+                    },
+                    error.TargetMachineMismatch => {
+                        stderr.print(" -> Current machine does not match the target_machine specified for this environment.\n", .{}) catch {};
+                    },
+                    error.AmbiguousIdentifier => {
+                        stderr.print(" -> The provided ID prefix matches multiple environments. Please use more characters.\n", .{}) catch {};
+                    },
+                    error.RegistryError => {
+                        stderr.print(" -> Failed to access the environment registry. Check permissions for the zenv directory (ZENV_DIR or ~/.zenv).\n", .{}) catch {};
+                    },
                     error.ProcessError => {
-                        // For process errors, don't show any additional output
-                        // as the actual error output should have already been displayed
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                        // For process errors, don't show additional output
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     error.ModuleLoadError => {
                         // Module load errors are handled specially with no stack trace
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
-                    error.MissingHostname => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
-                    },
-                    error.PathResolutionFailed => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
-                    },
-                    error.TargetMachineMismatch => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> Current machine does not match the target_machine specified for this environment.\n", .{}) catch {};
-                    },
-                    error.AmbiguousIdentifier => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> The provided ID prefix matches multiple environments. Please use more characters.\n", .{}) catch {};
-                    },
-                    error.RegistryError => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                        stderr.print(" -> Failed to access the environment registry. Check permissions for the zenv directory (ZENV_DIR or ~/.zenv).\n", .{}) catch {};
-                    },
                     else => {
-                        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
                         stderr.print(" -> Unexpected error.\n", .{}) catch {};
                         std.debug.dumpStackTrace(trace.*);
                     },
@@ -251,23 +253,23 @@ pub fn main() anyerror!void {
         };
     }
 
-    defer process.argsFree(allocator, args_owned); // Defer freeing the original mutable args
+    defer process.argsFree(allocator, args); // Defer freeing the original args
 
     // Dispatch to command handlers
     switch (command) {
-        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args_const, handleError),
-        .activate => commands.handleActivateCommand(&registry, args_const, handleError),
-        .list => commands.handleListCommand(allocator, &registry, args_const),
-        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args_const, handleError),
-        .deregister => commands.handleDeregisterCommand(&registry, args_const, handleError),
-        .cd => commands.handleCdCommand(&registry, args_const, handleError),
-        .python => try commands.handlePythonCommand(allocator, args_const, handleError),
+        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args, handleError),
+        .activate => commands.handleActivateCommand(&registry, args, handleError),
+        .list => commands.handleListCommand(allocator, &registry, args),
+        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError),
+        .deregister => commands.handleDeregisterCommand(&registry, args, handleError),
+        .cd => commands.handleCdCommand(&registry, args, handleError),
+        .python => try commands.handlePythonCommand(allocator, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
 
         .unknown => {
-            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args_const[1]}) catch {};
+            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args[1]}) catch {};
             printUsage();
             process.exit(1);
         },

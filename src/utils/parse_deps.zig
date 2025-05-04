@@ -357,27 +357,24 @@ pub fn parseRequirementsTxt(
     var line_buffer = std.ArrayList(u8).init(allocator);
     defer line_buffer.deinit();
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
-
-    while (lines.next()) |line| {
+    // Split lines more efficiently with iterator directly
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    
+    while (line_iter.next()) |line| {
+        // Skip empty lines and comments early
+        if (line.len == 0) continue;
+        
         const trimmed_line = std.mem.trim(u8, line, " \t\r");
         if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
-            // Skip empty lines and comments
-            errors.debugLog(allocator, "Skipping comment or empty line: '{s}'", .{trimmed_line});
             continue;
         }
 
-        // Log each dependency being added
+        // For valid dependencies, add directly
         try output.print("  - Requirements file dependency: {s}", .{trimmed_line});
 
-        // Clear buffer and add the trimmed line
-        line_buffer.clearRetainingCapacity();
-        try line_buffer.appendSlice(trimmed_line);
-
-        // Create a duplicate of the buffer contents
-        const trimmed_dupe = try allocator.dupe(u8, line_buffer.items);
-        errdefer allocator.free(trimmed_dupe); // Clean up if append fails
-
+        // Create a duplicate of the trimmed line
+        const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
+        
         // Add the dependency
         try deps_list.append(trimmed_dupe);
         count += 1;
@@ -396,33 +393,17 @@ pub fn validateDependencies(
     var valid_deps = std.ArrayList([]const u8).init(allocator);
     // Improved error handling with explicit cleanup of any added items
     errdefer {
-        // If an error occurs, free any items we've added to valid_deps
-        for (valid_deps.items) |item| {
-            // Make sure the item isn't from raw_deps before freeing
-            var from_raw_deps = false;
-            for (raw_deps) |raw_dep| {
-                if (raw_dep.ptr == item.ptr) {
-                    from_raw_deps = true;
-                    break;
-                }
-            }
-            if (!from_raw_deps) {
-                allocator.free(item);
-            }
-        }
+        // Only free items we owned and added to valid_deps
         valid_deps.deinit();
     }
 
-    // Create a hashmap to track seen package names (case-insensitive) with owned keys
+    // Create a hashmap to track seen package names (case-insensitive)
     var seen_packages = StringHashMap.init(allocator);
-    defer {
-        // Free all the keys we've stored
-        var keys_iter = seen_packages.keyIterator();
-        while (keys_iter.next()) |key_ptr| {
-            allocator.free(key_ptr.*);
-        }
-        seen_packages.deinit();
-    }
+    defer seen_packages.deinit();
+
+    // Reuse a buffer for lowercase string conversion to reduce allocations
+    var lowercase_buf = std.ArrayList(u8).init(allocator);
+    defer lowercase_buf.deinit();
 
     for (raw_deps) |dep| {
         if (dep.len == 0) {
@@ -468,32 +449,27 @@ pub fn validateDependencies(
         }
 
         // Convert package name to lowercase for case-insensitive duplicate check
-        // We need to own the lowercase string to put it in the hash map
-        const package_name_lower_owned = try allocator.alloc(u8, package_name_raw.len);
-        // Need a defer to free this if putting into the map fails or we continue
-        // However, if put succeeds, the map owns it, so it's complex.
-        // Let's allocate, put, and handle freeing in the map's defer.
-        _ = std.ascii.lowerString(package_name_lower_owned, package_name_raw);
+        // Reuse the same buffer to avoid repeated allocations
+        lowercase_buf.clearRetainingCapacity();
+        try lowercase_buf.ensureTotalCapacity(package_name_raw.len);
+        for (package_name_raw) |c| {
+            try lowercase_buf.append(std.ascii.toLower(c));
+        }
 
         // Check if we've already seen this package (case-insensitive)
-        if (seen_packages.contains(package_name_lower_owned)) {
+        if (seen_packages.contains(lowercase_buf.items)) {
             try output.print("Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep});
-            allocator.free(package_name_lower_owned); // Free if duplicate
             continue;
         }
 
         // Accept this dependency as valid
         try output.print("Including dependency: '{s}'", .{dep});
-        // Note: valid_deps contains slices pointing to the original `deps` argument OR
-        // slices pointing to duplicated strings from parseRequirementsTxt/parsePyprojectToml.
-        // The caller needs to manage the lifetime of these strings.
         try valid_deps.append(dep);
 
-        // Add the owned lowercase name to the seen set. If put fails, free the key.
-        seen_packages.put(package_name_lower_owned, {}) catch |err| {
-            allocator.free(package_name_lower_owned);
-            return err;
-        };
+        // Add the lowercase name to the seen set using a key we create and own
+        const lowercase_key = try allocator.dupe(u8, lowercase_buf.items);
+        errdefer allocator.free(lowercase_key);
+        try seen_packages.put(lowercase_key, {});
     }
 
     return valid_deps;

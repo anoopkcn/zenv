@@ -215,18 +215,19 @@ const Parse = struct {
 // =======================
 
 pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
-    // Use arena allocator ONLY for temporary allocations during parsing
+    // Use ArenaAllocator only for the JSON parsing phase
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
+    // Open the file only once and read it directly into the parser
     const file = try fs.cwd().openFile(config_path, .{});
     defer file.close();
-    const json_string = try file.readToEndAlloc(allocator, 1 * 1024 * 1024);
-    defer allocator.free(json_string);
-
-    // Parse JSON using the main allocator, not the arena
-    // This ensures the value_tree can be properly freed later
-    const value_tree = try json.parseFromSlice(json.Value, allocator, json_string, .{
+    
+    // Parse JSON using the standard method
+    const json_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    defer allocator.free(json_content);
+    
+    const value_tree = try json.parseFromSlice(json.Value, allocator, json_content, .{
         .allocate = .alloc_always,
     });
 
@@ -248,6 +249,9 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         config.base_dir = try allocator.dupe(u8, "zenv");
     }
 
+    // Pre-calculate the capacity for environments
+    try config.environments.ensureTotalCapacity(@intCast(root.object.count()));
+    
     // Parse environments
     var env_iter = root.object.iterator();
     while (env_iter.next()) |entry| {
@@ -266,25 +270,19 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
             if (env.target_machines.items.len == 0) return error.ConfigInvalid;
         } else return error.ConfigInvalid;
 
-        // Optional fields
-        if (env_value.object.get("fallback_python")) |py_exec| {
-            env.fallback_python = try Parse.getString(allocator, py_exec, null);
-        } else {
-            // Default to null (will auto-detect in setup script)
-            env.fallback_python = null;
-        }
+        // Optional fields with direct retrieval
+        env.fallback_python = try Parse.getString(allocator, 
+            env_value.object.get("fallback_python") orelse json.Value{ .null = {} }, null);
+        
+        env.description = try Parse.getString(allocator, 
+            env_value.object.get("description") orelse json.Value{ .null = {} }, null);
+        
+        env.dependency_file = try Parse.getString(allocator, 
+            env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
 
-        // Optional fields
-        if (env_value.object.get("description")) |desc| {
-            env.description = try Parse.getString(allocator, desc, null);
-        }
-
+        // Optional arrays
         if (env_value.object.get("modules")) |mods| {
             env.modules = try Parse.getStringArray(allocator, mods);
-        }
-
-        if (env_value.object.get("dependency_file")) |req| {
-            env.dependency_file = try Parse.getString(allocator, req, null);
         }
 
         if (env_value.object.get("dependencies")) |deps| {
@@ -372,19 +370,16 @@ pub const EnvironmentRegistry = struct {
         var registry = EnvironmentRegistry.init(allocator);
         errdefer registry.deinit();
 
-        // Create a temporary arena for parsing
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-
         const zenv_dir_path = try paths.ensureZenvDir(allocator);
         defer allocator.free(zenv_dir_path);
 
         const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
         defer allocator.free(registry_path);
 
+        // Try opening the registry file
         const file = std.fs.openFileAbsolute(registry_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                try registry.save();
+                try registry.save(); // Create an empty registry
                 return registry;
             }
             output.printError("Failed to open registry file: {s}", .{@errorName(err)}) catch {};
@@ -392,22 +387,17 @@ pub const EnvironmentRegistry = struct {
         };
         defer file.close();
 
-        const file_content = file.readToEndAlloc(arena.allocator(), 1 * 1024 * 1024) catch |err| {
-            output.printError("Failed to read registry file: {s}", .{@errorName(err)}) catch {};
-            return err;
-        };
-
-        // Parse JSON using the allocator directly, not the arena, to properly clean up
-        // This makes sure all parsed JSON data can be properly freed
-        const parsed = json.parseFromSlice(json.Value, allocator, file_content, .{
+        // Parse the JSON content from the file
+        const file_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+        defer allocator.free(file_content);
+        
+        // Use parsed value with proper error handling
+        const parsed = try json.parseFromSlice(json.Value, allocator, file_content, .{
             .allocate = .alloc_always,
-        }) catch |err| {
-            output.printError("Failed to parse registry JSON: {s}", .{@errorName(err)}) catch {};
-            return err;
-        };
-        // Since we're using the main allocator, make sure we clean up
+        });
         defer parsed.deinit();
-
+        
+        // Process the parsed data
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
             if (environments != .array) return error.InvalidRegistryFormat;
@@ -422,21 +412,24 @@ pub const EnvironmentRegistry = struct {
                 // Extract required fields
                 const env_name_val = entry_obj.get("name") orelse continue;
                 if (env_name_val != .string) continue;
+                const env_name = env_name_val.string;
 
                 const project_dir_val = entry_obj.get("project_dir") orelse continue;
                 if (project_dir_val != .string) continue;
+                const project_dir = project_dir_val.string;
 
                 const target_machines_val = entry_obj.get("target_machine") orelse continue;
                 if (target_machines_val != .string) continue;
+                const target_machines = target_machines_val.string;
 
                 // Make duplicates for the registry
-                const env_name = try allocator.dupe(u8, env_name_val.string);
-                errdefer allocator.free(env_name);
+                const env_name_owned = try allocator.dupe(u8, env_name);
+                errdefer allocator.free(env_name_owned);
 
-                const project_dir = try allocator.dupe(u8, project_dir_val.string);
-                errdefer allocator.free(project_dir);
+                const project_dir_owned = try allocator.dupe(u8, project_dir);
+                errdefer allocator.free(project_dir_owned);
 
-                const target_machines_str = try allocator.dupe(u8, target_machines_val.string);
+                const target_machines_str = try allocator.dupe(u8, target_machines);
                 errdefer allocator.free(target_machines_str);
 
                 // Handle optional description
@@ -454,13 +447,14 @@ pub const EnvironmentRegistry = struct {
                     if (id_value == .string) {
                         id_owned = try allocator.dupe(u8, id_value.string);
                     } else {
-                        id_owned = try generateSHA1ID(allocator, env_name, project_dir, target_machines_str);
+                        id_owned = try generateSHA1ID(allocator, env_name_owned, project_dir_owned, target_machines_str);
                     }
                 } else {
-                    id_owned = try generateSHA1ID(allocator, env_name, project_dir, target_machines_str);
+                    id_owned = try generateSHA1ID(allocator, env_name_owned, project_dir_owned, target_machines_str);
                 }
                 errdefer allocator.free(id_owned);
 
+                // Get venv_path
                 const venv_path_owned: []const u8 = blk: {
                     if (entry_obj.get("venv_path")) |venv_path_val| {
                         if (venv_path_val == .string) {
@@ -470,7 +464,7 @@ pub const EnvironmentRegistry = struct {
 
                     // Default reconstruction
                     break :blk try std.fs.path.join(allocator, &[_][]const u8{
-                        project_dir, "zenv", env_name,
+                        project_dir_owned, "zenv", env_name_owned,
                     });
                 };
                 errdefer allocator.free(venv_path_owned);
@@ -478,8 +472,8 @@ pub const EnvironmentRegistry = struct {
                 // Add entry to registry
                 try registry.entries.append(.{
                     .id = id_owned,
-                    .env_name = env_name,
-                    .project_dir = project_dir,
+                    .env_name = env_name_owned,
+                    .project_dir = project_dir_owned,
                     .description = description,
                     .target_machines_str = target_machines_str,
                     .venv_path = venv_path_owned,
@@ -613,25 +607,37 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
-        // Fast lookup by name or id
+        // Fast path: Direct lookup by env_name
         for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.env_name, identifier) or std.mem.eql(u8, entry.id, identifier)) {
+            if (std.mem.eql(u8, entry.env_name, identifier)) {
+                return entry;
+            }
+        }
+        
+        // Check for exact ID match
+        for (self.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.id, identifier)) {
                 return entry;
             }
         }
 
-        // Lookup by prefix if long enough
+        // Lookup by ID prefix if it's long enough (7+ chars)
         if (identifier.len >= 7) {
             var matching_entry: ?RegistryEntry = null;
             var match_count: usize = 0;
 
             for (self.entries.items) |entry| {
-                if (entry.id.len >= identifier.len and std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
+                if (entry.id.len >= identifier.len and 
+                    std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
                     matching_entry = entry;
                     match_count += 1;
+                    
+                    // If we find more than one match, we can't uniquely identify
+                    if (match_count > 1) break;
                 }
             }
 
+            // Return only if we found exactly one match
             if (match_count == 1) return matching_entry;
         }
 

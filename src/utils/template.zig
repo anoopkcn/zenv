@@ -37,13 +37,35 @@ pub fn processTemplateString(
     template_content: []const u8,
     replacements: std.StringHashMap([]const u8),
 ) ![]const u8 {
+    // Check if we have any placeholders at all to avoid unnecessary work
+    if (std.mem.indexOf(u8, template_content, "@@") == null) {
+        return allocator.dupe(u8, template_content); // No placeholders, return a copy
+    }
+
+    // Pre-scan for placeholders to estimate total result size
+    var estimated_size = template_content.len;
+    var pos: usize = 0;
+    while (pos < template_content.len) {
+        const placeholder_start = std.mem.indexOfPos(u8, template_content, pos, "@@") orelse break;
+        const placeholder_end = std.mem.indexOfPos(u8, template_content, placeholder_start + 2, "@@") orelse break;
+        
+        // Extract placeholder name
+        const placeholder_name = template_content[placeholder_start + 2 .. placeholder_end];
+        if (replacements.get(placeholder_name)) |replacement| {
+            // Adjust the estimated size: remove placeholder size, add replacement size
+            estimated_size = estimated_size - (placeholder_end + 2 - placeholder_start) + replacement.len;
+        }
+        
+        pos = placeholder_end + 2;
+    }
+
     // Use a pre-sized buffer to reduce reallocations
-    var result_buffer = try std.ArrayList(u8).initCapacity(allocator, template_content.len);
+    var result_buffer = try std.ArrayList(u8).initCapacity(allocator, estimated_size);
     defer result_buffer.deinit();
     const writer = result_buffer.writer();
 
     // Process the template - search for @@PLACEHOLDER@@ patterns and replace them
-    var pos: usize = 0;
+    pos = 0;
     while (pos < template_content.len) {
         // Find the start of a placeholder
         const placeholder_start = std.mem.indexOfPos(u8, template_content, pos, "@@") orelse {
@@ -65,7 +87,7 @@ pub fn processTemplateString(
         // Extract the placeholder name
         const placeholder_name = template_content[placeholder_start + 2 .. placeholder_end];
 
-        // Check if we have a replacement for this placeholder using get()
+        // Check if we have a replacement for this placeholder
         if (replacements.get(placeholder_name)) |replacement| {
             // Replace with the provided value
             try writer.writeAll(replacement);

@@ -37,9 +37,11 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
         return true;
     }
 
-    // Handle common prefix pattern: "compute-*"
+    // Optimize common patterns first
+    
+    // 1. Fast path for prefix pattern: "prefix*"
     if (pattern.len >= 2 and pattern[pattern.len - 1] == '*') {
-        // Check if it's a simple prefix pattern without other wildcards
+        // Check if all other characters are literals (no wildcards)
         var has_other_wildcards = false;
         for (pattern[0 .. pattern.len - 1]) |c| {
             if (c == '*' or c == '?') {
@@ -54,9 +56,9 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
         }
     }
 
-    // Handle common suffix pattern: "*.example.com"
-    if (pattern.len >= 2 and pattern[0] == '*') {
-        // Check if it's a simple suffix pattern without other wildcards
+    // 2. Fast path for suffix pattern: "*suffix"
+    if (pattern.len >= 2 and pattern[0] == '*' and pattern[1] != '*') {
+        // Check if all other characters are literals (no wildcards)
         var has_other_wildcards = false;
         for (pattern[1..]) |c| {
             if (c == '*' or c == '?') {
@@ -70,22 +72,97 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
             return std.mem.endsWith(u8, str, suffix);
         }
     }
-
-    // For other patterns, use a more general algorithm (recursive)
-    if (pattern[0] == '*') {
-        // '*' can match 0 or more characters
-        // Try matching rest of pattern with current string, or
-        // keep the asterisk and match with next character of string
-        return (str.len > 0 and patternMatches(pattern, str[1..])) or patternMatches(pattern[1..], str);
-    } else if (pattern[0] == '?') {
-        // '?' matches any single character
-        return str.len > 0 and patternMatches(pattern[1..], str[1..]);
-    } else if (pattern[0] == str[0]) {
-        // Match exact character
-        return str.len > 0 and patternMatches(pattern[1..], str[1..]);
+    
+    // 3. Fast path for contains pattern: "*middle*"
+    if (pattern.len >= 3 and pattern[0] == '*' and pattern[pattern.len - 1] == '*') {
+        // Check if middle part has no wildcards
+        var has_wildcards = false;
+        for (pattern[1 .. pattern.len - 1]) |c| {
+            if (c == '*' or c == '?') {
+                has_wildcards = true;
+                break;
+            }
+        }
+        
+        if (!has_wildcards) {
+            const middle = pattern[1 .. pattern.len - 1];
+            return std.mem.indexOf(u8, str, middle) != null;
+        }
     }
 
-    return false;
+    // Use dynamic programming for more complex patterns
+    // This is more efficient than recursion for non-trivial patterns
+    return wildcardMatch(pattern, str);
+}
+
+// Helper function that implements an efficient dynamic programming algorithm 
+// for wildcard matching - this avoids recursion stack overhead and 
+// redundant calculations
+fn wildcardMatch(pattern: []const u8, str: []const u8) bool {
+    const m = str.len;
+    const n = pattern.len;
+    
+    // Allocate boolean arrays on the stack for the DP table
+    // We only need two rows: previous and current
+    var prev_row: [512]bool = undefined;
+    var curr_row: [512]bool = undefined;
+    
+    // Handle potential buffer size issues
+    if (m >= prev_row.len) return fallbackWildcardMatch(pattern, str);
+    
+    // Base case: empty pattern matches empty string
+    prev_row[0] = true;
+    
+    // Base case: a pattern with only '*' can match empty string
+    for (1..n+1) |j| {
+        prev_row[j] = prev_row[j-1] and pattern[j-1] == '*';
+    }
+    
+    // Fill the dp table
+    for (1..m+1) |i| {
+        // Reset current row
+        curr_row[0] = false;
+        
+        for (1..n+1) |j| {
+            if (pattern[j-1] == '*') {
+                // '*' can match zero or multiple characters
+                curr_row[j] = curr_row[j-1] or prev_row[j];
+            } else if (pattern[j-1] == '?' or pattern[j-1] == str[i-1]) {
+                // Current characters match or '?' matches any single character
+                curr_row[j] = prev_row[j-1];
+            } else {
+                // Characters don't match
+                curr_row[j] = false;
+            }
+        }
+        
+        // Swap rows for next iteration
+        for (0..n+1) |j| {
+            prev_row[j] = curr_row[j];
+        }
+    }
+    
+    return prev_row[n];
+}
+
+// Fallback implementation for extreme cases
+fn fallbackWildcardMatch(pattern: []const u8, str: []const u8) bool {
+    if (pattern.len == 0) return str.len == 0;
+    
+    // Handle first character
+    const first_match = str.len > 0 and 
+        (pattern[0] == str[0] or pattern[0] == '?');
+    
+    // If we see a '*', we can:
+    // 1. Skip it entirely (match zero characters)
+    // 2. Match the current character and keep the '*' (match multiple characters)
+    if (pattern.len > 0 and pattern[0] == '*') {
+        return fallbackWildcardMatch(pattern[1..], str) or 
+               (str.len > 0 and fallbackWildcardMatch(pattern, str[1..]));
+    }
+    
+    // If first character matches, proceed with the rest
+    return first_match and fallbackWildcardMatch(pattern[1..], str[1..]);
 }
 
 // Splits a hostname into domain components and checks if any match the target
