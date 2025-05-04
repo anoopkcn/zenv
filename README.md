@@ -220,6 +220,7 @@ Commands:
 
   setup <name>              Set up the specified environment based on zenv.json file.
                             Creates a virtual environment in <base_dir>/<name>/.
+                            <base_dir> and <name> can be defined in the zenv.json file.
 
   activate <name|id>        Output the path to the activation script.
                             You can use the environment name or its ID (full or partial).
@@ -250,25 +251,24 @@ Commands:
 
   help, --help              Show this help message.
 
-Options:
-  --force-deps              When used with setup command, it tries to install all
-                            dependencies even if they are already provided by loaded modules.
+Options for setup:
+  --force-deps              It tries to install all dependencies even if they are already
+                            provided by loaded modules.
 
   --no-host                 Bypass hostname validation, this is equivalant to setting
                             "target_machines": ["*"] in the zenv.json
 
-  --rebuild                 Force rebuild the virtual environment, even if it already exists.
-                            Useful when modules change or Python version needs to be updated.
+  --rebuild                 Re-build the virtual environment, even if it already exists.
 
   --python                  Use only the pinned Python set with 'use' subcommand.
                             This ignores the default python priority list.
                             Will error if no pinned Python is configured.
 
 Configuration (zenv.json):
-  The 'zenv.json' file defines your environments. It can optionally include
-  "base_dir": "path/to/venvs",  which specifies the base directory for the environments.
-  Can be relative to zenv.json location or an absolute path(if path starts with a /).
-  Defaults to "base_dir": "zenv" if omitted.
+  The 'zenv.json' file defines your environments. Environment names occupy top level
+  "base_dir": "path/to/venvs", is exceptional top level key-value which specifies the
+  base directory for for storing environments. The value can be a relative path,
+  relative to zenv.json OR an absolute path(if path starts with a /).
 
 Registry (ZENV_DIR/registry.json):
   The global registry allows you to manage environments from any directory.
@@ -282,7 +282,7 @@ Python Priority list
   3. zenv-managed pinned Python
   4. System python3
   5. System python
-  This prority list can be ignored with 'zenv setup <env_name> --python' which will use,
+  This prority list can be ignored with 'zenv setup <name> --python' which will use,
   pinned python to manage the environement
 ```
 
