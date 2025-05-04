@@ -99,15 +99,14 @@ fn printUsage() void {
         \\
         \\  help, --help              Show this help message.
         \\
-        \\Options:
-        \\  --force-deps              When used with setup command, it tries to install all
-        \\                            dependencies even if they are already provided by loaded modules.
+        \\Options for setup:
+        \\  --force-deps              It tries to install all dependencies even if they are already
+        \\                            provided by loaded modules.
         \\
         \\  --no-host                 Bypass hostname validation, this is equivalant to setting
         \\                            "target_machines": ["*"] in the zenv.json
         \\
-        \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
-        \\                            Useful when modules change or Python version needs to be updated.
+        \\  --rebuild                 Re-build the virtual environment, even if it already exists.
         \\
         \\  --python                  Use only the pinned Python set with 'use' subcommand.
         \\                            This ignores the default python priority list.
@@ -178,39 +177,73 @@ pub fn main() anyerror!void {
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
                 stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
-                
+
                 // Handle specific errors
                 switch (err) {
                     error.ConfigFileNotFound => {
-                        stderr.print(" -> Configuration file '{s}' not found.\n", .{config_path}) catch {};
+                        stderr.print(
+                            \\ -> Configuration file '{s}' not found.
+                            \\
+                        , .{config_path}) catch {};
                     },
                     error.FileNotFound => {}, // No additional message
                     error.ClusterNotFound => {
-                        stderr.print(" -> Target machine mismatch or environment not suitable for current machine.\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> Target machine mismatch or environment not suitable for current machine.
+                            \\
+                        , .{}) catch {};
                     },
                     error.EnvironmentNotFound => {
-                        stderr.print(" -> Environment name not found in configuration or argument missing.\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> Environment name not found in configuration or argument missing.
+                            \\
+                        , .{}) catch {};
                     },
                     error.JsonParseError => {
-                        stderr.print(" -> Invalid JSON format in '{s}'. Check syntax.\n", .{config_path}) catch {};
+                        stderr.print(
+                            \\ -> Invalid JSON format in '{s}'. Check syntax.
+                            \\
+                        , .{config_path}) catch {};
                     },
                     error.ConfigInvalid => {
-                        stderr.print(" -> Invalid configuration structure in '{s}'. Check keys/types/required fields.\n", .{config_path}) catch {};
+                        stderr.print(
+                            \\ -> Invalid configuration structure in '{s}'.
+                            \\    Check keys/types/required fields.
+                            \\
+                        , .{config_path}) catch {};
                     },
                     error.MissingHostname => {
-                        stderr.print(" -> HOSTNAME environment variable not set or inaccessible. Needed for target machine check.\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> HOSTNAME environment variable not set or inaccessible.
+                            \\    Needed for target machine check.
+                            \\
+                        , .{}) catch {};
                     },
                     error.PathResolutionFailed => {
-                        stderr.print(" -> Failed to resolve a required file path (e.g., requirements file).\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> Failed to resolve a required file path (e.g., requirements file).
+                            \\
+                        , .{}) catch {};
                     },
                     error.TargetMachineMismatch => {
-                        stderr.print(" -> Current machine does not match the target_machine specified for this environment.\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> Current machine does not match the target specified for this environment.
+                            \\
+                        , .{}) catch {};
                     },
                     error.AmbiguousIdentifier => {
-                        stderr.print(" -> The provided ID prefix matches multiple environments. Please use more characters.\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> The provided ID prefix matches multiple environments.
+                            \\    Please use more characters in the prefix.
+                            \\
+                        , .{}) catch {};
                     },
                     error.RegistryError => {
-                        stderr.print(" -> Failed to access the environment registry. Check permissions for the zenv directory (ZENV_DIR or ~/.zenv).\n", .{}) catch {};
+                        stderr.print(
+                            \\ -> Failed to access the environment registry.
+                            \\    Check permissions for ZENV_DIR (default ~/.zenv)
+                            \\
+                        , .{}) catch {};
                     },
                     error.ProcessError => {
                         // For process errors, don't show additional output
@@ -269,7 +302,7 @@ pub fn main() anyerror!void {
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
 
         .unknown => {
-            std.io.getStdErr().writer().print("Error: Unknown command '{s}'\n\n", .{args[1]}) catch {};
+            output.printError("Unknown command '{s}'", .{args[1]}) catch {};
             printUsage();
             process.exit(1);
         },
