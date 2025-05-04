@@ -44,43 +44,44 @@ fn printUsage() void {
         \\Commands:
         \\  init                      Create a new zenv.json template file in the current directory.
         \\
-        \\  setup <env_name>          Set up the specified environment based on zenv.json file.
-        \\                            Creates a virtual environment in <base_dir>/<env_name>/.
+        \\  setup <name>              Set up the specified environment based on zenv.json file.
+        \\                            Creates a virtual environment in <base_dir>/<name>/.
         \\
-        \\  activate <env_name|id>    Output the path to the activation script.
+        \\  activate <name|id>        Output the path to the activation script.
         \\                            You can use the environment name or its ID (full or partial).
-        \\                            To activate the environment, use: source $(zenv activate <env_name|id>)
+        \\                            To activate the environment, use:
+        \\                            source $(zenv activate <name|id>)
         \\
-        \\  cd <env_name|id>          Output the project directory path.
+        \\  cd <name|id>              Output the project directory path.
         \\                            You can use the environment name or its ID (full or partial).
-        \\                            To change to the project directory, use: cd $(zenv cd <env_name|id>)
+        \\                            To change to the project directory, use:
+        \\                            cd $(zenv cd <name|id>)
         \\
         \\  list                      List environments registered for the current machine.
         \\
         \\  list --all                List all registered environments.
         \\
-        \\  register <env_name>       Register an environment in the global registry.
+        \\  register <name>           Register an environment in the global registry.
         \\                            Registers the current directory as the project directory.
         \\
-        \\  deregister <env_name|id>  Remove an environment from the global registry.
+        \\  deregister <name|id>      Remove an environment from the global registry.
         \\                            It does not remove the environment itself.
         \\
         \\  python <subcommand>       Python management commands:
-        \\    install <version>       Install a specified Python version (e.g., 3.10.8)
-        \\    use <version>           Set the specified version as the pinned python version.
-        \\    list                    List all installed Python versions
+        \\                            install <version>  :  Install a specified Python version.
+        \\                            use <version>      :  pinn a python version.
+        \\                            list               :  List all installed Python versions.
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
         \\  help, --help              Show this help message.
         \\
         \\Options:
-        \\  --force-deps              When used with setup command, it tries to install all dependencies
-        \\                            even if they are already provided by loaded modules.
+        \\  --force-deps              When used with setup command, it tries to install all
+        \\                            dependencies even if they are already provided by loaded modules.
         \\
-        \\  --no-host                 Bypass hostname validation and allow setup/register of an environment
-        \\                            regardless of the target_machine specified in the configuration.
-        \\                            Useful for portable environments or development machines.
+        \\  --no-host                 Bypass hostname validation, this is equivalant to setting
+        \\                            "target_machines": ["*"] in the zenv.json
         \\
         \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
         \\                            Useful when modules change or Python version needs to be updated.
@@ -90,16 +91,25 @@ fn printUsage() void {
         \\                            Will error if no pinned Python is configured.
         \\
         \\Configuration (zenv.json):
-        \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
-        \\  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
+        \\  The 'zenv.json' file defines your environments. It can optionally include
+        \\  "base_dir": "path/to/venvs",  which specifies the base directory for the environments.
         \\  Can be relative to zenv.json location or an absolute path(if path starts with a /).
         \\  Defaults to "base_dir": "zenv" if omitted.
         \\
         \\Registry (ZENV_DIR/registry.json):
         \\  The global registry allows you to manage environments from any directory.
-        \\  Setting up an environment will register that environment OR register it with 'zenv register <env_name>'.
-        \\  Once registred one can activate it from anywhere with 'source $(zenv activate <env_name|id>)'.
-        \\  Also the project directory can be 'cd' into from anywhere using 'source $(zenv cd <env_name|id>)'
+        \\  Setting up an environment will register that environment OR
+        \\  register it with 'zenv register <name>'. Once registred one can activate
+        \\  using 'source $(zenv activate <name|id>)' from any directory.
+        \\
+        \\Python Priority list
+        \\  1. Module-provided Python (if HPC modules are loaded)
+        \\  2. Explicitly configured 'fallback_python' from zenv.json (if not null)
+        \\  3. zenv-managed pinned Python
+        \\  4. System python3
+        \\  5. System python
+        \\  This prority list can be ignored with 'zenv setup <env_name> --python' which will use,
+        \\  pinned python to manage the environement
         \\
     ;
     std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
