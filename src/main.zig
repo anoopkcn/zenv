@@ -54,7 +54,7 @@ const Command = enum {
 
 fn printVersion() !void {
     std.io.getStdOut().writer().print("{s}", .{options.version}) catch |err| {
-        output.printError("Error printing version: {s}", .{@errorName(err)}) catch {};
+        output.printError("Printing version: {s}", .{@errorName(err)}) catch {};
     };
 }
 
@@ -113,10 +113,10 @@ fn printUsage() void {
         \\                            Will error if no pinned Python is configured.
         \\
         \\Configuration (zenv.json):
-        \\  The 'zenv.json' file defines your environments. It can optionally include
-        \\  "base_dir": "path/to/venvs",  which specifies the base directory for the environments.
-        \\  Can be relative to zenv.json location or an absolute path(if path starts with a /).
-        \\  Defaults to "base_dir": "zenv" if omitted.
+        \\  The 'zenv.json' file defines your environments. Environment names occupy top level
+        \\  "base_dir": "path/to/venvs", is exceptional top level key-value which specifies the
+        \\  base directory for for storing environments. The value can be a relative path,
+        \\  relative to zenv.json OR an absolute path(if path starts with a /).
         \\
         \\Registry (ZENV_DIR/registry.json):
         \\  The global registry allows you to manage environments from any directory.
@@ -130,11 +130,11 @@ fn printUsage() void {
         \\  3. zenv-managed pinned Python
         \\  4. System python3
         \\  5. System python
-        \\  This prority list can be ignored with 'zenv setup <env_name> --python' which will use,
+        \\  This prority list can be ignored with 'zenv setup <name> --python' which will use,
         \\  pinned python to manage the environement
         \\
     ;
-    std.io.getStdErr().writer().print("{s}", .{usage}) catch {};
+    std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
 }
 
 pub fn main() anyerror!void {
@@ -293,7 +293,8 @@ pub fn main() anyerror!void {
 
         .unknown => {
             output.printError("Unknown command '{s}'", .{args[1]}) catch {};
-            printUsage();
+            output.print("run 'zenv help' to see the usage", .{}) catch {};
+            // printUsage();
             process.exit(1);
         },
     }
