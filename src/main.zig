@@ -85,14 +85,14 @@ fn printUsage() void {
         \\  --rebuild                 Force rebuild the virtual environment, even if it already exists.
         \\                            Useful when modules change or Python version needs to be updated.
         \\
-        \\  --python                  Use only the default Python set with 'zenv python use <version>'.
-        \\                            This ignores any module-provided Python and other configuration.
-        \\                            Will error if no default Python is configured.
+        \\  --python                  Use only the pinned Python which is set with 'zenv python use <version>'.
+        \\                            This ignores the default python priority list.
+        \\                            Will error if no pinned Python is configured.
         \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file defines your environments. It can optionally include top-level key-value:
         \\  "base_dir": "path/to/venvs",  Specifies the base directory for creating virtual environments.
-        \\  Can be relative to zenv.json location or an absolute path(starts with a /).
+        \\  Can be relative to zenv.json location or an absolute path(if path starts with a /).
         \\  Defaults to "base_dir": "zenv" if omitted.
         \\
         \\Registry (ZENV_DIR/registry.json):
