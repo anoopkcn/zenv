@@ -22,7 +22,7 @@ pub fn handleInitCommand(
     const file_exists = blk: {
         cwd.access(config_path, .{}) catch |err| {
             if (err != error.FileNotFound) {
-                std.io.getStdErr().writer().print("Error accessing current directory: {s}\n", .{@errorName(err)}) catch {};
+               output.printError("Accessing current directory: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
             // File doesn't exist
@@ -32,7 +32,7 @@ pub fn handleInitCommand(
     };
 
     if (file_exists) {
-        std.io.getStdErr().writer().print("Error: {s} already exists. Please remove or rename it first.\n", .{config_path}) catch {};
+       output.printError("{s} already exists. Please remove or rename it first.", .{config_path}) catch {};
         std.process.exit(1);
     }
 
@@ -48,31 +48,31 @@ pub fn handleInitCommand(
 
     // Add replacements for the template
     replacements.put("HOSTNAME", hostname) catch |err| {
-        std.io.getStdErr().writer().print("Error creating replacements: {s}\n", .{@errorName(err)}) catch {};
+        output.printError("Creating replacements: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
 
     // Process the template using our JSON template utility
     const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
-        std.io.getStdErr().writer().print("Error processing template: {s}\n", .{@errorName(err)}) catch {};
+        output.printError("Processing template: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
     defer allocator.free(processed_content);
 
     // Write template to file
     const file = cwd.createFile(config_path, .{}) catch |err| {
-        std.io.getStdErr().writer().print("Error creating {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
+        output.printError("Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
     defer file.close();
 
     file.writeAll(processed_content) catch |err| {
-        std.io.getStdErr().writer().print("Error writing to {s}: {s}\n", .{ config_path, @errorName(err) }) catch {};
+        output.printError("Writing to {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
 
-    output.print("Created zenv.json template in the current directory.\n", .{}) catch {};
-    output.print("Edit it to customize your environments.\n", .{}) catch {};
+    output.print("Created zenv.json template in the current directory.", .{}) catch {};
+    output.print("Edit it to customize your environments.", .{}) catch {};
 }
 
 pub fn handleSetupCommand(
