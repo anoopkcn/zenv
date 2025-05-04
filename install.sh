@@ -87,6 +87,7 @@ get_arch() {
 
 OS=$(get_os)
 ARCH=$(get_arch)
+OPT_BUILD='' #-small
 
 ohai "Detected OS: ${OS}"
 ohai "Detected Arch: ${ARCH}"
@@ -113,10 +114,10 @@ fi
 ASSET_NAME_BASE="${EXE_NAME}-${ARCH}-${OS}"
 if [ "$OS" == "linux" ]; then
   # Append '-musl' for Linux builds as per the naming convention
-  ASSET_NAME="${ASSET_NAME_BASE}-musl.tar.gz"
+  ASSET_NAME="${ASSET_NAME_BASE}-musl${OPT_BUILD}.tar.gz"
 else
   # Assume non-Linux builds don't have '-musl'
-  ASSET_NAME="${ASSET_NAME_BASE}.tar.gz"
+  ASSET_NAME="${ASSET_NAME_BASE}${OPT_BUILD}.tar.gz"
 fi
 
 ohai "Constructed expected asset name: ${ASSET_NAME}"
