@@ -108,15 +108,15 @@ if ! curl -sSL --fail -o "$api_response_file" "$API_URL"; then
 fi
 
 # Construct the expected asset filename based on the detected platform and naming convention
-# Example: zenv-x86_64-linux-musl-small.tar.gz
-# Example: zenv-aarch64-macos-small.tar.gz
+# Example: zenv-x86_64-linux-musl.tar.gz
+# Example: zenv-aarch64-macos.tar.gz
 ASSET_NAME_BASE="${EXE_NAME}-${ARCH}-${OS}"
 if [ "$OS" == "linux" ]; then
   # Append '-musl' for Linux builds as per the naming convention
-  ASSET_NAME="${ASSET_NAME_BASE}-musl-small.tar.gz"
+  ASSET_NAME="${ASSET_NAME_BASE}-musl.tar.gz"
 else
   # Assume non-Linux builds don't have '-musl'
-  ASSET_NAME="${ASSET_NAME_BASE}-small.tar.gz"
+  ASSET_NAME="${ASSET_NAME_BASE}.tar.gz"
 fi
 
 ohai "Constructed expected asset name: ${ASSET_NAME}"
