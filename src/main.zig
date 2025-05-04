@@ -172,77 +172,67 @@ pub fn main() anyerror!void {
 
     const handleError = struct {
         pub fn func(err: anyerror) void {
-            const stderr = std.io.getStdErr().writer();
 
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
-                stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+                output.printError("{s}", .{@errorName(err)}) catch {};
 
                 // Handle specific errors
                 switch (err) {
                     error.ConfigFileNotFound => {
-                        stderr.print(
-                            \\ -> Configuration file '{s}' not found.
-                            \\
+                        output.printError(
+                            \\Configuration file '{s}' not found
                         , .{config_path}) catch {};
                     },
-                    error.FileNotFound => {}, // No additional message
+                    error.FileNotFound => {
+                        output.printError(
+                            \\zenv could not find a file required to complete this command
+                        , .{}) catch {};
+                    },
                     error.ClusterNotFound => {
-                        stderr.print(
-                            \\ -> Target machine mismatch or environment not suitable for current machine.
-                            \\
+                        output.printError(
+                            \\Target machine mismatch or environment not suitable for current machine
                         , .{}) catch {};
                     },
                     error.EnvironmentNotFound => {
-                        stderr.print(
-                            \\ -> Environment name not found in configuration or argument missing.
-                            \\
+                        output.printError(
+                            \\Environment name not found in configuration or argument missing
                         , .{}) catch {};
                     },
                     error.JsonParseError => {
-                        stderr.print(
-                            \\ -> Invalid JSON format in '{s}'. Check syntax.
-                            \\
+                        output.printError(
+                            \\Invalid JSON format in '{s}'. Check syntax
                         , .{config_path}) catch {};
                     },
                     error.ConfigInvalid => {
-                        stderr.print(
-                            \\ -> Invalid configuration structure in '{s}'.
-                            \\    Check keys/types/required fields.
-                            \\
+                        output.printError(
+                            \\Invalid configuration structure in '{s}'. Check keys/types/required fields
                         , .{config_path}) catch {};
                     },
                     error.MissingHostname => {
-                        stderr.print(
-                            \\ -> HOSTNAME environment variable not set or inaccessible.
-                            \\    Needed for target machine check.
-                            \\
+                        output.printError(
+                            \\HOSTNAME is not set or inaccessible which is required for validation
                         , .{}) catch {};
                     },
                     error.PathResolutionFailed => {
-                        stderr.print(
-                            \\ -> Failed to resolve a required file path (e.g., requirements file).
+                        output.printError(
+                            \\Failed to resolve a required file path (e.g., requirements file)
                             \\
                         , .{}) catch {};
                     },
                     error.TargetMachineMismatch => {
-                        stderr.print(
-                            \\ -> Current machine does not match the target specified for this environment.
-                            \\
+                        output.printError(
+                            \\Current machine does not match the target specified for this environment
                         , .{}) catch {};
                     },
                     error.AmbiguousIdentifier => {
-                        stderr.print(
-                            \\ -> The provided ID prefix matches multiple environments.
-                            \\    Please use more characters in the prefix.
-                            \\
+                        output.printError(
+                            \\The provided ID prefix matches multiple environments. Use more characters
                         , .{}) catch {};
                     },
                     error.RegistryError => {
-                        stderr.print(
-                            \\ -> Failed to access the environment registry.
-                            \\    Check permissions for ZENV_DIR (default ~/.zenv)
-                            \\
+                        output.printError(
+                            \\Failed to access the environment registry. Check permissions for ZENV_DIR
                         , .{}) catch {};
                     },
                     error.ProcessError => {
@@ -254,12 +244,12 @@ pub fn main() anyerror!void {
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     else => {
-                        stderr.print(" -> Unexpected error.\n", .{}) catch {};
+                        output.printError("Unexpected error", .{}) catch {};
                         std.debug.dumpStackTrace(trace.*);
                     },
                 }
             } else {
-                stderr.print("Error: {s} (no trace available)\n", .{@errorName(err)}) catch {};
+                output.printError("{s} (no trace available)", .{@errorName(err)}) catch {};
             }
             process.exit(1);
         }
