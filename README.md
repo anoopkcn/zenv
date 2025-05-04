@@ -49,6 +49,9 @@ git clone https://github.com/anoopkcn/zenv.git
 cd zenv
 zig build
 
+# Optional: Move executable to ~/.local/bin (assumes ~/.local/bin is in PATH)
+mv zig-out/bin/zenv ~/.local/bin/
+# OR
 # Optional: Add to your PATH
 export PATH="$PATH:path/to/zig-out/bin"
 ```
