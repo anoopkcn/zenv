@@ -79,7 +79,7 @@ Example of a `zenv.json` file:
 
 ```json
 {
-  "env_name": {
+  "test": {
     "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
     "fallback_python": null,
     "dependency_file": "requirements.txt",
@@ -105,7 +105,6 @@ zenv list --all # for listing all available envs in the registry
 Example output:
 
 ```
-Available zenv environments:
 - test (fd15568424877584b01313de7b6a5a57be73b746)
   [target  : jureca, juwels, *]
   [project : /p/project1/hai_matbind/chandran1/zenv/test]
@@ -123,7 +122,7 @@ Example:
 
 ```bash
 # Activate by name
-source $(zenv activate env_name)
+source $(zenv activate name)
 
 # Activate by full ID
 source $(zenv activate fd15568424877584b01313de7b6a5a57be73b746)
@@ -139,16 +138,16 @@ But one can set `ZENV_DIR` environment variable as any directory with write perm
 
 Register an environment in the global registry:
 
-**This is done automatically when you run `zenv setup env_name`**
+**This is done automatically when you run `zenv setup <name>`**
 
 ```bash
-zenv register env_name
+zenv register <name>
 ```
 
 Remove an environment from the registry:
 
 ```bash
-zenv deregister env_name     # Remove by name or ID
+zenv deregister <name>     # Remove by name or ID
 ```
 
 ## Python Management
@@ -171,7 +170,7 @@ zenv python install <version>
 zenv python use <version>
 
 # use the pinned version
-zenv setup <env_name> --python
+zenv setup <name> --python
 ```
 
 ## Configuration Reference
@@ -181,7 +180,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
 ```json
 {
   "base_dir": "<opional_base_dir>",
-  "<env_name>": {
+  "<name>": {
     "target_machines": ["<machine_identifier>"],
     "fallback_python": "<path_to_python_or_null>",
     "description": "<optional_description_or_null>",
@@ -194,7 +193,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     },
     "activate_commands": ["<custom commands to run during activation process>"]
   },
-  "<another_env_name>": {
+  "<another_name>": {
     "target_machines": ["<anothor_machine_identifier>"]
   }
 }
@@ -293,7 +292,7 @@ If you encounter any bugs open an Issue. To use the debug logging feature, users
 Example:
 
 ```bash
-ZENV_DEBUG=1 zenv setup env_name
+ZENV_DEBUG=1 zenv setup name
 ```
 
 ## License
