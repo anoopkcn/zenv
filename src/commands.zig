@@ -292,7 +292,7 @@ pub fn handleActivateCommand(
     const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
 
-    output.print("{s}/activate.sh", .{venv_path}) catch |e| {
+    std.io.getStdOut().writer().print("{s}/activate.sh\n", .{venv_path}) catch |e| {
         output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
