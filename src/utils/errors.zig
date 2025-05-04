@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const output = @import("output.zig");
 
 pub const ZenvError = error{
     MissingHostname,
@@ -37,7 +38,7 @@ pub const ZenvError = error{
 ///
 /// Returns: The original error for propagation
 pub fn logAndReturn(err: anyerror, comptime message: []const u8, args: anytype) anyerror {
-    std.log.err(message, args);
+    output.printError(message, args) catch {};
     return err;
 }
 
@@ -51,7 +52,7 @@ pub fn logAndReturn(err: anyerror, comptime message: []const u8, args: anytype) 
 ///
 /// Returns: A mapped error or the original error
 pub fn handleFileError(err: anyerror, path: []const u8, operation: []const u8) anyerror {
-    std.log.err("File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) });
+    output.printError("File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) }) catch {};
 
     // Map common file errors to our error set
     return switch (err) {

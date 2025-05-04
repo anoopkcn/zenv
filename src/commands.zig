@@ -7,6 +7,7 @@ const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
 const python = @import("utils/python.zig");
 const configurations = @import("utils/config.zig");
+const output = @import("utils/output.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
@@ -92,13 +93,13 @@ pub fn handleSetupCommand(
 
     // Log the detected flags
     if (flags.force_deps) {
-        std.log.info("Force dependencies flag detected. User-specified dependencies will try to override module-provided packages.", .{});
+        try output.print("Force dependencies flag detected. User-specified dependencies will try to override module-provided packages.", .{});
     }
     if (flags.skip_hostname_check) {
-        std.log.info("No-host flag detected. Bypassing hostname validation.", .{});
+        try output.print("No-host flag detected. Bypassing hostname validation.", .{});
     }
     if (flags.force_rebuild) {
-        std.log.info("Force rebuild flag detected. Will recreate the virtual environment.", .{});
+        try output.print("Force rebuild flag detected. Will recreate the virtual environment.", .{});
     }
 
     // Get and validate the environment config
@@ -106,14 +107,14 @@ pub fn handleSetupCommand(
     const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
-    std.log.info("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
+    try output.print("Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
 
     // 0. Check the availability of modules
     var modules_verified = false;
     if (env_config.modules.items.len > 0) {
         // Use the improved validateModules function
         const modules_available = env.validateModules(allocator, env_config, flags.force_deps) catch |err| {
-            std.log.err("Failed to validate modules: {s}", .{@errorName(err)});
+            output.printError("Failed to validate modules: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(error.ModuleLoadError);
             return;
         };
@@ -124,7 +125,7 @@ pub fn handleSetupCommand(
             return;
         }
 
-        std.log.info("All modules appear to be available.", .{});
+        try output.print("All modules appear to be available.", .{});
         modules_verified = true;
     }
 
@@ -151,14 +152,14 @@ pub fn handleSetupCommand(
 
     // Add dependencies from config
     if (env_config.dependencies.items.len > 0) {
-        std.log.info("Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len});
+        try output.print("Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len});
         for (env_config.dependencies.items) |dep| {
-            std.log.info("  - Config dependency: {s}", .{dep});
+            try output.print("  - Config dependency: {s}", .{dep});
             // Don't dupe here, assume config owns them or they are literals
             try all_required_deps.append(dep);
         }
     } else {
-        std.log.info("No dependencies specified in configuration.", .{});
+        try output.print("No dependencies specified in configuration.", .{});
     }
 
     // Add dependencies from requirements file if specified
@@ -166,12 +167,12 @@ pub fn handleSetupCommand(
         // Check if the specified requirements file actually exists
         std.fs.cwd().access(req_file, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                std.log.err("Requirements file specified in configuration ('{s}') not found.", .{req_file});
+                output.printError("Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
                 handleErrorFn(err); // Use the original file not found error
                 return; // Exit setup command
             } else {
                 // Handle other potential access errors
-                std.log.err("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) });
+                output.printError("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
                 handleErrorFn(err);
                 return;
             }
@@ -180,51 +181,51 @@ pub fn handleSetupCommand(
         // Log the absolute path for debugging
         var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
-            std.log.err("Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) });
+            output.printError("Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             // handleErrorFn(err); // Or map to ZenvError
             return err; // Propagate error
         };
-        std.log.info("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path });
+        try output.print("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path });
 
         // Read the file content - use temp_allocator since we're done with it after parsing
         const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| { // Increased size limit
-            std.log.err("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) });
+            output.printError("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             handleErrorFn(error.PathResolutionFailed); // Use specific error
             return; // Exit setup command
         };
         // No need to defer free because the arena will handle cleanup
 
-        std.log.info("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len});
+        try output.print("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len});
 
         // Determine file type and parse
         const is_toml = std.mem.endsWith(u8, req_file, ".toml");
         var req_file_dep_count: usize = 0;
 
         if (is_toml) {
-            std.log.info("Detected TOML file format, parsing as pyproject.toml", .{});
+            try output.print("Detected TOML file format, parsing as pyproject.toml", .{});
             req_file_dep_count = try deps.parsePyprojectToml(allocator, req_content, &all_required_deps);
         } else {
-            std.log.info("Parsing as requirements.txt format", .{});
+            try output.print("Parsing as requirements.txt format", .{});
             // Use the new utility function
             req_file_dep_count = try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
         }
 
         if (req_file_dep_count > 0) {
-            std.log.info("Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file });
+            try output.print("Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file });
         } else {
-            std.log.warn("No valid dependencies found in file '{s}'", .{req_file});
+            try output.print("Warning: No valid dependencies found in file '{s}'", .{req_file});
         }
     } else {
-        std.log.info("No requirements file specified in configuration.", .{});
+        try output.print("No requirements file specified in configuration.", .{});
     }
 
     // Get base_dir from config
     const base_dir = config.base_dir;
 
     // Debug output - print the combined dependencies
-    std.log.info("Combined dependency list ({d} items):", .{all_required_deps.items.len});
+    try output.print("Combined dependency list ({d} items):", .{all_required_deps.items.len});
     for (all_required_deps.items) |dep| {
-        std.log.info("  - {s}", .{dep});
+        try output.print("  - {s}", .{dep});
     }
 
     // 2. Create venv base directory structure using base_dir
@@ -253,7 +254,7 @@ pub fn handleSetupCommand(
     // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-        std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
+        output.printError("Could not get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -267,8 +268,8 @@ pub fn handleSetupCommand(
     );
     try registry.save();
 
-    std.log.info("Environment '{s}' setup complete and registered in global registry.", .{env_name});
-    std.log.info("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name});
+    try output.print("Environment '{s}' setup complete and registered in global registry.", .{env_name});
+    try output.print("You can now activate it from any directory with: source $(zenv activate {s})", .{env_name});
 }
 
 pub fn handleActivateCommand(
@@ -295,7 +296,7 @@ pub fn handleActivateCommand(
 
     // Output the absolute path to our custom activation script
     writer.print("{s}/activate.sh\n", .{venv_path}) catch |e| {
-        std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
+        output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
 }
@@ -315,7 +316,7 @@ pub fn handleListCommand(
     if (use_hostname_filter) {
         // Get hostname directly using the utility function
         current_hostname = env.getSystemHostname(allocator) catch |err| {
-            std.log.warn("Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)});
+            output.print("Warning: Could not determine current hostname for filtering: {s}. Listing all environments.", .{@errorName(err)}) catch {};
             use_hostname_filter = false;
             current_hostname = null;
             hostname_allocd = false; // Ensure flag is false if hostname fetch failed
@@ -414,19 +415,19 @@ pub fn handleRegisterCommand(
 
     // Log flags if they're set
     if (flags.skip_hostname_check) {
-        std.log.info("'--no-host' flag detected. Skipping hostname validation.", .{});
+        output.print("'--no-host' flag detected. Skipping hostname validation.", .{}) catch {};
     }
 
     // Get the environment config directly without re-parsing validation
     const env_config = config.getEnvironment(env_name) orelse {
-        std.log.err("Environment '{s}' not found in configuration.", .{env_name});
+        output.printError("Environment '{s}' not found in configuration.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     };
 
     // Validate the environment config
     if (ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        std.log.err("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) });
+        output.printError("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
         handleErrorFn(err);
         return;
     }
@@ -434,7 +435,7 @@ pub fn handleRegisterCommand(
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
         const hostname = env.getSystemHostname(allocator) catch |err| {
-            std.log.err("Failed to get current hostname: {s}", .{@errorName(err)});
+            output.printError("Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
@@ -444,8 +445,8 @@ pub fn handleRegisterCommand(
         const hostname_matches = env.validateEnvironmentForMachine(env_config, hostname);
 
         if (!hostname_matches) {
-            std.log.err("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{ hostname, env_name });
-            std.log.err("Use '--no-host' flag to bypass this check if needed.", .{});
+            output.printError("Current machine ('{s}') does not match target machines specified for environment '{s}'.", .{ hostname, env_name }) catch {};
+            output.printError("Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
             handleErrorFn(error.TargetMachineMismatch);
             return;
         }
@@ -454,7 +455,7 @@ pub fn handleRegisterCommand(
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-        std.log.err("Could not get current working directory: {s}", .{@errorName(err)});
+        output.printError("Could not get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -464,14 +465,14 @@ pub fn handleRegisterCommand(
 
     // Register the environment in the global registry, passing base_dir
     registry.register(env_name, cwd_path, base_dir, env_config.description, env_config.target_machines.items) catch |err| {
-        std.log.err("Failed to register environment: {s}", .{@errorName(err)});
+        output.printError("Failed to register environment: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
 
     // Save the registry
     registry.save() catch |err| {
-        std.log.err("Failed to save registry: {s}", .{@errorName(err)});
+        output.printError("Failed to save registry: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -500,7 +501,7 @@ pub fn handleDeregisterCommand(
 
     // Store name for the success message - make a copy to ensure it remains valid
     const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        std.log.err("Failed to duplicate environment name: {s}", .{@errorName(err)});
+        output.printError("Failed to duplicate environment name: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -511,7 +512,7 @@ pub fn handleDeregisterCommand(
     if (registry.deregister(identifier)) {
         // Save the registry
         registry.save() catch |err| {
-            std.log.err("Failed to save registry: {s}", .{@errorName(err)});
+            output.printError("Failed to save registry: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
@@ -581,7 +582,7 @@ pub fn handleCdCommand(
 
     // Output just the project directory path
     writer.print("{s}\n", .{project_dir}) catch |e| {
-        std.log.err("Error writing to stdout: {s}", .{@errorName(e)});
+        output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
 }
@@ -593,8 +594,8 @@ pub fn handlePythonCommand(
 ) !void {
     // Check if we have a subcommand
     if (args.len < 3) {
-        std.log.err("Missing subcommand for 'python' command", .{});
-        std.log.info("Available subcommands: install, use, list", .{});
+        output.printError("Missing subcommand for 'python' command", .{}) catch {};
+        try output.print("Available subcommands: install, use, list", .{});
         handleErrorFn(error.ArgsError);
         return;
     }
@@ -606,14 +607,14 @@ pub fn handlePythonCommand(
         var version: ?[]const u8 = null;
         if (args.len >= 4) {
             version = args[3];
-            std.log.info("Installing Python version: {s}", .{version.?});
+            try output.print("Installing Python version: {s}", .{version.?});
         } else {
-            std.log.info("No version specified, will install default version", .{});
+            try output.print("No version specified, will install default version", .{});
         }
 
         // Install Python
         python.installPython(allocator, version) catch |err| {
-            std.log.err("Python installation failed: {s}", .{@errorName(err)});
+            output.printError("Python installation failed: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
@@ -621,8 +622,8 @@ pub fn handlePythonCommand(
     } else if (std.mem.eql(u8, subcommand, "use")) {
         // Python use [version] command
         if (args.len < 4) {
-            std.log.err("Missing version argument for 'python use' command", .{});
-            std.log.info("Usage: zenv python use <version>", .{});
+            output.printError("Missing version argument for 'python use' command", .{}) catch {};
+            try output.print("Usage: zenv python use <version>", .{});
             handleErrorFn(error.ArgsError);
             return;
         }
@@ -635,8 +636,8 @@ pub fn handlePythonCommand(
         try python.listInstalledVersions(allocator);
 
     } else {
-        std.log.err("Unknown subcommand '{s}' for 'python' command", .{subcommand});
-        std.log.info("Available subcommands: install, use, list", .{});
+        output.printError("Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
+        try output.print("Available subcommands: install, use, list", .{});
         handleErrorFn(error.ArgsError);
         return;
     }

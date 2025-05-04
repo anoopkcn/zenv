@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = std.fs;
 const errors = @import("errors.zig");
+const output = @import("output.zig");
 
 /// Escapes a shell value by handling special characters, particularly single quotes.
 /// This ensures the value can be safely used in shell script strings.
@@ -71,7 +72,7 @@ pub fn processTemplateString(
         } else {
             // No replacement found, leave the placeholder as is
             try writer.writeAll(template_content[placeholder_start .. placeholder_end + 2]);
-            std.log.warn("No replacement provided for placeholder @@{s}@@", .{placeholder_name});
+            try output.print("Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name});
         }
 
         // Move position to after the placeholder

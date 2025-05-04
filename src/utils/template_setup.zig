@@ -4,6 +4,7 @@ const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
 const fs = std.fs;
+const output = @import("output.zig");
 
 const template = @import("template.zig");
 
@@ -50,7 +51,7 @@ fn createSetupScript(
     modules_verified: bool,
     use_default_python: bool,
 ) ![]const u8 {
-    std.log.info("Creating setup script for '{s}'...", .{env_name});
+    try output.print("Creating setup script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -91,7 +92,7 @@ fn createSetupScript(
     // Add basic replacements for the template
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_DIR", venv_dir);
-    
+
     // Get the fallback python to use
     var fallback_python: []const u8 = undefined;
 
@@ -99,7 +100,7 @@ fn createSetupScript(
     if (use_default_python) {
         // Try to get the default Python path
         const default_python = @import("python.zig").getDefaultPythonPath(allocator) catch |err| {
-            std.log.err("Failed to read default Python path with --python flag: {s}", .{@errorName(err)});
+            output.printError("Failed to read default Python path with --python flag: {s}", .{@errorName(err)}) catch {};
             return error.MissingPythonExecutable;
         };
 
@@ -108,10 +109,10 @@ fn createSetupScript(
             const python_bin = try std.fs.path.join(allocator, &[_][]const u8{path, "bin", "python3"});
             defer allocator.free(python_bin);
             fallback_python = try allocator.dupe(u8, python_bin);
-            std.log.info("Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
+            try output.print("Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
         } else {
-            std.log.err("--python flag specified but no default Python configured", .{});
-            std.log.err("Set a default Python first: zenv python use <version>", .{});
+            output.printError("--python flag specified but no default Python configured", .{}) catch {};
+            output.printError("Set a default Python first: zenv python use <version>", .{}) catch {};
             return error.MissingPythonExecutable;
         }
     } else {
@@ -131,12 +132,12 @@ fn createSetupScript(
                     fallback_python = "python3"; // No default Python path found
                 }
             } else |err| {
-                std.log.warn("Failed to get default Python path: {s}", .{@errorName(err)});
+                try output.print("Warning: Failed to get default Python path: {s}", .{@errorName(err)});
                 fallback_python = "python3"; // Default to python3 if no default is configured
             }
         }
     }
-    
+
     try replacements.put("FALLBACK_PYTHON", fallback_python);
     try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
@@ -146,7 +147,7 @@ fn createSetupScript(
 
     // Set force_deps flag for the template
     try replacements.put("FORCE_DEPS_VALUE", if (force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
-    
+
     // Set force_rebuild flag for the template
     try replacements.put("FORCE_REBUILD_VALUE", if (force_rebuild) "FORCE_REBUILD=true" else "FORCE_REBUILD=false");
 

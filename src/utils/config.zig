@@ -9,6 +9,7 @@ const environment = @import("environment.zig");
 const mem = std.mem;
 const json = std.json;
 const paths = @import("paths.zig");
+const output = @import("output.zig");
 
 fn generateSHA1ID(
     allocator: Allocator,
@@ -386,13 +387,13 @@ pub const EnvironmentRegistry = struct {
                 try registry.save();
                 return registry;
             }
-            std.log.err("Failed to open registry file: {s}", .{@errorName(err)});
+            output.printError("Failed to open registry file: {s}", .{@errorName(err)}) catch {};
             return err;
         };
         defer file.close();
 
         const file_content = file.readToEndAlloc(arena.allocator(), 1 * 1024 * 1024) catch |err| {
-            std.log.err("Failed to read registry file: {s}", .{@errorName(err)});
+            output.printError("Failed to read registry file: {s}", .{@errorName(err)}) catch {};
             return err;
         };
 
@@ -401,7 +402,7 @@ pub const EnvironmentRegistry = struct {
         const parsed = json.parseFromSlice(json.Value, allocator, file_content, .{
             .allocate = .alloc_always,
         }) catch |err| {
-            std.log.err("Failed to parse registry JSON: {s}", .{@errorName(err)});
+            output.printError("Failed to parse registry JSON: {s}", .{@errorName(err)}) catch {};
             return err;
         };
         // Since we're using the main allocator, make sure we clean up

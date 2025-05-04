@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const fs = std.fs;
 const process = std.process;
 const paths = @import("paths.zig");
+const output = @import("output.zig");
 
 // Define Python versions we know work well
 const DEFAULT_PYTHON_VERSION = "3.10.8";
@@ -27,15 +28,15 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
                 break :blk false;
             }
             // For any other error, we'll assume the file doesn't exist
-            std.log.warn("Error checking Python executable: {s}", .{@errorName(err)});
+            try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
             break :blk false;
         };
         break :blk true;
     };
 
     if (!python_exists) {
-        std.log.err("Python version {s} is not installed", .{version});
-        std.log.err("Use 'zenv python install {s}' to install it first", .{version});
+        output.printError("Python version {s} is not installed", .{version}) catch {};
+        output.printError("Use 'zenv python install {s}' to install it first", .{version}) catch {};
         return error.FileNotFound;
     }
 
@@ -47,14 +48,13 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
 pub fn listInstalledVersions(allocator: Allocator) !void {
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
-    
+
     // Get stdout writer
-    const stdout = std.io.getStdOut().writer();
 
     var dir = fs.cwd().openDir(base_install_dir, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
-            try stdout.print("No Python versions installed yet\n", .{});
-            try stdout.print("Use 'zenv python install <version>' to install a Python version\n", .{});
+            output.print("No Python versions installed yet", .{}) catch {};
+            output.print("Use 'zenv python install <version>' to install a Python version", .{}) catch {};
             return;
         }
         return err;
@@ -65,7 +65,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     const default_path = try getDefaultPythonPath(allocator);
     defer if (default_path) |path| allocator.free(path);
 
-    try stdout.print("Installed Python versions:\n", .{});
+    output.print("Installed Python versions:", .{}) catch {};
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
@@ -82,7 +82,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
                     break :blk false;
                 }
                 // For any other error, we'll assume the file doesn't exist
-                std.log.warn("Error checking Python executable: {s}", .{@errorName(err)});
+                try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
                 break :blk false;
             };
             break :blk true;
@@ -98,18 +98,18 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         }
 
         if (is_default) {
-            try stdout.print("{s} (default)\n", .{version_dir});
+            output.print("{s} (default)", .{version_dir}) catch {};
         } else {
-            try stdout.print("{s}\n", .{version_dir});
+            output.print("{s}", .{version_dir}) catch {};
         }
         installed_count += 1;
     }
 
     if (installed_count == 0) {
-        try stdout.print("No Python versions installed yet\n", .{});
-        try stdout.print("Use 'zenv python install <version>' to install a Python version\n", .{});
+        output.print("No Python versions installed yet\n", .{}) catch {};
+        output.print("Use 'zenv python install <version>' to install a Python version", .{}) catch {};
     } else {
-        try stdout.print("Use 'zenv python use <version>' to set a version as default\n", .{});
+        output.print("Use 'zenv python use <version>' to set a version as default", .{}) catch {};
     }
 }
 
@@ -134,9 +134,8 @@ pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
     try file.sync();
 
     // Get stdout writer
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("Set Python {s} as the default version\n", .{version});
-    try stdout.print("This will be used as the fallback Python when not specified in zenv.json\n", .{});
+    output.print("Set Python {s} as the default version", .{version}) catch {};
+    output.print("This will be used as the fallback Python when not specified in zenv.json", .{}) catch {};
 }
 
 // Get the default Python path from the saved file
@@ -148,7 +147,7 @@ pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
         if (err == error.FileNotFound) {
             return null;
         }
-        std.log.err("Failed to read default-python file: {s}", .{@errorName(err)});
+        output.printError("Failed to read default-python file: {s}", .{@errorName(err)}) catch {};
         return null;
     };
 
@@ -163,7 +162,7 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
     const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
     defer allocator.free(filename);
 
-    std.log.info("Downloading Python {s} from {s}", .{version, url});
+    try output.print("Downloading Python {s} from {s}", .{version, url});
 
     // Create a temporary directory for downloads
     const temp_dir = "/tmp";
@@ -184,11 +183,11 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
 pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, target_dir: []const u8) ![]const u8 {
     // Make sure the target directory exists
     fs.cwd().makePath(target_dir) catch |err| {
-        std.log.err("Failed to create directory '{s}': {s}", .{target_dir, @errorName(err)});
+        output.printError("Failed to create directory '{s}': {s}", .{target_dir, @errorName(err)}) catch {};
         return err;
     };
 
-    std.log.info("Extracting {s} to {s}", .{tarball_path, target_dir});
+    try output.print("Extracting {s} to {s}", .{tarball_path, target_dir});
 
     // Run tar to extract the file
     var tar_args = [_][]const u8{"tar", "-xzf", tarball_path, "-C", target_dir};
@@ -208,19 +207,19 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
 
 // Configure and build Python
 pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []const u8) !void {
-    std.log.info("Configuring Python build in {s}", .{source_dir});
-    std.log.info("Python will be installed to {s}", .{install_dir});
+    try output.print("Configuring Python build in {s}", .{source_dir});
+    try output.print("Python will be installed to {s}", .{install_dir});
 
     // Create a clean directory for the build
     fs.cwd().makePath(install_dir) catch |err| {
-        std.log.err("Failed to create installation directory '{s}': {s}", .{install_dir, @errorName(err)});
+        output.printError("Failed to create installation directory '{s}': {s}", .{install_dir, @errorName(err)}) catch {};
         return err;
     };
 
     // Change to the source directory for configuration
     var dir = fs.cwd();
     dir.access(source_dir, .{}) catch |err| {
-        std.log.err("Cannot access source directory '{s}': {s}", .{source_dir, @errorName(err)});
+        output.printError("Cannot access source directory '{s}': {s}", .{source_dir, @errorName(err)}) catch {};
         return err;
     };
 
@@ -289,14 +288,14 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         }
     }
 
-    std.log.info("Python installation completed successfully", .{});
+    try output.print("Python installation completed successfully", .{});
 }
 
 // Main function to install Python
 pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const python_version = version orelse DEFAULT_PYTHON_VERSION;
 
-    std.log.info("Installing Python version {s}", .{python_version});
+    try output.print("Installing Python version {s}", .{python_version});
 
     // Get the installation directory
     const base_install_dir = try getDefaultInstallDir(allocator);
@@ -315,22 +314,22 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
                 break :blk false;
             }
             // For any other error, we'll assume the file doesn't exist
-            std.log.warn("Error checking Python executable: {s}", .{@errorName(err)});
+            try output.print("Warning: Error checking Python executable: {s}", .{@errorName(err)});
             break :blk false;
         };
         break :blk true;
     };
 
     if (python_exists) {
-        std.log.info("Python {s} is already installed at {s}", .{python_version, install_dir});
-        std.log.info("To reinstall, first remove the directory manually: rm -rf {s}", .{install_dir});
+        try output.print("Python {s} is already installed at {s}", .{python_version, install_dir});
+        try output.print("To reinstall, first remove the directory manually: rm -rf {s}", .{install_dir});
         return;
     }
 
     // Create a temporary build directory
     const build_dir = "/tmp/zenv_python_build";
     fs.cwd().makePath(build_dir) catch |err| {
-        std.log.err("Failed to create build directory: {s}", .{@errorName(err)});
+        output.printError("Failed to create build directory: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 
@@ -338,23 +337,22 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const tarball_path = try downloadPythonSource(allocator, python_version);
     defer allocator.free(tarball_path);
     defer fs.cwd().deleteFile(tarball_path) catch |err| {
-        std.log.warn("Failed to delete temporary file {s}: {s}", .{tarball_path, @errorName(err)});
+        output.print("Warning: Failed to delete temporary file {s}: {s}\n", .{tarball_path, @errorName(err)}) catch {};
     };
 
     // Extract the source
     const source_dir = try extractPythonSource(allocator, tarball_path, build_dir);
     defer allocator.free(source_dir);
     defer fs.cwd().deleteTree(source_dir) catch |err| {
-        std.log.warn("Failed to delete temporary directory {s}: {s}", .{source_dir, @errorName(err)});
+        output.print("Warning: Failed to delete temporary directory {s}: {s}", .{source_dir, @errorName(err)}) catch {};
     };
 
     // Build and install Python
     try buildPython(allocator, source_dir, install_dir);
 
     // Print success message with actual paths
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("Python {s} has been successfully installed!\n", .{python_version});
-    try stdout.print("Installation path: {s}\n", .{install_dir});
-    try stdout.print("To set this as the default Python for new environments:\n", .{});
-    try stdout.print("zenv python use {s}\n", .{python_version});
+    output.print("Python {s} has been successfully installed!", .{python_version}) catch {};
+    output.print("Installation path: {s}", .{install_dir}) catch {};
+    output.print("To set this as the default Python for new environments:", .{}) catch {};
+    output.print("zenv python use {s}", .{python_version}) catch {};
 }

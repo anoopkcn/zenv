@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const options = @import("options");
 const commands = @import("commands.zig");
 const configurations = @import("utils/config.zig");
+const output = @import("utils/output.zig");
 
 const Command = enum {
     setup,
@@ -28,9 +29,9 @@ const Command = enum {
     }
 };
 
-fn printVersion() void {
+fn printVersion() !void {
     std.io.getStdOut().writer().print("{s}", .{options.version}) catch |err| {
-        std.log.err("Error printing version: {s}", .{@errorName(err)});
+        output.printError("Error printing version: {s}", .{@errorName(err)}) catch {};
     };
 }
 
@@ -131,7 +132,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         .version, .@"-v", .@"-V", .@"--version" => {
-            printVersion();
+            try printVersion();
             process.exit(0);
         },
         .init => {
@@ -221,7 +222,7 @@ pub fn main() anyerror!void {
 
     // Load the environment registry first, as we'll need it for all commands
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
-        std.log.err("Failed to load environment registry: {s}", .{@errorName(err)});
+        output.printError("Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
         handleError(error.RegistryError);
         return;
     };
