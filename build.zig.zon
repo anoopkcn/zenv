@@ -1,6 +1,6 @@
 .{
     .name = .zenv,
-    .version = "0.8.5",
+    .version = "0.8.6",
     .fingerprint = 0x29c2040f7262b616,
     .minimum_zig_version = "0.14.0",
 
