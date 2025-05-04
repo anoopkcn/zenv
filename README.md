@@ -289,7 +289,7 @@ Python Priority list
 
 ## Issues
 
-If you encounter any bugs open an Issues. To use the debug logging feature, users can set the `ZENV_DEBUG` environment variable:
+If you encounter any bugs open an Issue. To use the debug logging feature, users can set the `ZENV_DEBUG` environment variable:
 
 Example:
 
