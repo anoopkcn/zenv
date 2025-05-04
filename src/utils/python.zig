@@ -47,11 +47,14 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
 pub fn listInstalledVersions(allocator: Allocator) !void {
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
+    
+    // Get stdout writer
+    const stdout = std.io.getStdOut().writer();
 
     var dir = fs.cwd().openDir(base_install_dir, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.info("No Python versions installed yet", .{});
-            std.log.info("Use 'zenv python install <version>' to install a Python version", .{});
+            try stdout.print("No Python versions installed yet\n", .{});
+            try stdout.print("Use 'zenv python install <version>' to install a Python version\n", .{});
             return;
         }
         return err;
@@ -62,7 +65,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     const default_path = try getDefaultPythonPath(allocator);
     defer if (default_path) |path| allocator.free(path);
 
-    std.log.info("Installed Python versions:", .{});
+    try stdout.print("Installed Python versions:\n", .{});
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
@@ -95,18 +98,18 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         }
 
         if (is_default) {
-            std.log.info("{s} (default)", .{version_dir});
+            try stdout.print("{s} (default)\n", .{version_dir});
         } else {
-            std.log.info("{s}", .{version_dir});
+            try stdout.print("{s}\n", .{version_dir});
         }
         installed_count += 1;
     }
 
     if (installed_count == 0) {
-        std.log.info("No Python versions installed yet", .{});
-        std.log.info("Use 'zenv python install <version>' to install a Python version", .{});
+        try stdout.print("No Python versions installed yet\n", .{});
+        try stdout.print("Use 'zenv python install <version>' to install a Python version\n", .{});
     } else {
-        std.log.info("Use 'zenv python use <version>' to set a version as default", .{});
+        try stdout.print("Use 'zenv python use <version>' to set a version as default\n", .{});
     }
 }
 
@@ -130,8 +133,10 @@ pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
     try file.writeAll(python_path);
     try file.sync();
 
-    std.log.info("Set Python {s} as the default version", .{version});
-    std.log.info("This will be used as the fallback Python when not specified in zenv.json", .{});
+    // Get stdout writer
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("Set Python {s} as the default version\n", .{version});
+    try stdout.print("This will be used as the fallback Python when not specified in zenv.json\n", .{});
 }
 
 // Get the default Python path from the saved file
@@ -347,8 +352,9 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     try buildPython(allocator, source_dir, install_dir);
 
     // Print success message with actual paths
-    std.log.info("Python {s} has been successfully installed!", .{python_version});
-    std.log.info("Installation path: {s}", .{install_dir});
-    std.log.info("To set this as the default Python for new environments:", .{});
-    std.log.info("zenv python use {s}", .{python_version});
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("Python {s} has been successfully installed!\n", .{python_version});
+    try stdout.print("Installation path: {s}\n", .{install_dir});
+    try stdout.print("To set this as the default Python for new environments:\n", .{});
+    try stdout.print("zenv python use {s}\n", .{python_version});
 }
