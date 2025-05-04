@@ -5,18 +5,18 @@
 # Define a function to handle errors
 handle_module_error() {
   echo "Error: Failed to load module '$1'" >&2
-  echo "Environment activation may be incomplete" >&2
+  echo "Info: Environment activation may be incomplete" >&2
   return 1
 }
 
 # Check if module command exists
 if command -v module >/dev/null 2>&1; then
-  echo '==> Purging all modules'
+  echo 'Info: Purging all modules'
   module --force purge || echo "Warning: Failed to purge modules, continuing anyway" >&2
 
   @@MODULE_LOADING_BLOCK@@
 else
-  echo '==> Module command not found, skipping module operations'
+  echo 'Info: Module command not found, skipping module operations'
 fi
 
 # Activate the Python virtual environment
@@ -26,19 +26,20 @@ source @@VENV_PATH@@/bin/activate
 
 @@ACTIVATE_COMMANDS_BLOCK@@
 
-echo "Environment '@@ENV_NAME@@' activated@@ENV_DESCRIPTION@@"
+echo "Info: Environment '@@ENV_NAME@@' activated"
+echo "Info: Description@@ENV_DESCRIPTION@@"
 
 # Add deactivate_all function to completely deactivate
 deactivate_all() {
   # Check if deactivate function exists (from venv)
   if command -v deactivate >/dev/null 2>&1; then
-    echo "Running venv deactivate..."
+    echo "Info: Running venv deactivate"
     deactivate
   fi
 
   # Purge modules if module command exists
   if command -v module >/dev/null 2>&1; then
-    echo "Purging loaded modules..."
+    echo "Info: Purging loaded modules..."
     module --force purge || echo "Warning: Failed to purge modules" >&2
   fi
 
@@ -46,5 +47,5 @@ deactivate_all() {
   @@CUSTOM_VAR_UNSET@@
   # Unset this function
   unset -f deactivate_all
-  echo "Environment fully deactivated"
+  echo "Info: Environment fully deactivated"
 }
