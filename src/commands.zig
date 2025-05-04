@@ -95,7 +95,6 @@ pub fn handleSetupCommand(
         output.print(
             \\Force dependencies flag detected.
             \\User-specified dependencies will try to override module-provided packages.
-            \\
         , .{}) catch {};
     }
     if (flags.skip_hostname_check) {
@@ -274,7 +273,6 @@ pub fn handleSetupCommand(
     output.print(
         \\Environment '{s}' setup complete and registered in global registry.
         \\Usage: source $(zenv activate {s})
-        \\
     , .{ env_name, env_name }) catch {};
 }
 
@@ -317,7 +315,6 @@ pub fn handleListCommand(
         current_hostname = env.getSystemHostname(allocator) catch |err| {
             output.print(
                 \\Could not determine current hostname for filtering: {s}
-                \\
             , .{@errorName(err)}) catch {};
             use_hostname_filter = false;
             current_hostname = null;
@@ -465,7 +462,6 @@ pub fn handleRegisterCommand(
             output.printError(
                 \\Current machine ('{s}') does not match target machines specified for environment '{s}'
                 \\Use '--no-host' flag to bypass this check if needed
-                \\
             , .{ hostname, env_name }) catch {};
             handleErrorFn(error.TargetMachineMismatch);
             return;
@@ -506,7 +502,6 @@ pub fn handleRegisterCommand(
     output.print(
         \\Environment '{s}' registered successfully.
         \\Usage: source $(zenv activate {s})
-        \\
     , .{ env_name, env_name }) catch {};
 }
 
@@ -564,7 +559,6 @@ pub fn handleCdCommand(
         output.printError(
             \\Missing environment name or ID argument
             \\Usage: zenv cd <name|id>
-            \\
         , .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
