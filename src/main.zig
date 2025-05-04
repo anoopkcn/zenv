@@ -69,6 +69,7 @@ fn printUsage() void {
         \\
         \\  setup <name>              Set up the specified environment based on zenv.json file.
         \\                            Creates a virtual environment in <base_dir>/<name>/.
+        \\                            <base_dir> and <name> can be defined in the zenv.json file.
         \\
         \\  activate <name|id>        Output the path to the activation script.
         \\                            You can use the environment name or its ID (full or partial).
