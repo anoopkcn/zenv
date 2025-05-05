@@ -59,7 +59,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.

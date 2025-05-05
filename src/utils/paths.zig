@@ -12,12 +12,14 @@ pub fn getZenvDir(allocator: Allocator) ![]const u8 {
         if (err == error.EnvironmentVariableNotFound) {
             // Fallback to home directory
             const home_dir = process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
-                output.printError("Failed to get HOME environment variable: {s}", .{@errorName(home_err)}) catch {};
+                output.printError(
+                    \\Failed to get HOME environment variable: {s}
+                , .{@errorName(home_err)}) catch {};
                 return error.HomeDirectoryNotFound;
             };
             defer allocator.free(home_dir);
 
-            return std.fs.path.join(allocator, &[_][]const u8{home_dir, ".zenv"});
+            return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
         }
         output.printError("Failed to get ZENV_DIR environment variable: {s}", .{@errorName(err)}) catch {};
         return err;
@@ -46,7 +48,7 @@ pub fn getRegistryPath(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{zenv_dir_path, "registry.json"});
+    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "registry.json" });
 }
 
 // Gets the path to the default-python file
@@ -54,7 +56,7 @@ pub fn getDefaultPythonFilePath(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{zenv_dir_path, "default-python"});
+    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "default-python" });
 }
 
 // Gets the default python installation directory
@@ -62,5 +64,5 @@ pub fn getPythonInstallDir(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{zenv_dir_path, "python"});
+    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "python" });
 }
