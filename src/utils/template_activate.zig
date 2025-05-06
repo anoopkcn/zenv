@@ -96,7 +96,7 @@ fn createActivationScript(
             try module_list_str.appendSlice(module_name);
         }
 
-        try module_writer.print("echo 'Loading modules: {s}'\n", .{module_list_str.items});
+        try module_writer.print("echo 'Info: Loading modules - {s}'\n", .{module_list_str.items});
 
         for (env_config.modules.items) |module_name| {
             try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
