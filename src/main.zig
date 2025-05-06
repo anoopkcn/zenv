@@ -61,7 +61,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -110,7 +110,7 @@ fn printUsage() void {
         \\  --force-deps              It tries to install all dependencies even if they are already
         \\                            provided by loaded modules.
         \\
-        \\  --no-host                 Bypass hostname validation, this is equivalant to 
+        \\  --no-host                 Bypass hostname validation, this is equivalant to
         \\                            setting "target_machines": ["*"] in the zenv.json
         \\
         \\  --rebuild                 Re-build the virtual environment, even if it already exists.
@@ -122,6 +122,11 @@ fn printUsage() void {
         \\  --dev                     Install the current directory as an editable package.
         \\                            Equivalent to running 'pip install --editable .'
         \\                            Requires a valid setup.py or pyproject.toml in the directory.
+        \\
+        \\  --cache                   ONLY use previously cached packages with no internet access.
+        \\                            Without this flag, cache is ignored and packages are freshly downloaded.
+        \\                            Use 'zenv prepare <name>' first to download packages to cache.
+        \\                            Ideal for compute nodes without internet access.
         \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file defines your environments. Environment names occupy top level

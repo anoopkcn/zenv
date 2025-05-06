@@ -57,6 +57,13 @@ if [ "$DEV_MODE" = "true" ]; then
   info "Will install current directory as an editable package"
 fi
 
+# Handle cache-only mode flag
+@@CACHE_MODE_VALUE@@
+if [ "$CACHE_MODE" = "true" ]; then
+  ohai "Cache-only mode flag (--cache) detected"
+  info "Will only use packages from local cache without internet access"
+fi
+
 # Handle modules_verified flag
 @@MODULES_VERIFIED_VALUE@@
 
@@ -275,14 +282,24 @@ python -m pip install --ignore-installed --no-build-isolation --upgrade pip
 # ohai "Installing build dependencies for compiling extensions (if needed later)"
 # python -m pip install --ignore-installed --no-build-isolation maturin build setuptools-rust cffi
 
-# Check for cached packages in ZENV_DIR
+# Initialize package cache variable
 PACKAGE_CACHE=""
-if [ -n "$HOME" ]; then
-  ZENV_DIR="${HOME}/.zenv"
-  if [ -d "$ZENV_DIR/packages/files" ]; then
-    ohai "Found package cache at $ZENV_DIR/packages/files"
-    PACKAGE_CACHE="--find-links $ZENV_DIR/packages/files"
-    info "Will try cached packages before downloading from internet"
+
+# Handle cache mode if enabled
+if [ "$CACHE_MODE" = "true" ]; then
+  if [ -n "$HOME" ]; then
+    ZENV_DIR="${HOME}/.zenv"
+    if [ -d "$ZENV_DIR/packages/files" ]; then
+      ohai "Found package cache at $ZENV_DIR/packages/files"
+      PACKAGE_CACHE="--no-index --find-links $ZENV_DIR/packages/files"
+      info "Using ONLY cached packages (no internet access)"
+    else
+      abort "Cache mode enabled but no package cache found at $ZENV_DIR/packages/files.
+Run 'zenv prepare $ENV_NAME' first to download dependencies to cache."
+    fi
+  else
+    abort "Cache mode enabled but HOME environment variable not set.
+Cannot locate package cache without HOME."
   fi
 fi
 

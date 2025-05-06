@@ -104,6 +104,10 @@ pub fn handleSetupCommand(
     if (flags.force_rebuild) {
         output.print("Force rebuild flag detected. Will recreate the virtual environment.", .{}) catch {};
     }
+    if (flags.cache_mode) {
+        output.print("Cache mode flag (--cache) detected. Will ONLY use previously cached packages with no internet access.", .{}) catch {};
+        output.print("Without this flag, cache is ignored and packages are freshly downloaded.", .{}) catch {};
+    }
 
     // Get and validate the environment config
     const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
@@ -246,6 +250,7 @@ pub fn handleSetupCommand(
         modules_verified,
         flags.use_default_python,
         flags.dev_mode,
+        flags.cache_mode,
     ) catch |err| {
         handleErrorFn(err);
         return;
@@ -733,40 +738,41 @@ pub fn handlePrepareCommand(
 
     // Download all dependencies
     output.print("Downloading {d} dependencies to cache", .{all_required_deps.items.len}) catch {};
-    
+
     var success_count: usize = 0;
     var error_count: usize = 0;
-    
+
     for (all_required_deps.items) |dep| {
         // Parse version specifier if present (e.g., "package==1.0.0")
         var package_name = dep;
         var version: ?[]const u8 = null;
-        
+
         if (std.mem.indexOf(u8, dep, "==")) |idx| {
             package_name = dep[0..idx];
             version = dep[idx+2..];
         }
-        
+
         // Download the package
         cache.downloadPackage(package_name, version) catch |err| {
             output.printError("Failed to download {s}: {s}", .{dep, @errorName(err)}) catch {};
             error_count += 1;
             continue;
         };
-        
+
         success_count += 1;
     }
-    
+
     deps_need_cleanup = false;
-    
+
     // Print summary
     output.print("Package preparation complete. Downloaded {d} packages ({d} errors)", .{
         success_count, error_count
     }) catch {};
-    
+
     if (success_count > 0) {
         output.print("Packages are cached in {s}", .{cache.getCacheDir()}) catch {};
-        output.print("You can now run 'zenv setup {s}' on compute nodes without internet", .{env_name}) catch {};
+        output.print("You can now run 'zenv setup {s} --cache' on compute nodes without internet", .{env_name}) catch {};
+        output.print("The --cache flag is required to use cached packages; without it packages are freshly downloaded", .{}) catch {};
     }
 }
 

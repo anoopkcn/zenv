@@ -110,6 +110,7 @@ pub fn installDependencies(
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
+    cache_mode: bool,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice();
@@ -125,7 +126,7 @@ pub fn installDependencies(
     }
 
     // Call the main environment setup function
-    try setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps, force_rebuild, modules_verified, use_default_python, dev_mode);
+    try setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps, force_rebuild, modules_verified, use_default_python, dev_mode, cache_mode);
 }
 
 // Sets up the full environment: creates files, generates and runs setup script.
@@ -140,6 +141,7 @@ pub fn setupEnvironment(
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
+    cache_mode: bool,
 ) !void {
     output.print("Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir }) catch {};
 
@@ -245,6 +247,7 @@ pub fn setupEnvironment(
         modules_verified,
         use_default_python,
         dev_mode,
+        cache_mode,
     );
     defer allocator.free(script_content);
 
