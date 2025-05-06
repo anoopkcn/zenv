@@ -113,6 +113,10 @@ fn printUsage() void {
         \\                            This ignores the default python priority list.
         \\                            Will error if no pinned Python is configured.
         \\
+        \\  --dev                     Install the current directory as an editable package.
+        \\                            Equivalent to running 'pip install --editable .'
+        \\                            Requires a valid setup.py or pyproject.toml in the directory.
+        \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file defines your environments. Environment names occupy top level
         \\  "base_dir": "path/to/venvs", is exceptional top level key-value which specifies the

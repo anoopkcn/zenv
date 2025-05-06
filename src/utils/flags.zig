@@ -6,6 +6,7 @@ pub const CommandFlags = struct {
     skip_hostname_check: bool = false, // Whether to skip hostname validation
     force_rebuild: bool = false, // Whether to force rebuild the virtual environment
     use_default_python: bool = false, // Whether to force using the default Python from ZENV_DIR/default-python
+    dev_mode: bool = false, // Whether to install the current directory as an editable package
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
@@ -20,6 +21,8 @@ pub const CommandFlags = struct {
                 flags.force_rebuild = true;
             } else if (std.mem.eql(u8, arg, "--python")) {
                 flags.use_default_python = true;
+            } else if (std.mem.eql(u8, arg, "--dev")) {
+                flags.dev_mode = true;
             }
         }
 

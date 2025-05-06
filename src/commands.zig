@@ -244,6 +244,7 @@ pub fn handleSetupCommand(
         flags.force_rebuild,
         modules_verified,
         flags.use_default_python,
+        flags.dev_mode,
     ) catch |err| {
         handleErrorFn(err);
         return;

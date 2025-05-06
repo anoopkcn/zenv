@@ -50,6 +50,13 @@ if [ "$USE_DEFAULT_PYTHON" = "true" ]; then
   info "Will use only the default Python from ZENV_DIR/default-python"
 fi
 
+# Handle development mode flag
+@@DEV_MODE_VALUE@@
+if [ "$DEV_MODE" = "true" ]; then
+  ohai "Development mode flag (--dev) detected"
+  info "Will install current directory as an editable package"
+fi
+
 # Handle modules_verified flag
 @@MODULES_VERIFIED_VALUE@@
 
@@ -170,8 +177,8 @@ if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" =
     local description="$2"
     if [ -n "$python_exe" ] && command -v "$python_exe" >/dev/null 2>&1; then
       ohai "Creating virtual environment with $description"
-      info "  Executable: $(which "$python_exe")"
-      info "  Version: $("$python_exe" --version 2>&1)"
+      info "Executable: $(which "$python_exe")"
+      info "Version: $("$python_exe" --version 2>&1)"
 
       # Check if Python supports venv
       if ! "$python_exe" -c "import venv" 2>/dev/null; then
@@ -349,6 +356,24 @@ fi
 
 # Clean up any temporary files
 rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
+
+# Handle development mode install if enabled
+if [ "$DEV_MODE" = "true" ]; then
+  ohai "Step 4.5: Installing current directory as an editable package"
+
+  # Verify that setup.py or pyproject.toml exists
+  if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+    info "Found Python package configuration in current directory"
+    python -m pip install --editable . || {
+      warn "Failed to install current directory as editable package"
+      warn "Check that your setup.py or pyproject.toml is valid"
+    }
+    success "Installed current directory as editable package"
+  else
+    warn "No setup.py or pyproject.toml found in current directory"
+    warn "Skipping editable install. Create one of these files if needed."
+  fi
+fi
 
 # Run custom setup commands if provided
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
