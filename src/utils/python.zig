@@ -5,9 +5,17 @@ const process = std.process;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
 const download = @import("download.zig");
+const time = std.time;
 
 // Define Python versions we know work well
 const DEFAULT_PYTHON_VERSION = "3.10.8";
+
+// Command result structure to hold subprocess output
+const CommandResult = struct {
+    success: bool,
+    stdout: []const u8,
+    stderr: []const u8,
+};
 
 // Default installation dir is in the zenv dir/python
 pub fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
@@ -201,6 +209,69 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
     return source_dir;
 }
 
+// Helper function to run a command and capture its output
+fn runCapturedCommand(
+    args: []const []const u8,
+    cwd: []const u8,
+    allocator: Allocator
+) !CommandResult {
+    var child = std.process.Child.init(args, allocator);
+    child.cwd = cwd;
+    child.stderr_behavior = .Pipe;  // Capture stderr
+    child.stdout_behavior = .Pipe;  // Capture stdout
+
+    try child.spawn();
+
+    // Read stdout and stderr into buffers
+    var stdout_buf = std.ArrayList(u8).init(allocator);
+    defer stdout_buf.deinit();
+
+    var stderr_buf = std.ArrayList(u8).init(allocator);
+    defer stderr_buf.deinit();
+
+    // Read from pipes
+    if (child.stdout) |stdout| {
+        try stdout.reader().readAllArrayList(&stdout_buf, 10 * 1024 * 1024);
+    }
+
+    if (child.stderr) |stderr| {
+        try stderr.reader().readAllArrayList(&stderr_buf, 1024 * 1024);
+    }
+
+    const term = try child.wait();
+    const success = term == .Exited and term.Exited == 0;
+
+    return CommandResult{
+        .success = success,
+        .stdout = try stdout_buf.toOwnedSlice(),
+        .stderr = try stderr_buf.toOwnedSlice(),
+    };
+}
+
+// Display a progress bar for installation
+fn showInstallProgress(stage: []const u8, percent: usize) !void {
+    const stdout = std.io.getStdOut().writer();
+
+    // Create progress bar
+    var progress_bar: [30]u8 = undefined;
+    const filled = progress_bar.len * percent / 100;
+
+    for (0..progress_bar.len) |i| {
+        progress_bar[i] = if (i < filled) '=' else ' ';
+    }
+
+    // Clear line and show progress
+    try stdout.writeAll("\r\x1b[K");  // ANSI escape code to clear line
+    try stdout.print("[{s}{s}] {d}% - {s}",
+        .{
+            progress_bar[0..filled],
+            progress_bar[filled..],
+            percent,
+            stage
+        }
+    );
+}
+
 // Configure and build Python
 pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []const u8) !void {
     output.print("Configuring Python build in {s}", .{source_dir}) catch {};
@@ -219,26 +290,33 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         return err;
     };
 
-    // Run configure
-    {
-        var config_args = [_][]const u8{
-            "./configure",
-            "--prefix",
-            install_dir,
-            "--enable-optimizations",
-            "--with-ensurepip=install",
-        };
+    const install_start = time.milliTimestamp();
 
-        var child = std.process.Child.init(&config_args, allocator);
-        child.cwd = source_dir;
-        child.stderr_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
+    // Run configure (typically 15% of total installation time)
+    try showInstallProgress("Configuring Python", 5);
 
-        const result = try child.spawnAndWait();
-        if (result.Exited != 0) {
-            return error.ConfigureFailed;
-        }
+    var config_args = [_][]const u8{
+        "./configure",
+        "--prefix",
+        install_dir,
+        "--enable-optimizations",
+        "--disable-test-modules",
+        "--with-ensurepip=install",
+    };
+
+    const configure_result = try runCapturedCommand(&config_args, source_dir, allocator);
+    defer allocator.free(configure_result.stdout);
+    defer allocator.free(configure_result.stderr);
+
+    if (!configure_result.success) {
+        // Show error output on failure
+        try std.io.getStdOut().writer().writeAll("\n");
+        output.printError("Configuration failed. Error output:", .{}) catch {};
+        std.io.getStdErr().writer().print("{s}\n", .{configure_result.stderr}) catch {};
+        return error.ConfigureFailed;
     }
+
+    try showInstallProgress("Configuration complete", 15);
 
     // Determine the number of CPU cores for parallel build
     var cpu_count = try allocator.dupeZ(u8, "4"); // Default to 4 cores as a safe value
@@ -255,37 +333,52 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         // If we can't get the CPU count, stick with default
     }
 
-    // Run make
-    {
-        var make_args = [_][]const u8{ "make", "-j", cpu_count };
+    // Run make (typically 70% of installation time)
+    try showInstallProgress("Building Python", 20);
 
-        var child = std.process.Child.init(&make_args, allocator);
-        child.cwd = source_dir;
-        child.stderr_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
+    var make_args = [_][]const u8{ "make", "-j", cpu_count };
 
-        const result = try child.spawnAndWait();
-        if (result.Exited != 0) {
-            return error.BuildFailed;
-        }
+    const make_result = try runCapturedCommand(&make_args, source_dir, allocator);
+    defer allocator.free(make_result.stdout);
+    defer allocator.free(make_result.stderr);
+
+    if (!make_result.success) {
+        try std.io.getStdOut().writer().writeAll("\n");
+        output.printError("Build failed. Error output:", .{}) catch {};
+        std.io.getStdErr().writer().print("{s}\n", .{make_result.stderr}) catch {};
+        return error.BuildFailed;
     }
 
-    // Run make install
-    {
-        var install_args = [_][]const u8{ "make", "install" };
+    try showInstallProgress("Build complete", 85);
 
-        var child = std.process.Child.init(&install_args, allocator);
-        child.cwd = source_dir;
-        child.stderr_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
+    // Run make install (typically 15% of installation time)
+    try showInstallProgress("Installing Python", 85);
 
-        const result = try child.spawnAndWait();
-        if (result.Exited != 0) {
-            return error.InstallFailed;
-        }
+    var install_args = [_][]const u8{ "make", "install" };
+
+    const install_result = try runCapturedCommand(&install_args, source_dir, allocator);
+    defer allocator.free(install_result.stdout);
+    defer allocator.free(install_result.stderr);
+
+    if (!install_result.success) {
+        try std.io.getStdOut().writer().writeAll("\n");
+        output.printError("Installation failed. Error output:", .{}) catch {};
+        std.io.getStdErr().writer().print("{s}\n", .{install_result.stderr}) catch {};
+        return error.InstallFailed;
     }
 
-    output.print("Python installation completed successfully", .{}) catch {};
+    try showInstallProgress("Installation complete", 100);
+
+    // Print newline after progress bar
+    try std.io.getStdOut().writer().writeAll("\n");
+
+    // Calculate total installation time
+    const elapsed_ms = time.milliTimestamp() - install_start;
+    const elapsed_minutes = @divFloor(elapsed_ms, 60000);
+    const elapsed_seconds = @mod(@divFloor(elapsed_ms, 1000), 60);
+
+    output.print("Python installation completed successfully in {d}m {d}s",
+        .{elapsed_minutes, elapsed_seconds}) catch {};
 }
 
 // Main function to install Python
