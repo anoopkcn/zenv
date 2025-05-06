@@ -250,14 +250,27 @@ pub const PackageCache = struct {
     }
     
     /// Download a Python package from PyPI
-    pub fn downloadPackage(self: *PackageCache, package_name: []const u8, version: ?[]const u8) !void {
-        try output.print("Fetching package info for {s}", .{package_name});
+    pub fn downloadPackage(self: *PackageCache, package_spec: []const u8, version_arg: ?[]const u8) !void {
+        try output.print("Fetching package info for {s}", .{package_spec});
         
-        // Construct PyPI URL
+        // Parse package name and version from package_spec (e.g., "package>=1.0.0")
+        const package_name = package_spec;
+        var version_constraint: ?[]const u8 = version_arg;
+        
+        // Extract base name without version specifier for PyPI URL
+        var base_name = package_spec;
+        if (std.mem.indexOfAny(u8, package_spec, "<>=~^")) |idx| {
+            base_name = std.mem.trim(u8, package_spec[0..idx], " \t");
+            if (version_constraint == null) {
+                version_constraint = std.mem.trim(u8, package_spec[idx..], " \t");
+            }
+        }
+        
+        // Construct PyPI URL with base name only
         const pypi_url = try std.fmt.allocPrint(
             self.allocator,
             "https://pypi.org/pypi/{s}/json",
-            .{package_name}
+            .{base_name}
         );
         defer self.allocator.free(pypi_url);
         
@@ -289,8 +302,18 @@ pub const PackageCache = struct {
         
         const root = parsed.value;
         
-        // Get the latest version if none specified
-        const target_version = version orelse blk: {
+        // Get the latest version if none specified, or use the one from version constraint
+        const target_version = if (version_constraint == null) blk: {
+            const info = root.object.get("info") orelse return error.InvalidResponse;
+            if (info != .object) return error.InvalidResponse;
+            
+            const latest_version = info.object.get("version") orelse return error.InvalidResponse;
+            if (latest_version != .string) return error.InvalidResponse;
+            
+            break :blk latest_version.string;
+        } else if (version_arg != null) version_arg.? else blk: {
+            // Handle version constraint like >=1.0.0
+            // For now, just use latest version as a simple approach
             const info = root.object.get("info") orelse return error.InvalidResponse;
             if (info != .object) return error.InvalidResponse;
             
@@ -300,13 +323,13 @@ pub const PackageCache = struct {
             break :blk latest_version.string;
         };
         
-        try output.print("Looking for version {s} of {s}", .{target_version, package_name});
+        try output.print("Looking for version {s} of {s}", .{target_version, base_name});
         
         // Check if we already have this package version
         const cache_key = try std.fmt.allocPrint(
             self.allocator,
             "{s}-{s}",
-            .{package_name, target_version}
+            .{base_name, target_version}
         );
         defer self.allocator.free(cache_key);
         
@@ -354,7 +377,8 @@ pub const PackageCache = struct {
             
             if (std.mem.eql(u8, packagetype.string, "bdist_wheel") and 
                 (std.mem.indexOf(u8, filename.string, "any") != null or 
-                 std.mem.indexOf(u8, filename.string, "linux") != null)) {
+                 std.mem.indexOf(u8, filename.string, "linux") != null or
+                 std.mem.indexOf(u8, filename.string, "macosx") != null)) {
                 selected_file = file;
                 break;
             }
@@ -430,7 +454,7 @@ pub const PackageCache = struct {
         
         // Add package to cache
         const cache_info = PackageInfo{
-            .name = try self.allocator.dupe(u8, package_name),
+            .name = try self.allocator.dupe(u8, base_name),
             .version = try self.allocator.dupe(u8, target_version),
             .filename = try self.allocator.dupe(u8, filename.string),
             .url = try self.allocator.dupe(u8, url.string),
@@ -449,7 +473,7 @@ pub const PackageCache = struct {
         try self.saveIndex();
         
         try output.print("Successfully cached {s} version {s}", .{
-            package_name, target_version
+            base_name, target_version
         });
     }
     

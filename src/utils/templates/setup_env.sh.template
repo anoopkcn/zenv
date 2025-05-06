@@ -266,6 +266,9 @@ if ! python -m pip --version >/dev/null 2>&1; then
   abort "'pip' module not found after activating venv. Ensure Python installation includes pip."
 fi
 ohai "Upgrading pip to latest version"
+# Ensure setuptools is installed and up-to-date
+ohai "Installing/upgrading setuptools for build support"
+python -m pip install --ignore-installed --no-build-isolation --upgrade setuptools wheel
 python -m pip install --ignore-installed --no-build-isolation --upgrade pip
 
 # Check for cached packages in ZENV_DIR
