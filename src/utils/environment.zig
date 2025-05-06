@@ -38,7 +38,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
     }
 
     // Optimize common patterns first
-    
+
     // 1. Fast path for prefix pattern: "prefix*"
     if (pattern.len >= 2 and pattern[pattern.len - 1] == '*') {
         // Check if all other characters are literals (no wildcards)
@@ -72,7 +72,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
             return std.mem.endsWith(u8, str, suffix);
         }
     }
-    
+
     // 3. Fast path for contains pattern: "*middle*"
     if (pattern.len >= 3 and pattern[0] == '*' and pattern[pattern.len - 1] == '*') {
         // Check if middle part has no wildcards
@@ -83,7 +83,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
                 break;
             }
         }
-        
+
         if (!has_wildcards) {
             const middle = pattern[1 .. pattern.len - 1];
             return std.mem.indexOf(u8, str, middle) != null;
@@ -95,72 +95,72 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
     return wildcardMatch(pattern, str);
 }
 
-// Helper function that implements an efficient dynamic programming algorithm 
-// for wildcard matching - this avoids recursion stack overhead and 
+// Helper function that implements an efficient dynamic programming algorithm
+// for wildcard matching - this avoids recursion stack overhead and
 // redundant calculations
 fn wildcardMatch(pattern: []const u8, str: []const u8) bool {
     const m = str.len;
     const n = pattern.len;
-    
+
     // Allocate boolean arrays on the stack for the DP table
     // We only need two rows: previous and current
     var prev_row: [512]bool = undefined;
     var curr_row: [512]bool = undefined;
-    
+
     // Handle potential buffer size issues
     if (m >= prev_row.len) return fallbackWildcardMatch(pattern, str);
-    
+
     // Base case: empty pattern matches empty string
     prev_row[0] = true;
-    
+
     // Base case: a pattern with only '*' can match empty string
-    for (1..n+1) |j| {
-        prev_row[j] = prev_row[j-1] and pattern[j-1] == '*';
+    for (1..n + 1) |j| {
+        prev_row[j] = prev_row[j - 1] and pattern[j - 1] == '*';
     }
-    
+
     // Fill the dp table
-    for (1..m+1) |i| {
+    for (1..m + 1) |i| {
         // Reset current row
         curr_row[0] = false;
-        
-        for (1..n+1) |j| {
-            if (pattern[j-1] == '*') {
+
+        for (1..n + 1) |j| {
+            if (pattern[j - 1] == '*') {
                 // '*' can match zero or multiple characters
-                curr_row[j] = curr_row[j-1] or prev_row[j];
-            } else if (pattern[j-1] == '?' or pattern[j-1] == str[i-1]) {
+                curr_row[j] = curr_row[j - 1] or prev_row[j];
+            } else if (pattern[j - 1] == '?' or pattern[j - 1] == str[i - 1]) {
                 // Current characters match or '?' matches any single character
-                curr_row[j] = prev_row[j-1];
+                curr_row[j] = prev_row[j - 1];
             } else {
                 // Characters don't match
                 curr_row[j] = false;
             }
         }
-        
+
         // Swap rows for next iteration
-        for (0..n+1) |j| {
+        for (0..n + 1) |j| {
             prev_row[j] = curr_row[j];
         }
     }
-    
+
     return prev_row[n];
 }
 
 // Fallback implementation for extreme cases
 fn fallbackWildcardMatch(pattern: []const u8, str: []const u8) bool {
     if (pattern.len == 0) return str.len == 0;
-    
+
     // Handle first character
-    const first_match = str.len > 0 and 
+    const first_match = str.len > 0 and
         (pattern[0] == str[0] or pattern[0] == '?');
-    
+
     // If we see a '*', we can:
     // 1. Skip it entirely (match zero characters)
     // 2. Match the current character and keep the '*' (match multiple characters)
     if (pattern.len > 0 and pattern[0] == '*') {
-        return fallbackWildcardMatch(pattern[1..], str) or 
-               (str.len > 0 and fallbackWildcardMatch(pattern, str[1..]));
+        return fallbackWildcardMatch(pattern[1..], str) or
+            (str.len > 0 and fallbackWildcardMatch(pattern, str[1..]));
     }
-    
+
     // If first character matches, proceed with the rest
     return first_match and fallbackWildcardMatch(pattern[1..], str[1..]);
 }

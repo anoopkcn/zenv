@@ -18,8 +18,8 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
 
-    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{base_install_dir, version});
-    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{install_dir, "bin", "python3"});
+    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version });
+    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
 
     // Check if the Python binary exists
     const python_exists = blk: {
@@ -73,7 +73,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         if (entry.kind != .directory) continue;
 
         const version_dir = entry.name;
-        const python_path = try std.fs.path.join(allocator, &[_][]const u8{base_install_dir, version_dir, "bin", "python3"});
+        const python_path = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir, "bin", "python3" });
         defer allocator.free(python_path);
 
         // Check if the Python binary exists in this directory
@@ -93,7 +93,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         // Check if this is the default version
         var is_default = false;
         if (default_path) |path| {
-            const install_path = try std.fs.path.join(allocator, &[_][]const u8{base_install_dir, version_dir});
+            const install_path = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir });
             defer allocator.free(install_path);
             is_default = std.mem.eql(u8, install_path, path);
         }
@@ -126,7 +126,7 @@ pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
     defer allocator.free(python_path);
 
     // Create/overwrite the default-python file
-    const default_file_path = try std.fs.path.join(allocator, &[_][]const u8{zenv_dir, "default-python"});
+    const default_file_path = try std.fs.path.join(allocator, &[_][]const u8{ zenv_dir, "default-python" });
     defer allocator.free(default_file_path);
 
     var file = try fs.cwd().createFile(default_file_path, .{});
@@ -158,20 +158,20 @@ pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
 
 // Download the Python source code for the specified version
 pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const u8 {
-    const url = try std.fmt.allocPrint(allocator, "https://www.python.org/ftp/python/{s}/Python-{s}.tgz", .{version, version});
+    const url = try std.fmt.allocPrint(allocator, "https://www.python.org/ftp/python/{s}/Python-{s}.tgz", .{ version, version });
     defer allocator.free(url);
 
     const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
     defer allocator.free(filename);
 
-    output.print("Downloading Python {s} from {s}", .{version, url}) catch {};
+    output.print("Downloading Python {s} from {s}", .{ version, url }) catch {};
 
     // Create a temporary directory for downloads
     const temp_dir = "/tmp";
-    const dl_path = try std.fs.path.join(allocator, &[_][]const u8{temp_dir, filename});
+    const dl_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, filename });
 
     // Run curl to download the file
-    var curl_args = [_][]const u8{"curl", "-fsSL", url, "-o", dl_path};
+    var curl_args = [_][]const u8{ "curl", "-fsSL", url, "-o", dl_path };
     var child = std.process.Child.init(&curl_args, allocator);
     child.stderr_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
@@ -185,14 +185,14 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
 pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, target_dir: []const u8) ![]const u8 {
     // Make sure the target directory exists
     fs.cwd().makePath(target_dir) catch |err| {
-        output.printError("Failed to create directory '{s}': {s}", .{target_dir, @errorName(err)}) catch {};
+        output.printError("Failed to create directory '{s}': {s}", .{ target_dir, @errorName(err) }) catch {};
         return err;
     };
 
-    output.print("Extracting {s} to {s}", .{tarball_path, target_dir}) catch {};
+    output.print("Extracting {s} to {s}", .{ tarball_path, target_dir }) catch {};
 
     // Run tar to extract the file
-    var tar_args = [_][]const u8{"tar", "-xzf", tarball_path, "-C", target_dir};
+    var tar_args = [_][]const u8{ "tar", "-xzf", tarball_path, "-C", target_dir };
     var child = std.process.Child.init(&tar_args, allocator);
     child.stderr_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
@@ -202,7 +202,7 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
     // Get the extracted directory name (Python-VERSION)
     const filename = std.fs.path.basename(tarball_path);
     const dirname = filename[0 .. filename.len - 4]; // Remove .tgz
-    const source_dir = try std.fs.path.join(allocator, &[_][]const u8{target_dir, dirname});
+    const source_dir = try std.fs.path.join(allocator, &[_][]const u8{ target_dir, dirname });
 
     return source_dir;
 }
@@ -214,14 +214,14 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 
     // Create a clean directory for the build
     fs.cwd().makePath(install_dir) catch |err| {
-        output.printError("Failed to create installation directory '{s}': {s}", .{install_dir, @errorName(err)}) catch {};
+        output.printError("Failed to create installation directory '{s}': {s}", .{ install_dir, @errorName(err) }) catch {};
         return err;
     };
 
     // Change to the source directory for configuration
     var dir = fs.cwd();
     dir.access(source_dir, .{}) catch |err| {
-        output.printError("Cannot access source directory '{s}': {s}", .{source_dir, @errorName(err)}) catch {};
+        output.printError("Cannot access source directory '{s}': {s}", .{ source_dir, @errorName(err) }) catch {};
         return err;
     };
 
@@ -229,7 +229,8 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     {
         var config_args = [_][]const u8{
             "./configure",
-            "--prefix", install_dir,
+            "--prefix",
+            install_dir,
             "--enable-optimizations",
             "--with-ensurepip=install",
         };
@@ -262,7 +263,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 
     // Run make
     {
-        var make_args = [_][]const u8{"make", "-j", cpu_count};
+        var make_args = [_][]const u8{ "make", "-j", cpu_count };
 
         var child = std.process.Child.init(&make_args, allocator);
         child.cwd = source_dir;
@@ -277,7 +278,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 
     // Run make install
     {
-        var install_args = [_][]const u8{"make", "install"};
+        var install_args = [_][]const u8{ "make", "install" };
 
         var child = std.process.Child.init(&install_args, allocator);
         child.cwd = source_dir;
@@ -303,11 +304,11 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
 
-    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{base_install_dir, python_version});
+    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, python_version });
     defer allocator.free(install_dir);
 
     // Check if this version is already installed
-    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{install_dir, "bin", "python3"});
+    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
     defer allocator.free(python_bin);
 
     const python_exists = blk: {
@@ -323,7 +324,7 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     };
 
     if (python_exists) {
-        output.print("Python {s} is already installed at {s}", .{python_version, install_dir}) catch {};
+        output.print("Python {s} is already installed at {s}", .{ python_version, install_dir }) catch {};
         output.print("To reinstall, first remove the directory manually: rm -rf {s}", .{install_dir}) catch {};
         return;
     }
@@ -339,14 +340,14 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const tarball_path = try downloadPythonSource(allocator, python_version);
     defer allocator.free(tarball_path);
     defer fs.cwd().deleteFile(tarball_path) catch |err| {
-        output.print("Warning: Failed to delete temporary file {s}: {s}\n", .{tarball_path, @errorName(err)}) catch {};
+        output.print("Warning: Failed to delete temporary file {s}: {s}\n", .{ tarball_path, @errorName(err) }) catch {};
     };
 
     // Extract the source
     const source_dir = try extractPythonSource(allocator, tarball_path, build_dir);
     defer allocator.free(source_dir);
     defer fs.cwd().deleteTree(source_dir) catch |err| {
-        output.print("Warning: Failed to delete temporary directory {s}: {s}", .{source_dir, @errorName(err)}) catch {};
+        output.print("Warning: Failed to delete temporary directory {s}: {s}", .{ source_dir, @errorName(err) }) catch {};
     };
 
     // Build and install Python

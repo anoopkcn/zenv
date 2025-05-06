@@ -222,11 +222,11 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     // Open the file only once and read it directly into the parser
     const file = try fs.cwd().openFile(config_path, .{});
     defer file.close();
-    
+
     // Parse JSON using the standard method
     const json_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
     defer allocator.free(json_content);
-    
+
     const value_tree = try json.parseFromSlice(json.Value, allocator, json_content, .{
         .allocate = .alloc_always,
     });
@@ -251,7 +251,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
 
     // Pre-calculate the capacity for environments
     try config.environments.ensureTotalCapacity(@intCast(root.object.count()));
-    
+
     // Parse environments
     var env_iter = root.object.iterator();
     while (env_iter.next()) |entry| {
@@ -271,14 +271,11 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         } else return error.ConfigInvalid;
 
         // Optional fields with direct retrieval
-        env.fallback_python = try Parse.getString(allocator, 
-            env_value.object.get("fallback_python") orelse json.Value{ .null = {} }, null);
-        
-        env.description = try Parse.getString(allocator, 
-            env_value.object.get("description") orelse json.Value{ .null = {} }, null);
-        
-        env.dependency_file = try Parse.getString(allocator, 
-            env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
+        env.fallback_python = try Parse.getString(allocator, env_value.object.get("fallback_python") orelse json.Value{ .null = {} }, null);
+
+        env.description = try Parse.getString(allocator, env_value.object.get("description") orelse json.Value{ .null = {} }, null);
+
+        env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
 
         // Optional arrays
         if (env_value.object.get("modules")) |mods| {
@@ -390,13 +387,13 @@ pub const EnvironmentRegistry = struct {
         // Parse the JSON content from the file
         const file_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
         defer allocator.free(file_content);
-        
+
         // Use parsed value with proper error handling
         const parsed = try json.parseFromSlice(json.Value, allocator, file_content, .{
             .allocate = .alloc_always,
         });
         defer parsed.deinit();
-        
+
         // Process the parsed data
         const root = parsed.value;
         if (root.object.get("environments")) |environments| {
@@ -613,7 +610,7 @@ pub const EnvironmentRegistry = struct {
                 return entry;
             }
         }
-        
+
         // Check for exact ID match
         for (self.entries.items) |entry| {
             if (std.mem.eql(u8, entry.id, identifier)) {
@@ -627,11 +624,12 @@ pub const EnvironmentRegistry = struct {
             var match_count: usize = 0;
 
             for (self.entries.items) |entry| {
-                if (entry.id.len >= identifier.len and 
-                    std.mem.eql(u8, entry.id[0..identifier.len], identifier)) {
+                if (entry.id.len >= identifier.len and
+                    std.mem.eql(u8, entry.id[0..identifier.len], identifier))
+                {
                     matching_entry = entry;
                     match_count += 1;
-                    
+
                     // If we find more than one match, we can't uniquely identify
                     if (match_count > 1) break;
                 }

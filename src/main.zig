@@ -104,8 +104,8 @@ fn printUsage() void {
         \\  --force-deps              It tries to install all dependencies even if they are already
         \\                            provided by loaded modules.
         \\
-        \\  --no-host                 Bypass hostname validation, this is equivalant to setting
-        \\                            "target_machines": ["*"] in the zenv.json
+        \\  --no-host                 Bypass hostname validation, this is equivalant to 
+        \\                            setting "target_machines": ["*"] in the zenv.json
         \\
         \\  --rebuild                 Re-build the virtual environment, even if it already exists.
         \\
