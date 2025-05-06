@@ -157,7 +157,7 @@ fn createSetupScript(
     const pip_install_cmd = if (valid_deps_list_len > 0)
         try std.fmt.allocPrint(allocator, "python -m pip install -r {s}", .{req_abs_path})
     else
-        "echo '==> No dependencies in requirements file to install.'";
+        "echo 'Info: No dependencies in requirements file to install.'";
     defer if (valid_deps_list_len > 0) allocator.free(pip_install_cmd);
 
     try replacements.put("PIP_INSTALL_COMMAND", pip_install_cmd);
@@ -176,8 +176,8 @@ fn createSetupScript(
             try module_list_str.appendSlice(module_name);
         }
 
-        try module_writer.print("echo '==> Loading required modules'\n", .{});
-        try module_writer.print("echo 'Loading modules: {s}'\n", .{module_list_str.items});
+        try module_writer.print("echo 'Info: Loading required modules'\n", .{});
+        try module_writer.print("echo 'Info: Loading modules: {s}'\n", .{module_list_str.items});
 
         // The set +e and error checking are now in the template itself, based on modules_verified
 
@@ -192,7 +192,7 @@ fn createSetupScript(
             }
         }
     } else {
-        try module_writer.print("echo '==> No modules specified to load'\n", .{});
+        try module_writer.print("echo 'Info: No modules specified to load'\n", .{});
     }
 
     const module_loading_slice = try module_loading_block.toOwnedSlice();
@@ -205,7 +205,7 @@ fn createSetupScript(
     const custom_writer = custom_setup_commands_block.writer();
 
     if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
-        try custom_writer.print("echo '==> Step 5: Running custom setup commands'\n", .{});
+        try custom_writer.print("echo 'Info: Step 5: Running custom setup commands'\n", .{});
         try custom_writer.print("# Activate again just in case custom commands need the venv\n", .{});
         try custom_writer.print("source {s}/bin/activate\n", .{venv_dir});
         for (env_config.setup_commands.?.items) |cmd| {

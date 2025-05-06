@@ -91,10 +91,11 @@ if command -v module >/dev/null 2>&1; then
   ohai "Checking Python packages provided by modules"
   MODULE_PACKAGES_FILE=$(mktemp)
   # Use module Python if available, otherwise try system Python
+  # Extract and preprocess package names for faster filtering
   if [ -n "$MODULE_PYTHON" ]; then
-    $MODULE_PYTHON -m pip list --format=freeze > "$MODULE_PACKAGES_FILE" 2>/dev/null || true
+    $MODULE_PYTHON -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null || true
   else
-    (python3 -m pip list --format=freeze > "$MODULE_PACKAGES_FILE" 2>/dev/null || python -m pip list --format=freeze > "$MODULE_PACKAGES_FILE" 2>/dev/null) || true
+    (python3 -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null || python -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null) || true
   fi
 
   if [ -s "$MODULE_PACKAGES_FILE" ]; then
@@ -197,7 +198,7 @@ if [ ! -d "@@VENV_DIR@@" ] || [ "$REBUILD_VENV" = "true" ] || [ "$FRESH_SETUP" =
     # Try various Python interpreters in order of preference
     if [ -n "$MODULE_PYTHON" ]; then
       create_venv "$MODULE_PYTHON" "module-provided Python" && VENV_CREATED=true &&
-      success "Successfully created virtual environment using module-provided Python"
+      success "Successfully prepared virtual environment using module-provided Python"
     fi
 
     if [ "$VENV_CREATED" = "false" ]; then
@@ -258,7 +259,7 @@ if ! python -m pip --version >/dev/null 2>&1; then
   abort "'pip' module not found after activating venv. Ensure Python installation includes pip."
 fi
 ohai "Upgrading pip to latest version"
-python -m pip install --ignore-installed --upgrade pip
+python -m pip install --ignore-installed --no-build-isolation --upgrade pip
 
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
@@ -285,8 +286,9 @@ if [ "$FORCE_DEPS" = "true" ]; then
   ohai "Using --force-deps: Installing all specified dependencies"
   if [ -s "$REQUIREMENTS_PATH" ]; then
     # Use --ignore-installed to prevent pip from attempting to uninstall module packages
-    ohai "Using --ignore-installed to prevent conflicts with module packages"
-    python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
+    # and --no-build-isolation for faster installation
+    ohai "Using --ignore-installed and --no-build-isolation for faster installation"
+    python -m pip install --ignore-installed --no-build-isolation -r "$REQUIREMENTS_PATH"
   else
     info "No dependencies to install (empty requirements file)"
   fi
@@ -298,28 +300,23 @@ else
     EXCLUDED_COUNT=0
     INSTALLED_COUNT=0
 
-    # Process each line in the requirements file
+    # Process each line in the requirements file - more efficient single pass
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      while IFS= read -r line || [ -n "$line" ]; do
-        # Skip comments and empty lines
-        trimmed_line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        if [ -z "$trimmed_line" ] || [[ "$trimmed_line" == "#"* ]]; then
-          continue
-        fi
-
+      # Use grep to filter out comments and empty lines first
+      grep -v "^[[:space:]]*#" "$REQUIREMENTS_PATH" | grep -v "^[[:space:]]*$" | while read -r line; do
         # Extract package name without version specs
-        package_name=$(echo "$trimmed_line" | sed 's/[^a-zA-Z0-9_.-].*//' | tr '[:upper:]' '[:lower:]')
+        package_name=$(echo "$line" | sed 's/[^a-zA-Z0-9_.-].*//' | tr '[:upper:]' '[:lower:]')
 
-        # Check if package exists in module packages
-        if grep -i -q "^${package_name}==" "$MODULE_PACKAGES_FILE" || grep -i -q "^${package_name} " "$MODULE_PACKAGES_FILE"; then
-          info "Excluding '$trimmed_line' (provided by loaded modules)"
+        # Check if package exists in module packages (now just the name)
+        if grep -i -q "^${package_name}$" "$MODULE_PACKAGES_FILE"; then
+          info "Excluding '$line' (provided by loaded modules)"
           EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
         else
           # Package not provided by modules, add to filtered list
           echo "$line" >> "$FILTERED_REQUIREMENTS"
           INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         fi
-      done < "$REQUIREMENTS_PATH"
+      done
     else
       info "Requirements file is empty or not readable"
     fi
@@ -328,8 +325,9 @@ else
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
       # Use --ignore-installed to prevent pip from attempting to uninstall module packages
-      ohai "Using --ignore-installed to prevent conflicts with module packages"
-      python -m pip install --ignore-installed -r "$FILTERED_REQUIREMENTS"
+      # and --no-build-isolation for faster installation
+      ohai "Using --ignore-installed and --no-build-isolation for faster installation"
+      python -m pip install --ignore-installed --no-build-isolation -r "$FILTERED_REQUIREMENTS"
     else
       info "No additional packages need to be installed"
     fi
@@ -341,7 +339,8 @@ else
     ohai "Installing all dependencies from requirements file"
     if [ -s "$REQUIREMENTS_PATH" ]; then
       # No module packages detected, but still use --ignore-installed for consistency
-      python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
+      # and --no-build-isolation for faster installation
+      python -m pip install --ignore-installed --no-build-isolation -r "$REQUIREMENTS_PATH"
     else
       info "No dependencies to install (empty requirements file)"
     fi
