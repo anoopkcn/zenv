@@ -7,7 +7,7 @@ const commands = @import("commands.zig");
 const configurations = @import("utils/config.zig");
 const output = @import("utils/output.zig");
 
-const Command = enum {
+pub const Command = enum {
     setup,
     activate,
     list,
@@ -16,6 +16,7 @@ const Command = enum {
     cd,
     init,
     python,
+    prepare,
     help,
     version,
     @"-v",
@@ -26,21 +27,22 @@ const Command = enum {
 
     fn fromString(s: []const u8) Command {
         const command_map = .{
-            .{ "setup", .setup },
-            .{ "activate", .activate },
-            .{ "list", .list },
-            .{ "register", .register },
-            .{ "deregister", .deregister },
-            .{ "cd", .cd },
-            .{ "init", .init },
-            .{ "python", .python },
-            .{ "help", .help },
-            .{ "version", .version },
-            .{ "-v", .@"-v" },
-            .{ "-V", .@"-V" },
-            .{ "--version", .@"--version" },
-            .{ "--help", .@"--help" },
-        };
+                .{ "setup", .setup },
+                .{ "activate", .activate },
+                .{ "list", .list },
+                .{ "register", .register },
+                .{ "deregister", .deregister },
+                .{ "cd", .cd },
+                .{ "init", .init },
+                .{ "python", .python },
+                .{ "prepare", .prepare },
+                .{ "help", .help },
+                .{ "version", .version },
+                .{ "-v", .@"-v" },
+                .{ "-V", .@"-V" },
+                .{ "--version", .@"--version" },
+                .{ "--help", .@"--help" },
+            };
 
         // Linear search through the command_map
         inline for (command_map) |entry| {
@@ -95,6 +97,10 @@ fn printUsage() void {
         \\                            install <version>  :  Install a specified Python version.
         \\                            use <version>      :  pinn a python version.
         \\                            list               :  List all installed Python versions.
+        \\
+        \\  prepare <name>            Download and cache dependencies for an environment.
+        \\                            Useful for preparing packages on login nodes with internet
+        \\                            before moving to compute nodes without internet.
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
@@ -170,7 +176,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .python, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .python, .prepare, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -273,8 +279,8 @@ pub fn main() anyerror!void {
     var config: ?configurations.ZenvConfig = null;
     defer if (config != null) config.?.deinit();
 
-    // Only try to load the config file for setup and register commands
-    if (command == .setup or command == .register) {
+    // Only try to load the config file for setup, register, and prepare commands
+    if (command == .setup or command == .register or command == .prepare) {
         config = configurations.parse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
@@ -292,6 +298,7 @@ pub fn main() anyerror!void {
         .deregister => commands.handleDeregisterCommand(&registry, args, handleError),
         .cd => commands.handleCdCommand(&registry, args, handleError),
         .python => try commands.handlePythonCommand(allocator, args, handleError),
+        .prepare => try commands.handlePrepareCommand(allocator, &config.?, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

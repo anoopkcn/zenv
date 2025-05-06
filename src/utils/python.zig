@@ -4,6 +4,7 @@ const fs = std.fs;
 const process = std.process;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
+const download = @import("download.zig");
 
 // Define Python versions we know work well
 const DEFAULT_PYTHON_VERSION = "3.10.8";
@@ -166,17 +167,10 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
 
     output.print("Downloading Python {s} from {s}", .{ version, url }) catch {};
 
-    // Create a temporary directory for downloads
-    const temp_dir = "/tmp";
-    const dl_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, filename });
-
-    // Run curl to download the file
-    var curl_args = [_][]const u8{ "curl", "-fsSL", url, "-o", dl_path };
-    var child = std.process.Child.init(&curl_args, allocator);
-    child.stderr_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-
-    _ = try child.spawnAndWait();
+    // Use our download utility instead of curl
+    const dl_path = try download.downloadToTemp(allocator, url, filename, .{
+        .show_progress = true,
+    });
 
     return dl_path;
 }
