@@ -5,27 +5,27 @@ set -e # Exit on error for setup scripts
 
 # Print message in blue
 ohai() {
-  printf '\033[0;34m==>\033[0;39m %s\033[0m\n' "$@"
+  printf '\033[0;34minfo:\033[0;39m %s\033[0m\n' "$@"
 }
 
 # Print message in green
 success() {
-  printf '\033[1;32m==>\033[1;39m %s\033[0m\n' "$@"
+  printf '\033[1;32minfo:\033[1;39m %s\033[0m\n' "$@"
 }
 
 # Print message in yellow
 info() {
-  printf '\033[1;33m==>\033[0m %s\n' "$@"
+  printf '\033[1;33minfo:\033[0m %s\n' "$@"
 }
 
 # Print warning message in red
 warn() {
-  printf '\033[1;31mWarning\033[0m: %s\n' "$@" >&2
+  printf '\033[1;31mWarning:\033[0m: %s\n' "$@" >&2
 }
 
 # Print error message and exit
 abort() {
-  printf '\033[1;31mError\033[0m: %s\n' "$@" >&2
+  printf '\033[1;31mError:\033[0m: %s\n' "$@" >&2
   exit 1
 }
 
@@ -258,7 +258,7 @@ if ! python -m pip --version >/dev/null 2>&1; then
   abort "'pip' module not found after activating venv. Ensure Python installation includes pip."
 fi
 ohai "Upgrading pip to latest version"
-python -m pip install --upgrade pip
+python -m pip install --ignore-installed --upgrade pip
 
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
@@ -284,7 +284,9 @@ if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   ohai "Using --force-deps: Installing all specified dependencies"
   if [ -s "$REQUIREMENTS_PATH" ]; then
-    python -m pip install -r "$REQUIREMENTS_PATH"
+    # Use --ignore-installed to prevent pip from attempting to uninstall module packages
+    ohai "Using --ignore-installed to prevent conflicts with module packages"
+    python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
   else
     info "No dependencies to install (empty requirements file)"
   fi
@@ -325,7 +327,9 @@ else
     # Install the filtered dependencies
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
-      python -m pip install -r "$FILTERED_REQUIREMENTS"
+      # Use --ignore-installed to prevent pip from attempting to uninstall module packages
+      ohai "Using --ignore-installed to prevent conflicts with module packages"
+      python -m pip install --ignore-installed -r "$FILTERED_REQUIREMENTS"
     else
       info "No additional packages need to be installed"
     fi
@@ -336,7 +340,8 @@ else
     # No module packages detected, install all requirements
     ohai "Installing all dependencies from requirements file"
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      python -m pip install -r "$REQUIREMENTS_PATH"
+      # No module packages detected, but still use --ignore-installed for consistency
+      python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
     else
       info "No dependencies to install (empty requirements file)"
     fi
