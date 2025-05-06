@@ -6,6 +6,170 @@ const paths = @import("paths.zig");
 const output = @import("output.zig");
 const download = @import("download.zig");
 const json = std.json;
+const process = std.process;
+
+/// Platform information for wheel compatibility
+const PlatformInfo = struct {
+    python_tag: []const u8,  // e.g., "cp310", "cp313"
+    platform_tag: []const u8, // e.g., "macosx_11_0_arm64", "manylinux2014_x86_64"
+};
+
+/// Get the current Python version (e.g., "3.13")
+fn getPythonVersion(allocator: Allocator) ![]const u8 {
+    // Execute python --version and parse the result
+    var args = [_][]const u8{ "python3", "--version" };
+    var child = std.process.Child.init(&args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    
+    try child.spawn();
+    
+    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 1024) catch |err| {
+        output.printError("Failed to read Python version output: {s}", .{@errorName(err)}) catch {};
+        return error.CommandFailed;
+    };
+    defer allocator.free(stdout);
+    
+    const term = try child.wait();
+    
+    if (term.Exited != 0) {
+        output.printError("Python version command failed", .{}) catch {};
+        return error.CommandFailed;
+    }
+    
+    // Parse the version string (expected format: "Python X.Y.Z")
+    if (std.mem.indexOf(u8, stdout, "Python ")) |idx| {
+        const version_full = std.mem.trim(u8, stdout[idx + 7..], " \t\r\n");
+        // Extract major.minor (e.g., "3.13" from "3.13.0")
+        if (std.mem.indexOf(u8, version_full, ".")) |dot_idx| {
+            if (std.mem.indexOfPos(u8, version_full, dot_idx + 1, ".")) |second_dot| {
+                return try allocator.dupe(u8, version_full[0..second_dot]);
+            }
+            return try allocator.dupe(u8, version_full);
+        }
+        return try allocator.dupe(u8, version_full);
+    }
+    
+    // Fallback to a default version if we can't detect
+    return try allocator.dupe(u8, "3.10");
+}
+
+/// Determine platform information for wheel compatibility
+fn getPlatformInfo(allocator: Allocator) !PlatformInfo {
+    // Get Python version first
+    const py_version = try getPythonVersion(allocator);
+    defer allocator.free(py_version);
+    
+    // Convert to cpXYZ format (e.g., "3.13" -> "cp313")
+    // Manually remove dots from the version string
+    var version_buf = std.ArrayList(u8).init(allocator);
+    defer version_buf.deinit();
+    
+    for (py_version) |char| {
+        if (char != '.') {
+            version_buf.append(char) catch |err| {
+                output.printError("Failed to format Python version: {s}", .{@errorName(err)}) catch {};
+                return error.VersionFormatError;
+            };
+        }
+    }
+    
+    const py_version_num = version_buf.toOwnedSlice() catch |err| {
+        output.printError("Failed to format Python version: {s}", .{@errorName(err)}) catch {};
+        return error.VersionFormatError;
+    };
+    defer allocator.free(py_version_num);
+    
+    const python_tag = try std.fmt.allocPrint(allocator, "cp{s}", .{py_version_num});
+    
+    // Detect platform tag based on OS
+    var platform_tag: []const u8 = undefined;
+    
+    // Use uname to detect platform
+    var uname_args = [_][]const u8{"uname"};
+    var uname_child = std.process.Child.init(&uname_args, allocator);
+    uname_child.stdout_behavior = .Pipe;
+    
+    try uname_child.spawn();
+    
+    const uname_output = uname_child.stdout.?.reader().readAllAlloc(allocator, 1024) catch |err| {
+        output.printError("Failed to read uname output: {s}", .{@errorName(err)}) catch {};
+        // Fallback
+        platform_tag = try allocator.dupe(u8, "any");
+        return PlatformInfo{
+            .python_tag = python_tag,
+            .platform_tag = platform_tag,
+        };
+    };
+    defer allocator.free(uname_output);
+    
+    const trimmed_uname = std.mem.trim(u8, uname_output, " \t\r\n");
+    
+    if (std.mem.eql(u8, trimmed_uname, "Darwin")) {
+        // For macOS, try to detect Apple Silicon vs Intel
+        var arch_args = [_][]const u8{"uname", "-m"};
+        var arch_child = std.process.Child.init(&arch_args, allocator);
+        arch_child.stdout_behavior = .Pipe;
+        
+        try arch_child.spawn();
+        
+        const arch_output = arch_child.stdout.?.reader().readAllAlloc(allocator, 1024) catch |err| {
+            output.printError("Failed to read architecture: {s}", .{@errorName(err)}) catch {};
+            // Fallback for macOS
+            platform_tag = try allocator.dupe(u8, "macosx_10_15_x86_64");
+            return PlatformInfo{
+                .python_tag = python_tag,
+                .platform_tag = platform_tag,
+            };
+        };
+        defer allocator.free(arch_output);
+        
+        const trimmed_arch = std.mem.trim(u8, arch_output, " \t\r\n");
+        
+        if (std.mem.eql(u8, trimmed_arch, "arm64")) {
+            platform_tag = try allocator.dupe(u8, "macosx_11_0_arm64");
+        } else {
+            platform_tag = try allocator.dupe(u8, "macosx_10_15_x86_64");
+        }
+    } else if (std.mem.eql(u8, trimmed_uname, "Linux")) {
+        // For Linux, use manylinux
+        var arch_args = [_][]const u8{"uname", "-m"};
+        var arch_child = std.process.Child.init(&arch_args, allocator);
+        arch_child.stdout_behavior = .Pipe;
+        
+        try arch_child.spawn();
+        
+        const arch_output = arch_child.stdout.?.reader().readAllAlloc(allocator, 1024) catch |err| {
+            output.printError("Failed to read architecture: {s}", .{@errorName(err)}) catch {};
+            // Fallback for Linux
+            platform_tag = try allocator.dupe(u8, "manylinux2014_x86_64");
+            return PlatformInfo{
+                .python_tag = python_tag,
+                .platform_tag = platform_tag,
+            };
+        };
+        defer allocator.free(arch_output);
+        
+        const trimmed_arch = std.mem.trim(u8, arch_output, " \t\r\n");
+        
+        if (std.mem.eql(u8, trimmed_arch, "x86_64")) {
+            platform_tag = try allocator.dupe(u8, "manylinux2014_x86_64");
+        } else if (std.mem.eql(u8, trimmed_arch, "aarch64")) {
+            platform_tag = try allocator.dupe(u8, "manylinux2014_aarch64");
+        } else {
+            // Other architectures
+            platform_tag = try std.fmt.allocPrint(allocator, "manylinux2014_{s}", .{trimmed_arch});
+        }
+    } else {
+        // Other platforms: use 'any' tag
+        platform_tag = try allocator.dupe(u8, "any");
+    }
+    
+    return PlatformInfo{
+        .python_tag = python_tag,
+        .platform_tag = platform_tag,
+    };
+}
 
 /// Metadata about a cached package
 const PackageInfo = struct {
@@ -306,22 +470,27 @@ pub const PackageCache = struct {
         const target_version = if (version_constraint == null) blk: {
             const info = root.object.get("info") orelse return error.InvalidResponse;
             if (info != .object) return error.InvalidResponse;
-            
+        
             const latest_version = info.object.get("version") orelse return error.InvalidResponse;
             if (latest_version != .string) return error.InvalidResponse;
-            
+        
             break :blk latest_version.string;
         } else if (version_arg != null) version_arg.? else blk: {
             // Handle version constraint like >=1.0.0
             // For now, just use latest version as a simple approach
             const info = root.object.get("info") orelse return error.InvalidResponse;
             if (info != .object) return error.InvalidResponse;
-            
+        
             const latest_version = info.object.get("version") orelse return error.InvalidResponse;
             if (latest_version != .string) return error.InvalidResponse;
-            
+        
             break :blk latest_version.string;
         };
+    
+        // Get the Python version we're working with
+        const python_version = try getPythonVersion(self.allocator);
+        defer self.allocator.free(python_version);
+        try output.print("Using Python version {s} for wheel compatibility", .{python_version});
         
         try output.print("Looking for version {s} of {s}", .{target_version, base_name});
         
@@ -365,7 +534,16 @@ pub const PackageCache = struct {
         // Look for a wheel file first, then source distribution
         var selected_file: ?json.Value = null;
         
-        // First pass: look for a wheel file for the current platform
+        // Get platform info
+        const platform_info = try getPlatformInfo(self.allocator);
+        defer self.allocator.free(platform_info.platform_tag);
+        defer self.allocator.free(platform_info.python_tag);
+        
+        try output.print("Looking for wheels compatible with: {s} / {s}", .{
+            platform_info.python_tag, platform_info.platform_tag
+        });
+        
+        // First pass: look for an exact match for our platform and Python version
         for (release_files.items) |file| {
             if (file != .object) continue;
             
@@ -376,15 +554,34 @@ pub const PackageCache = struct {
             if (filename != .string) continue;
             
             if (std.mem.eql(u8, packagetype.string, "bdist_wheel") and 
-                (std.mem.indexOf(u8, filename.string, "any") != null or 
-                 std.mem.indexOf(u8, filename.string, "linux") != null or
-                 std.mem.indexOf(u8, filename.string, "macosx") != null)) {
+                (std.mem.indexOf(u8, filename.string, platform_info.python_tag) != null and
+                 std.mem.indexOf(u8, filename.string, platform_info.platform_tag) != null)) {
                 selected_file = file;
+                try output.print("Found exact platform match: {s}", .{filename.string});
                 break;
             }
         }
         
-        // Second pass: look for any wheel file
+        // First pass: look for an exact match for our platform and Python version
+        for (release_files.items) |file| {
+            if (file != .object) continue;
+            
+            const packagetype = file.object.get("packagetype") orelse continue;
+            if (packagetype != .string) continue;
+            
+            const filename = file.object.get("filename") orelse continue;
+            if (filename != .string) continue;
+            
+            if (std.mem.eql(u8, packagetype.string, "bdist_wheel") and 
+                (std.mem.indexOf(u8, filename.string, platform_info.python_tag) != null and
+                 std.mem.indexOf(u8, filename.string, platform_info.platform_tag) != null)) {
+                selected_file = file;
+                try output.print("Found exact platform match: {s}", .{filename.string});
+                break;
+            }
+        }
+        
+        // Second pass: look for a wheel file for the current platform
         if (selected_file == null) {
             for (release_files.items) |file| {
                 if (file != .object) continue;
@@ -392,14 +589,40 @@ pub const PackageCache = struct {
                 const packagetype = file.object.get("packagetype") orelse continue;
                 if (packagetype != .string) continue;
                 
-                if (std.mem.eql(u8, packagetype.string, "bdist_wheel")) {
+                const filename = file.object.get("filename") orelse continue;
+                if (filename != .string) continue;
+                
+                if (std.mem.eql(u8, packagetype.string, "bdist_wheel") and 
+                    (std.mem.indexOf(u8, filename.string, "any") != null or 
+                     std.mem.indexOf(u8, filename.string, "macosx") != null or
+                     std.mem.indexOf(u8, filename.string, "linux") != null)) {
                     selected_file = file;
+                    try output.print("Found compatible platform wheel: {s}", .{filename.string});
                     break;
                 }
             }
         }
         
-        // Third pass: accept any source distribution
+        // Third pass: look for any wheel file
+        if (selected_file == null) {
+            for (release_files.items) |file| {
+                if (file != .object) continue;
+                
+                const packagetype = file.object.get("packagetype") orelse continue;
+                if (packagetype != .string) continue;
+                
+                const filename = file.object.get("filename") orelse continue;
+                if (filename != .string) continue;
+                
+                if (std.mem.eql(u8, packagetype.string, "bdist_wheel")) {
+                    selected_file = file;
+                    try output.print("Found general wheel file: {s}", .{filename.string});
+                    break;
+                }
+            }
+        }
+        
+        // Fourth pass: accept any source distribution
         if (selected_file == null) {
             for (release_files.items) |file| {
                 if (file != .object) continue;
@@ -409,6 +632,7 @@ pub const PackageCache = struct {
                 
                 if (std.mem.eql(u8, packagetype.string, "sdist")) {
                     selected_file = file;
+                    try output.print("Falling back to source distribution", .{});
                     break;
                 }
             }

@@ -271,6 +271,10 @@ ohai "Installing/upgrading setuptools for build support"
 python -m pip install --ignore-installed --no-build-isolation --upgrade setuptools wheel
 python -m pip install --ignore-installed --no-build-isolation --upgrade pip
 
+# Install common build dependencies that might be needed for compiled extensions
+# ohai "Installing build dependencies for compiling extensions (if needed later)"
+# python -m pip install --ignore-installed --no-build-isolation maturin build setuptools-rust cffi
+
 # Check for cached packages in ZENV_DIR
 PACKAGE_CACHE=""
 if [ -n "$HOME" ]; then
@@ -306,10 +310,15 @@ if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   ohai "Using --force-deps: Installing all specified dependencies"
   if [ -s "$REQUIREMENTS_PATH" ]; then
-    # Use --ignore-installed to prevent pip from attempting to uninstall module packages
-    # and --no-build-isolation for faster installation
-    ohai "Using --ignore-installed and --no-build-isolation for faster installation"
-    python -m pip install --ignore-installed --no-build-isolation $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
+    # Try to install using wheels first, then fall back to source if needed
+    ohai "Attempting installation with wheel-only mode first"
+    python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$REQUIREMENTS_PATH" && {
+      success "All packages successfully installed from wheels"
+    } || {
+      warn "Some packages don't have wheels available, falling back to source installation"
+      ohai "Installing with build tools enabled"
+      python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
+    }
   else
     info "No dependencies to install (empty requirements file)"
   fi
@@ -345,10 +354,15 @@ else
     # Install the filtered dependencies
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
-      # Use --ignore-installed to prevent pip from attempting to uninstall module packages
-      # and --no-build-isolation for faster installation
-      ohai "Using --ignore-installed and --no-build-isolation for faster installation"
-      python -m pip install --ignore-installed --no-build-isolation $PACKAGE_CACHE -r "$FILTERED_REQUIREMENTS"
+      # Try to install using wheels first, then fall back to source if needed
+      ohai "Attempting installation with wheel-only mode first"
+      python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$FILTERED_REQUIREMENTS" && {
+        success "All packages successfully installed from wheels"
+      } || {
+        warn "Some packages don't have wheels available, falling back to source installation"
+        ohai "Installing with build tools enabled"
+        python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$FILTERED_REQUIREMENTS"
+      }
     else
       info "No additional packages need to be installed"
     fi
@@ -359,9 +373,15 @@ else
     # No module packages detected, install all requirements
     ohai "Installing all dependencies from requirements file"
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      # No module packages detected, but still use --ignore-installed for consistency
-      # and --no-build-isolation for faster installation
-      python -m pip install --ignore-installed --no-build-isolation $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
+      # Try to install using wheels first, then fall back to source if needed
+      ohai "Attempting installation with wheel-only mode first"
+      python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$REQUIREMENTS_PATH" && {
+        success "All packages successfully installed from wheels"
+      } || {
+        warn "Some packages don't have wheels available, falling back to source installation"
+        ohai "Installing with build tools enabled"
+        python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
+      }
     else
       info "No dependencies to install (empty requirements file)"
     fi
