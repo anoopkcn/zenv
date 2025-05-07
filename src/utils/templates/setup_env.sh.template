@@ -122,7 +122,7 @@ else
   MODULE_PYTHON="" # Ensure this is empty when no modules are loaded
 fi
 
-ohai "Step 3: Creating Python virtual environment"
+ohai "Step 3: Preparing Python virtual environment"
 
 # Determine selected Python executable for venv creation/upgrade
 # This logic should consolidate MODULE_PYTHON, FALLBACK_PYTHON, system pythons
@@ -167,75 +167,86 @@ if ! "$SELECTED_PYTHON_EXE" -c "import venv" 2>/dev/null; then
 fi
 
 VENV_DIR="@@VENV_DIR@@"
-VENV_EXISTS=false
-VENV_IS_VALID=false
+PYTHON_EXE_IN_VENV="$VENV_DIR/bin/python"
+ACTIVATE_SCRIPT_IN_VENV="$VENV_DIR/bin/activate"
 
-if [ -d "@@VENV_DIR@@" ]; then
-  VENV_EXISTS=true
-  if [ -f "$VENV_DIR/bin/activate" ] && [ -f "$VENV_DIR/bin/python" ]; then
-    VENV_IS_VALID=true
-  fi
+# Determine current state of the VENV_DIR
+VENV_STATE="NEW" # Assume new by default
+if [ -f "$PYTHON_EXE_IN_VENV" ] && [ -f "$ACTIVATE_SCRIPT_IN_VENV" ]; then
+    VENV_STATE="VALID_EXISTING"
+elif [ -f "$PYTHON_EXE_IN_VENV" ] || [ -d "$VENV_DIR/lib" ] || [ -d "$VENV_DIR/include" ]; then
+    # If python executable exists, or lib/include dirs exist, but not a full valid venv,
+    # it's likely corrupted or incomplete.
+    VENV_STATE="CORRUPTED_OR_INCOMPLETE"
+# If VENV_DIR exists but none of the above venv components are found, it remains "NEW"
+# (meaning the dir was likely pre-created by zenv but venv setup hasn't run/completed)
+elif [ ! -d "$VENV_DIR" ]; then # This case should ideally not happen if zenv creates the dir first
+    VENV_STATE="NON_EXISTENT" # Explicitly handle if zenv didn't create the dir
 fi
 
-VENV_ACTION_TAKEN=false
+
+# --- Action Phase ---
+PERFORM_VENV_CREATION=false
+PERFORM_SELECTIVE_CLEAR=false
 
 if [ "$UPGRADE_ENV" = "true" ]; then
-  if [ "$VENV_EXISTS" = "true" ]; then
-    if [ "$VENV_IS_VALID" = "true" ]; then
-      ohai "--upgrade: Attempting to upgrade existing venv $VENV_DIR with $PYTHON_DESCRIPTION"
-      if "$SELECTED_PYTHON_EXE" -m venv --upgrade "$VENV_DIR"; then
-        success "Successfully upgraded virtual environment."
-        VENV_ACTION_TAKEN=true
-      else
-        warn "Failed to upgrade virtual environment with $SELECTED_PYTHON_EXE."
-        warn "Proceeding with the existing environment, but it may not use the intended Python version."
-        # The environment is still considered "valid" for pip installs, just not upgraded.
-      fi
-    else # Venv exists but is invalid/corrupted
-      ohai "--upgrade: Existing venv $VENV_DIR seems corrupted. Clearing and creating new."
-      rm -rf "$VENV_DIR"/*  # Clear contents
-      if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
-        success "Successfully created new virtual environment in $VENV_DIR."
-        VENV_ACTION_TAKEN=true
-      else
-        abort "Failed to create virtual environment in $VENV_DIR after clearing due to corruption."
-      fi
+    if [ "$VENV_STATE" = "VALID_EXISTING" ]; then
+        ohai "--upgrade: Attempting to upgrade existing valid venv $VENV_DIR with $PYTHON_DESCRIPTION..."
+        if "$SELECTED_PYTHON_EXE" -m venv --upgrade "$VENV_DIR"; then
+            success "Successfully upgraded venv."
+        else
+            warn "Failed to upgrade venv. Will clear critical components and recreate."
+            PERFORM_SELECTIVE_CLEAR=true
+            PERFORM_VENV_CREATION=true
+        fi
+    elif [ "$VENV_STATE" = "NEW" ]; then
+        ohai "--upgrade: Venv directory $VENV_DIR is new or has no venv components. Creating new venv with $PYTHON_DESCRIPTION."
+        PERFORM_VENV_CREATION=true
+    elif [ "$VENV_STATE" = "CORRUPTED_OR_INCOMPLETE" ]; then
+        ohai "--upgrade: Existing venv $VENV_DIR seems corrupted/incomplete. Clearing critical components and recreating with $PYTHON_DESCRIPTION."
+        PERFORM_SELECTIVE_CLEAR=true
+        PERFORM_VENV_CREATION=true
+    elif [ "$VENV_STATE" = "NON_EXISTENT" ]; then # Handle if dir wasn't pre-created
+        ohai "--upgrade: Venv directory $VENV_DIR does not exist. Creating new venv with $PYTHON_DESCRIPTION."
+        PERFORM_VENV_CREATION=true
     fi
-  else # Venv does not exist
-    ohai "--upgrade: Venv $VENV_DIR does not exist. Creating new."
-    if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
-      success "Successfully created new virtual environment in $VENV_DIR."
-      VENV_ACTION_TAKEN=true
-    else
-      abort "Failed to create virtual environment in $VENV_DIR."
+else # Not using --upgrade flag
+    if [ "$VENV_STATE" = "VALID_EXISTING" ]; then
+        ohai "Using existing valid virtual environment $VENV_DIR."
+        # No action needed on venv itself
+    elif [ "$VENV_STATE" = "NEW" ]; then
+        ohai "Venv directory $VENV_DIR is new or has no venv components. Creating new venv with $PYTHON_DESCRIPTION."
+        PERFORM_VENV_CREATION=true
+    elif [ "$VENV_STATE" = "CORRUPTED_OR_INCOMPLETE" ]; then
+        ohai "Existing venv $VENV_DIR seems corrupted/incomplete. Clearing critical components and recreating with $PYTHON_DESCRIPTION."
+        PERFORM_SELECTIVE_CLEAR=true
+        PERFORM_VENV_CREATION=true
+    elif [ "$VENV_STATE" = "NON_EXISTENT" ]; then # Handle if dir wasn't pre-created
+        ohai "Venv directory $VENV_DIR does not exist. Creating new venv with $PYTHON_DESCRIPTION."
+        PERFORM_VENV_CREATION=true
     fi
-  fi
 fi
 
-# If --upgrade was not passed, or if it was passed but no action was taken
-# (e.g. upgrade failed on a valid venv, and we decided to proceed with existing)
-if [ "$VENV_ACTION_TAKEN" = "false" ]; then
-  if [ "$VENV_EXISTS" = "true" ]; then
-    if [ "$VENV_IS_VALID" = "true" ]; then
-      ohai "Using existing valid virtual environment $VENV_DIR."
-    else # Venv exists but is invalid/corrupted
-      ohai "Existing venv $VENV_DIR seems corrupted. Clearing and creating new."
-      rm -rf "$VENV_DIR"/*
-      if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
-        success "Successfully created new virtual environment in $VENV_DIR."
-      else
-        abort "Failed to create virtual environment in $VENV_DIR after clearing due to corruption."
-      fi
-    fi
-  else # Venv does not exist
-    ohai "Creating new virtual environment $VENV_DIR."
-    if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
-      success "Successfully created new virtual environment in $VENV_DIR."
-    else
-      abort "Failed to create virtual environment in $VENV_DIR."
-    fi
-  fi
+if [ "$PERFORM_SELECTIVE_CLEAR" = "true" ]; then
+    info "Removing old venv components: $VENV_DIR/bin $VENV_DIR/lib $VENV_DIR/include $VENV_DIR/pyvenv.cfg $VENV_DIR/lib64"
+    rm -rf "$VENV_DIR/bin" "$VENV_DIR/lib" "$VENV_DIR/include" "$VENV_DIR/pyvenv.cfg" "$VENV_DIR/lib64" 2>/dev/null || true
 fi
+
+if [ "$PERFORM_VENV_CREATION" = "true" ]; then
+    # Ensure the base directory for the venv exists before trying to create in it
+    # This is important if VENV_STATE was NON_EXISTENT
+    if [ ! -d "$VENV_DIR" ]; then
+        mkdir -p "$VENV_DIR" || abort "Failed to create directory $VENV_DIR for new venv."
+    fi
+    ohai "Creating/Recreating virtual environment in $VENV_DIR using $PYTHON_DESCRIPTION ($SELECTED_PYTHON_EXE)..."
+    if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
+        success "Successfully created/recreated venv."
+    else
+        abort "Failed to create/recreate venv."
+    fi
+fi
+
+# --- End of Venv Setup ---
 
 ohai "Step 4: Activating environment and installing dependencies"
 # Verify the virtual environment exists and is valid
@@ -267,26 +278,28 @@ python -m pip install --ignore-installed --no-build-isolation --upgrade pip setu
 
 # Resolve requirements file path
 REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
-if [ ! -f "$REQUIREMENTS_PATH" ] || [ ! -s "$REQUIREMENTS_PATH" ]; then
-  # Primary requirements file doesn't exist or is empty
-  ALT_REQUIREMENTS="$(dirname "@@VENV_DIR@@")/requirements.txt"
-  if [ -f "$ALT_REQUIREMENTS" ] && [ -s "$ALT_REQUIREMENTS" ]; then
-    ohai "Using alternative requirements file: $ALT_REQUIREMENTS"
-    REQUIREMENTS_PATH="$ALT_REQUIREMENTS"
-  else
-    # Create empty requirements file if none exists
-    info "No valid requirements file found. Creating empty one."
-    touch "@@REQUIREMENTS_PATH@@"
-    REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
-  fi
+ohai "Using requirements file: $REQUIREMENTS_PATH (this file is generated by zenv based on your configuration)"
+
+if [ ! -f "$REQUIREMENTS_PATH" ]; then
+    # This case indicates an issue upstream in zenv's file generation if it was expected to exist.
+    warn "Critical: Requirements file $REQUIREMENTS_PATH was not found where zenv expected to create it."
+    warn "An empty file will be touched to prevent pip failure, but package installation will likely be incomplete."
+    touch "$REQUIREMENTS_PATH"
 fi
+# At this point, $REQUIREMENTS_PATH should point to the file zenv intended to create/use.
+# Its content (or lack thereof) will be checked by subsequent -s tests.
 
 # Install dependencies
 PIP_INSTALL_OPTIONS="--ignore-installed" # Base option
 
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
-  ohai "Using --force-deps: Installing all specified dependencies"
+  ohai "Using --force-deps: Installing all specified dependencies from $REQUIREMENTS_PATH"
+  if [ -s "$REQUIREMENTS_PATH" ]; then
+    python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
+  else
+    info "No dependencies to install (requirements file $REQUIREMENTS_PATH is empty or not found)."
+  fi
 else
   # Filter dependencies based on what's provided by modules
   if [ -s "$MODULE_PACKAGES_FILE" ]; then
@@ -313,35 +326,27 @@ else
         fi
       done
     else
-      info "Requirements file is empty or not readable"
+      info "Requirements file '$REQUIREMENTS_PATH' is empty or not found, so no packages to filter from it."
     fi
 
     # Install the filtered dependencies
-    ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
+    ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded due to module conflicts)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
       python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
     else
-      info "No additional packages need to be installed"
+      info "No additional packages need to be installed (after filtering against module packages)."
     fi
     # Clean up temp file
     rm -f "$FILTERED_REQUIREMENTS"
   else
-    # No module packages detected, install all requirements
-    ohai "Installing all dependencies from requirements file (no module packages to filter against)"
+    # No module packages detected (or MODULE_PACKAGES_FILE was empty), so install directly from REQUIREMENTS_PATH
+    ohai "No module packages to filter against, or module package list was empty."
+    ohai "Installing all dependencies directly from $REQUIREMENTS_PATH"
     if [ -s "$REQUIREMENTS_PATH" ]; then
       python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
     else
-      info "No dependencies to install (empty requirements file)"
+      info "No dependencies to install (requirements file $REQUIREMENTS_PATH is empty or not found)."
     fi
-  fi
-fi
-
-# If FORCE_DEPS was true, we still need to install from the main REQUIREMENTS_PATH
-if [ "$FORCE_DEPS" = "true" ]; then
-  if [ -s "$REQUIREMENTS_PATH" ]; then
-    python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
-  else
-    info "No dependencies to install from $REQUIREMENTS_PATH (empty or not found)"
   fi
 fi
 
