@@ -57,13 +57,6 @@ if [ "$DEV_MODE" = "true" ]; then
   info "Will install current directory as an editable package"
 fi
 
-# Handle cache-only mode flag
-@@CACHE_MODE_VALUE@@
-if [ "$CACHE_MODE" = "true" ]; then
-  ohai "Cache-only mode flag (--cache) detected"
-  info "Will only use packages from local cache without internet access"
-fi
-
 # Handle modules_verified flag
 @@MODULES_VERIFIED_VALUE@@
 
@@ -282,27 +275,6 @@ python -m pip install --ignore-installed --no-build-isolation --upgrade pip
 # ohai "Installing build dependencies for compiling extensions (if needed later)"
 # python -m pip install --ignore-installed --no-build-isolation maturin build setuptools-rust cffi
 
-# Initialize package cache variable
-PACKAGE_CACHE=""
-
-# Handle cache mode if enabled
-if [ "$CACHE_MODE" = "true" ]; then
-  if [ -n "$HOME" ]; then
-    ZENV_DIR="${HOME}/.zenv"
-    if [ -d "$ZENV_DIR/packages/files" ]; then
-      ohai "Found package cache at $ZENV_DIR/packages/files"
-      PACKAGE_CACHE="--no-index --find-links $ZENV_DIR/packages/files"
-      info "Using ONLY cached packages (no internet access)"
-    else
-      abort "Cache mode enabled but no package cache found at $ZENV_DIR/packages/files.
-Run 'zenv prepare $ENV_NAME' first to download dependencies to cache."
-    fi
-  else
-    abort "Cache mode enabled but HOME environment variable not set.
-Cannot locate package cache without HOME."
-  fi
-fi
-
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
 
@@ -327,15 +299,8 @@ if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   ohai "Using --force-deps: Installing all specified dependencies"
   if [ -s "$REQUIREMENTS_PATH" ]; then
-    # Try to install using wheels first, then fall back to source if needed
-    ohai "Attempting installation with wheel-only mode first"
-    python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$REQUIREMENTS_PATH" && {
-      success "All packages successfully installed from wheels"
-    } || {
-      warn "Some packages don't have wheels available, falling back to source installation"
-      ohai "Installing with build tools enabled"
-      python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
-    }
+    ohai "Installing with build tools enabled"
+    python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
   else
     info "No dependencies to install (empty requirements file)"
   fi
@@ -371,15 +336,9 @@ else
     # Install the filtered dependencies
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
-      # Try to install using wheels first, then fall back to source if needed
-      ohai "Attempting installation with wheel-only mode first"
-      python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$FILTERED_REQUIREMENTS" && {
-        success "All packages successfully installed from wheels"
-      } || {
-        warn "Some packages don't have wheels available, falling back to source installation"
-        ohai "Installing with build tools enabled"
-        python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$FILTERED_REQUIREMENTS"
-      }
+      ohai "Installing with build tools enabled"
+      python -m pip install --ignore-installed -r "$FILTERED_REQUIREMENTS"
+     
     else
       info "No additional packages need to be installed"
     fi
@@ -390,15 +349,8 @@ else
     # No module packages detected, install all requirements
     ohai "Installing all dependencies from requirements file"
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      # Try to install using wheels first, then fall back to source if needed
-      ohai "Attempting installation with wheel-only mode first"
-      python -m pip install --ignore-installed --prefer-binary --only-binary=:all: $PACKAGE_CACHE -r "$REQUIREMENTS_PATH" && {
-        success "All packages successfully installed from wheels"
-      } || {
-        warn "Some packages don't have wheels available, falling back to source installation"
-        ohai "Installing with build tools enabled"
-        python -m pip install --ignore-installed --prefer-binary $PACKAGE_CACHE -r "$REQUIREMENTS_PATH"
-      }
+      ohai "Installing with build tools enabled"
+      python -m pip install --ignore-installed -r "$REQUIREMENTS_PATH"
     else
       info "No dependencies to install (empty requirements file)"
     fi
@@ -412,10 +364,9 @@ rm -f "$MODULE_PACKAGES_FILE" 2>/dev/null || true
 if [ "$DEV_MODE" = "true" ]; then
   ohai "Step 4.5: Installing current directory as an editable package"
 
-  # Verify that setup.py or pyproject.toml exists
   if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
     info "Found Python package configuration in current directory"
-    python -m pip install --ignore-installed --no-build-isolation $PACKAGE_CACHE --editable . || {
+    python -m pip install --ignore-installed --no-build-isolation --editable . || {
       warn "Failed to install current directory as editable package"
       warn "Check that your setup.py or pyproject.toml is valid"
     }

@@ -8,7 +8,6 @@ const aux = @import("utils/auxiliary.zig");
 const python = @import("utils/python.zig");
 const configurations = @import("utils/config.zig");
 const output = @import("utils/output.zig");
-const package_cache = @import("utils/package_cache.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
@@ -102,11 +101,7 @@ pub fn handleSetupCommand(
         output.print("No-host flag detected. Bypassing hostname validation.", .{}) catch {};
     }
     if (flags.force_rebuild) {
-        output.print("Force rebuild flag detected. Will recreate the virtual environment.", .{}) catch {};
-    }
-    if (flags.cache_mode) {
-        output.print("Cache mode flag (--cache) detected. Will ONLY use previously cached packages with no internet access.", .{}) catch {};
-        output.print("Without this flag, cache is ignored and packages are freshly downloaded.", .{}) catch {};
+        output.print("Rebuild flag detected. Will recreate the virtual environment.", .{}) catch {};
     }
 
     // Get and validate the environment config
@@ -250,7 +245,6 @@ pub fn handleSetupCommand(
         modules_verified,
         flags.use_default_python,
         flags.dev_mode,
-        flags.cache_mode,
     ) catch |err| {
         handleErrorFn(err);
         return;
@@ -622,156 +616,6 @@ pub fn handleCdCommand(
         output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
-}
-
-pub fn handlePrepareCommand(
-    allocator: Allocator,
-    config: *const ZenvConfig,
-    args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) !void {
-    // Create an arena allocator for temporary allocations
-    var temp_arena = std.heap.ArenaAllocator.init(allocator);
-    defer temp_arena.deinit();
-    const temp_allocator = temp_arena.allocator();
-
-    // Parse command-line flags (reuse from setup command)
-    const flags = CommandFlags.fromArgs(args);
-
-    // Get and validate the environment config
-    const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
-    const env_name = args[2];
-
-    output.print("Preparing dependencies for environment: {s}", .{env_name}) catch {};
-
-    // 1. Combine dependencies from config and requirements file
-    var all_required_deps = std.ArrayList([]const u8).init(allocator);
-    var deps_need_cleanup = true;
-    defer {
-        if (deps_need_cleanup) {
-            for (all_required_deps.items) |item| {
-                if (!deps.isConfigProvidedDependency(env_config, item)) {
-                    allocator.free(item);
-                }
-            }
-            all_required_deps.deinit();
-        } else {
-            all_required_deps.deinit();
-        }
-    }
-
-    // Add dependencies from config
-    if (env_config.dependencies.items.len > 0) {
-        output.print("Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len}) catch {};
-        for (env_config.dependencies.items) |dep| {
-            output.print("  - Config dependency: {s}", .{dep}) catch {};
-            try all_required_deps.append(dep);
-        }
-    } else {
-        output.print("No dependencies specified in configuration.", .{}) catch {};
-    }
-
-    // Add dependencies from requirements file if specified
-    if (env_config.dependency_file) |req_file| {
-        // Check if the specified requirements file actually exists
-        std.fs.cwd().access(req_file, .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                output.printError("Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
-                handleErrorFn(err); // Use the original file not found error
-                return; // Exit setup command
-            } else {
-                // Handle other potential access errors
-                output.printError("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-                handleErrorFn(err);
-                return;
-            }
-        };
-
-        // Log the absolute path for debugging
-        var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
-            output.printError("Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-            return err; // Propagate error
-        };
-        output.print("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path }) catch {};
-
-        // Read the file content - use temp_allocator since we're done with it after parsing
-        const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
-            output.printError("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-            handleErrorFn(error.PathResolutionFailed); // Use specific error
-            return; // Exit setup command
-        };
-
-        output.print("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len}) catch {};
-
-        // Determine file type and parse
-        const is_toml = std.mem.endsWith(u8, req_file, ".toml");
-        var req_file_dep_count: usize = 0;
-
-        if (is_toml) {
-            output.print("Detected TOML file format, parsing as pyproject.toml", .{}) catch {};
-            req_file_dep_count = try deps.parsePyprojectToml(allocator, req_content, &all_required_deps);
-        } else {
-            output.print("Parsing as requirements.txt format", .{}) catch {};
-            // Use the new utility function
-            req_file_dep_count = try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
-        }
-
-        if (req_file_dep_count > 0) {
-            output.print("Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file }) catch {};
-        } else {
-            output.print("Warning: No valid dependencies found in file '{s}'", .{req_file}) catch {};
-        }
-    } else {
-        output.print("No requirements file specified in configuration.", .{}) catch {};
-    }
-
-    // Debug output - print the combined dependencies
-    output.print("Combined dependency list ({d} items):", .{all_required_deps.items.len}) catch {};
-    for (all_required_deps.items) |dep| {
-        output.print("  - {s}", .{dep}) catch {};
-    }
-
-    // Initialize package cache
-    const cache = try package_cache.PackageCache.init(allocator);
-    defer cache.deinit();
-
-    // Download all dependencies
-    output.print("Downloading {d} dependencies to cache", .{all_required_deps.items.len}) catch {};
-
-    var success_count: usize = 0;
-    var error_count: usize = 0;
-
-    for (all_required_deps.items) |dep| {
-        // Parse version specifier if present (e.g., "package==1.0.0")
-        var package_name = dep;
-        var version: ?[]const u8 = null;
-
-        if (std.mem.indexOf(u8, dep, "==")) |idx| {
-            package_name = dep[0..idx];
-            version = dep[idx + 2 ..];
-        }
-
-        // Download the package
-        cache.downloadPackage(package_name, version) catch |err| {
-            output.printError("Failed to download {s}: {s}", .{ dep, @errorName(err) }) catch {};
-            error_count += 1;
-            continue;
-        };
-
-        success_count += 1;
-    }
-
-    deps_need_cleanup = false;
-
-    // Print summary
-    output.print("Package preparation complete. Downloaded {d} packages ({d} errors)", .{ success_count, error_count }) catch {};
-
-    if (success_count > 0) {
-        output.print("Packages are cached in {s}", .{cache.getCacheDir()}) catch {};
-        output.print("You can now run 'zenv setup {s} --cache' on compute nodes without internet", .{env_name}) catch {};
-        output.print("The --cache flag is required to use cached packages; without it packages are freshly downloaded", .{}) catch {};
-    }
 }
 
 pub fn handlePythonCommand(

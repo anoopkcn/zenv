@@ -23,7 +23,6 @@ pub fn createSetupScriptFromTemplate(
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
-    cache_mode: bool,
 ) ![]const u8 {
     return try createSetupScript(
         allocator,
@@ -37,7 +36,6 @@ pub fn createSetupScriptFromTemplate(
         modules_verified,
         use_default_python,
         dev_mode,
-        cache_mode,
     );
 }
 
@@ -54,7 +52,6 @@ fn createSetupScript(
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
-    cache_mode: bool,
 ) ![]const u8 {
     try output.print("Creating setup script for '{s}'...", .{env_name});
 
@@ -161,9 +158,6 @@ fn createSetupScript(
 
     // Set dev_mode flag for the template
     try replacements.put("DEV_MODE_VALUE", if (dev_mode) "DEV_MODE=true" else "DEV_MODE=false");
-
-    // Set cache_mode flag for the template
-    try replacements.put("CACHE_MODE_VALUE", if (cache_mode) "CACHE_MODE=true" else "CACHE_MODE=false");
 
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)

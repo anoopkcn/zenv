@@ -16,7 +16,6 @@ pub const Command = enum {
     cd,
     init,
     python,
-    prepare,
     help,
     version,
     @"-v",
@@ -35,7 +34,6 @@ pub const Command = enum {
             .{ "cd", .cd },
             .{ "init", .init },
             .{ "python", .python },
-            .{ "prepare", .prepare },
             .{ "help", .help },
             .{ "version", .version },
             .{ "-v", .@"-v" },
@@ -98,10 +96,6 @@ fn printUsage() void {
         \\                            use <version>      :  pinn a python version.
         \\                            list               :  List all installed Python versions.
         \\
-        \\  prepare <name>            Download and cache dependencies for an environment.
-        \\                            Useful for preparing packages on login nodes with internet
-        \\                            before moving to compute nodes without internet.
-        \\
         \\  version, -v, --version    Print the zenv version.
         \\
         \\  help, --help              Show this help message.
@@ -119,10 +113,6 @@ fn printUsage() void {
         \\  --dev                     Install the current directory as an editable package.
         \\                            Equivalent to running 'pip install --editable .'
         \\                            Requires a valid setup.py or pyproject.toml in the directory.
-        \\
-        \\  --cache                   Use ONLY the cached packages.
-        \\                            Use 'zenv prepare <name>' first to download packages to cache.
-        \\                            Ideal for compute nodes without internet access.
         \\
         \\  --force-deps              It tries to install all dependencies even if they are already
         \\                            provided by loaded modules.
@@ -180,7 +170,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .python, .prepare, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .python, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -283,8 +273,8 @@ pub fn main() anyerror!void {
     var config: ?configurations.ZenvConfig = null;
     defer if (config != null) config.?.deinit();
 
-    // Only try to load the config file for setup, register, and prepare commands
-    if (command == .setup or command == .register or command == .prepare) {
+    // Only try to load the config file for setup and register commands
+    if (command == .setup or command == .register) {
         config = configurations.parse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
@@ -302,7 +292,6 @@ pub fn main() anyerror!void {
         .deregister => commands.handleDeregisterCommand(&registry, args, handleError),
         .cd => commands.handleCdCommand(&registry, args, handleError),
         .python => try commands.handlePythonCommand(allocator, args, handleError),
-        .prepare => try commands.handlePrepareCommand(allocator, &config.?, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
