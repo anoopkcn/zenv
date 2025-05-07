@@ -279,6 +279,10 @@ if ! python -m pip --version >/dev/null 2>&1; then
   abort "'pip' module not found after activating venv. Ensure Python installation includes pip."
 fi
 
+# Prevent Python from writing .pyc files during setup to save inodes
+ohai "Temporarily disabling .pyc file generation for package installation"
+export PYTHONDONTWRITEBYTECODE=1
+
 # Ensure build essentials are there, especially if venv was just created/upgraded
 if [ "$USE_UV" = "true" ]; then
   ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv using uv"
@@ -417,6 +421,12 @@ if [ "$DEV_MODE" = "true" ]; then
     warn "No setup.py or pyproject.toml found in current directory"
     warn "Skipping editable install. Create one of these files if needed."
   fi
+fi
+
+# Re-enable .pyc file generation if it was set
+if [ -n "$PYTHONDONTWRITEBYTECODE" ]; then
+  ohai "Re-enabling .pyc file generation"
+  unset PYTHONDONTWRITEBYTECODE
 fi
 
 # Run custom setup commands if provided

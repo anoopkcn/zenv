@@ -22,6 +22,9 @@ fi
 # Activate the Python virtual environment
 source @@VENV_PATH@@/bin/activate
 
+# Prevent Python from writing .pyc files to save inodes
+export PYTHONDONTWRITEBYTECODE=1
+
 @@CUSTOM_VAR_EXPORTS@@
 
 @@ACTIVATE_COMMANDS_BLOCK@@
@@ -45,6 +48,12 @@ deactivate_all() {
 
   # Then unset any custom environment variables
   @@CUSTOM_VAR_UNSET@@
+
+  # Unset PYTHONDONTWRITEBYTECODE
+  if [ -n "$PYTHONDONTWRITEBYTECODE" ]; then
+    unset PYTHONDONTWRITEBYTECODE
+  fi
+
   # Unset this function
   unset -f deactivate_all
   echo "Info: Environment fully deactivated"
