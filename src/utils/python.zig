@@ -8,7 +8,7 @@ const download = @import("download.zig");
 const time = std.time;
 
 // Define Python versions we know work well
-const DEFAULT_PYTHON_VERSION = "3.10.8";
+pub const DEFAULT_PYTHON_VERSION = "3.10.8";
 
 // Command result structure to hold subprocess output
 const CommandResult = struct {
@@ -210,15 +210,11 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
 }
 
 // Helper function to run a command and capture its output
-fn runCapturedCommand(
-    args: []const []const u8,
-    cwd: []const u8,
-    allocator: Allocator
-) !CommandResult {
+fn runCapturedCommand(args: []const []const u8, cwd: []const u8, allocator: Allocator) !CommandResult {
     var child = std.process.Child.init(args, allocator);
     child.cwd = cwd;
-    child.stderr_behavior = .Pipe;  // Capture stderr
-    child.stdout_behavior = .Pipe;  // Capture stdout
+    child.stderr_behavior = .Pipe; // Capture stderr
+    child.stdout_behavior = .Pipe; // Capture stdout
 
     try child.spawn();
 
@@ -261,15 +257,8 @@ fn showInstallProgress(stage: []const u8, percent: usize) !void {
     }
 
     // Clear line and show progress
-    try stdout.writeAll("\r\x1b[K");  // ANSI escape code to clear line
-    try stdout.print("[{s}{s}] {d}% - {s}",
-        .{
-            progress_bar[0..filled],
-            progress_bar[filled..],
-            percent,
-            stage
-        }
-    );
+    try stdout.writeAll("\r\x1b[K"); // ANSI escape code to clear line
+    try stdout.print("[{s}{s}] {d}% - {s}", .{ progress_bar[0..filled], progress_bar[filled..], percent, stage });
 }
 
 // Configure and build Python
@@ -377,8 +366,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     const elapsed_minutes = @divFloor(elapsed_ms, 60000);
     const elapsed_seconds = @mod(@divFloor(elapsed_ms, 1000), 60);
 
-    output.print("Python installation completed successfully in {d}m {d}s",
-        .{elapsed_minutes, elapsed_seconds}) catch {};
+    output.print("Python installation completed successfully in {d}m {d}s", .{ elapsed_minutes, elapsed_seconds }) catch {};
 }
 
 // Main function to install Python
@@ -443,6 +431,6 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     // Print success message with actual paths
     output.print("Python {s} has been successfully installed!", .{python_version}) catch {};
     output.print("Installation path: {s}", .{install_dir}) catch {};
-    output.print("To set this as the default Python for new environments:", .{}) catch {};
-    output.print("zenv python use {s}", .{python_version}) catch {};
+    output.print("This Python version has been pinned 'ZENV_DIR/default-python'", .{}) catch {};
+    output.print("You can install packages with zenv setup commands now", .{}) catch {};
 }

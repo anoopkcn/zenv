@@ -27,22 +27,22 @@ pub const Command = enum {
 
     fn fromString(s: []const u8) Command {
         const command_map = .{
-                .{ "setup", .setup },
-                .{ "activate", .activate },
-                .{ "list", .list },
-                .{ "register", .register },
-                .{ "deregister", .deregister },
-                .{ "cd", .cd },
-                .{ "init", .init },
-                .{ "python", .python },
-                .{ "prepare", .prepare },
-                .{ "help", .help },
-                .{ "version", .version },
-                .{ "-v", .@"-v" },
-                .{ "-V", .@"-V" },
-                .{ "--version", .@"--version" },
-                .{ "--help", .@"--help" },
-            };
+            .{ "setup", .setup },
+            .{ "activate", .activate },
+            .{ "list", .list },
+            .{ "register", .register },
+            .{ "deregister", .deregister },
+            .{ "cd", .cd },
+            .{ "init", .init },
+            .{ "python", .python },
+            .{ "prepare", .prepare },
+            .{ "help", .help },
+            .{ "version", .version },
+            .{ "-v", .@"-v" },
+            .{ "-V", .@"-V" },
+            .{ "--version", .@"--version" },
+            .{ "--help", .@"--help" },
+        };
 
         // Linear search through the command_map
         inline for (command_map) |entry| {
@@ -61,7 +61,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -107,9 +107,6 @@ fn printUsage() void {
         \\  help, --help              Show this help message.
         \\
         \\Options for setup:
-        \\  --force-deps              It tries to install all dependencies even if they are already
-        \\                            provided by loaded modules.
-        \\
         \\  --no-host                 Bypass hostname validation, this is equivalant to
         \\                            setting "target_machines": ["*"] in the zenv.json
         \\
@@ -123,10 +120,12 @@ fn printUsage() void {
         \\                            Equivalent to running 'pip install --editable .'
         \\                            Requires a valid setup.py or pyproject.toml in the directory.
         \\
-        \\  --cache                   ONLY use previously cached packages with no internet access.
-        \\                            Without this flag, cache is ignored and packages are freshly downloaded.
+        \\  --cache                   Use ONLY the cached packages.
         \\                            Use 'zenv prepare <name>' first to download packages to cache.
         \\                            Ideal for compute nodes without internet access.
+        \\
+        \\  --force-deps              It tries to install all dependencies even if they are already
+        \\                            provided by loaded modules.
         \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file defines your environments. Environment names occupy top level

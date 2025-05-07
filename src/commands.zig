@@ -749,12 +749,12 @@ pub fn handlePrepareCommand(
 
         if (std.mem.indexOf(u8, dep, "==")) |idx| {
             package_name = dep[0..idx];
-            version = dep[idx+2..];
+            version = dep[idx + 2 ..];
         }
 
         // Download the package
         cache.downloadPackage(package_name, version) catch |err| {
-            output.printError("Failed to download {s}: {s}", .{dep, @errorName(err)}) catch {};
+            output.printError("Failed to download {s}: {s}", .{ dep, @errorName(err) }) catch {};
             error_count += 1;
             continue;
         };
@@ -765,9 +765,7 @@ pub fn handlePrepareCommand(
     deps_need_cleanup = false;
 
     // Print summary
-    output.print("Package preparation complete. Downloaded {d} packages ({d} errors)", .{
-        success_count, error_count
-    }) catch {};
+    output.print("Package preparation complete. Downloaded {d} packages ({d} errors)", .{ success_count, error_count }) catch {};
 
     if (success_count > 0) {
         output.print("Packages are cached in {s}", .{cache.getCacheDir()}) catch {};
@@ -807,6 +805,10 @@ pub fn handlePythonCommand(
             handleErrorFn(err);
             return;
         };
+
+        const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
+        try output.print("Pinning newly installed Python {s}", .{installed_version});
+        try python.setDefaultPythonPath(allocator, installed_version);
     } else if (std.mem.eql(u8, subcommand, "use")) {
         // Python use [version] command
         if (args.len < 4) {
