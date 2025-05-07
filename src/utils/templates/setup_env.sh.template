@@ -294,7 +294,7 @@ PIP_INSTALL_OPTIONS="--ignore-installed" # Base option
 
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
-  ohai "Using --force-deps: Installing all specified dependencies from $REQUIREMENTS_PATH"
+  ohai "Using --force: Installing all specified dependencies from $REQUIREMENTS_PATH"
   if [ -s "$REQUIREMENTS_PATH" ]; then
     python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
   else

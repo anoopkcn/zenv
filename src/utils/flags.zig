@@ -12,7 +12,7 @@ pub const CommandFlags = struct {
         var flags = CommandFlags{};
 
         for (args) |arg| {
-            if (std.mem.eql(u8, arg, "--force-deps")) {
+            if (std.mem.eql(u8, arg, "--force")) {
                 flags.force_deps = true;
             } else if (std.mem.eql(u8, arg, "--no-host")) {
                 flags.skip_hostname_check = true;

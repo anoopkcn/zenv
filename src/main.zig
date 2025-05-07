@@ -61,7 +61,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -75,8 +75,7 @@ fn printUsage() void {
         \\
         \\  activate <name|id>        Output the path to the activation script.
         \\                            You can use the environment name or its ID (full or partial).
-        \\                            To activate the environment, use:
-        \\                            source $(zenv activate <name|id>)
+        \\                            use: source $(zenv activate <name|id>) to activate
         \\
         \\  cd <name|id>              Output the project directory path.
         \\                            You can use the environment name or its ID (full or partial).
@@ -115,13 +114,12 @@ fn printUsage() void {
         \\
         \\  --python                  Use only the pinned Python set with 'use' subcommand.
         \\                            This ignores the default python priority list.
-        \\                            Will error if no pinned Python is configured.
         \\
         \\  --dev                     Install the current directory as an editable package.
         \\                            Equivalent to running 'pip install --editable .'
-        \\                            Requires a valid setup.py or pyproject.toml in the directory.
+        \\                            Requires a valid 'setup.py' or 'pyproject.toml' in the directory.
         \\
-        \\  --force-deps              It tries to install all dependencies even if they are already
+        \\  --force                   It tries to install all dependencies even if they are already
         \\                            provided by loaded modules.
         \\
         \\Configuration (zenv.json):

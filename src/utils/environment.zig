@@ -771,7 +771,7 @@ pub fn lookupRegistryEntry(
 //     if (!result.available) {
 //         // If force_deps is true, we can continue even with missing modules
 //         if (force_deps) {
-//             try output.print("Warning: "The following modules are not available but will be skipped due to --force-deps:", .{});
+//             try output.print("Warning: "The following modules are not available but will be skipped due to --force:", .{});
 //             for (result.missing.?) |module| {
 //                 try output.print("Warning: "  - {s}", .{module});
 //             }

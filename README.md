@@ -225,8 +225,7 @@ Commands:
 
   activate <name|id>        Output the path to the activation script.
                             You can use the environment name or its ID (full or partial).
-                            To activate the environment, use:
-                            source $(zenv activate <name|id>)
+                            use: source $(zenv activate <name|id>) to activate
 
   cd <name|id>              Output the project directory path.
                             You can use the environment name or its ID (full or partial).
@@ -243,14 +242,13 @@ Commands:
   deregister <name|id>      Remove an environment from the global registry.
                             It does not remove the environment itself.
 
+  rm <name|id>              Deregister the environment AND remove its virtual
+                            environment directory from the filesystem.
+
   python <subcommand>       Python management commands:
                             install <version>  :  Install a specified Python version.
                             use <version>      :  pinn a python version.
                             list               :  List all installed Python versions.
-
-  prepare <name>            Download and cache dependencies for an environment.
-                            Useful for preparing packages on login nodes with internet
-                            before moving to compute nodes without internet.
 
   version, -v, --version    Print the zenv version.
 
@@ -260,21 +258,18 @@ Options for setup:
   --no-host                 Bypass hostname validation, this is equivalant to
                             setting "target_machines": ["*"] in the zenv.json
 
-  --rebuild                 Re-build the virtual environment, even if it already exists.
+  --upgrade                 Attempt to upgrade the Python interpreter in an existing virtual
+                            environment. If the environment doesn't exist or is corrupted,
+                            it will be created fresh.
 
   --python                  Use only the pinned Python set with 'use' subcommand.
                             This ignores the default python priority list.
-                            Will error if no pinned Python is configured.
 
   --dev                     Install the current directory as an editable package.
                             Equivalent to running 'pip install --editable .'
-                            Requires a valid setup.py or pyproject.toml in the directory.
+                            Requires a valid 'setup.py' or 'pyproject.toml' in the directory.
 
-  --cache                   Use ONLY the cached packages.
-                            Use 'zenv prepare <name>' first to download packages to cache.
-                            Ideal for compute nodes without internet access.
-
-  --force-deps              It tries to install all dependencies even if they are already
+  --force                   It tries to install all dependencies even if they are already
                             provided by loaded modules.
 
 Configuration (zenv.json):
