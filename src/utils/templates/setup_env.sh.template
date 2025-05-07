@@ -270,8 +270,9 @@ if ! python -m pip --version >/dev/null 2>&1; then
 fi
 
 # Ensure build essentials are there, especially if venv was just created/upgraded
-ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv"
-python -m pip install --ignore-installed --no-build-isolation --upgrade pip setuptools wheel
+# ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv"
+ohai "Ensuring pip and it is up-to-date in the venv"
+python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
 
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
