@@ -73,6 +73,7 @@ zenv init
 # This creates a `zenv.json` configuration file TEMPLATE in your project directory
 # You can then modify this json file according to your needs and run:
 zenv setup <name_of_your_environment>
+# This will also register the environment to global ZENV_DIR/registry.json
 ```
 
 Example of a `zenv.json` file:
@@ -247,22 +248,34 @@ Commands:
                             use <version>      :  pinn a python version.
                             list               :  List all installed Python versions.
 
+  prepare <name>            Download and cache dependencies for an environment.
+                            Useful for preparing packages on login nodes with internet
+                            before moving to compute nodes without internet.
+
   version, -v, --version    Print the zenv version.
 
   help, --help              Show this help message.
 
 Options for setup:
-  --force-deps              It tries to install all dependencies even if they are already
-                            provided by loaded modules.
-
-  --no-host                 Bypass hostname validation, this is equivalant to setting
-                            "target_machines": ["*"] in the zenv.json
+  --no-host                 Bypass hostname validation, this is equivalant to
+                            setting "target_machines": ["*"] in the zenv.json
 
   --rebuild                 Re-build the virtual environment, even if it already exists.
 
   --python                  Use only the pinned Python set with 'use' subcommand.
                             This ignores the default python priority list.
                             Will error if no pinned Python is configured.
+
+  --dev                     Install the current directory as an editable package.
+                            Equivalent to running 'pip install --editable .'
+                            Requires a valid setup.py or pyproject.toml in the directory.
+
+  --cache                   Use ONLY the cached packages.
+                            Use 'zenv prepare <name>' first to download packages to cache.
+                            Ideal for compute nodes without internet access.
+
+  --force-deps              It tries to install all dependencies even if they are already
+                            provided by loaded modules.
 
 Configuration (zenv.json):
   The 'zenv.json' file defines your environments. Environment names occupy top level
