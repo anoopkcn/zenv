@@ -61,7 +61,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.
@@ -94,7 +94,7 @@ fn printUsage() void {
         \\                            It does not remove the environment itself.
         \\
         \\  rm <name|id>              Deregister the environment AND remove its virtual
-        \\                            environment directory from the filesystem. Use with caution.
+        \\                            environment directory from the filesystem.
         \\
         \\  python <subcommand>       Python management commands:
         \\                            install <version>  :  Install a specified Python version.
