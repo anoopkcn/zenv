@@ -104,7 +104,9 @@ fn printUsage() void {
         \\  --no-host                 Bypass hostname validation, this is equivalant to
         \\                            setting "target_machines": ["*"] in the zenv.json
         \\
-        \\  --rebuild                 Re-build the virtual environment, even if it already exists.
+        \\  --upgrade                 Attempt to upgrade the Python interpreter in an existing virtual
+        \\                            environment. If the environment doesn't exist or is corrupted,
+        \\                            it will be created fresh.
         \\
         \\  --python                  Use only the pinned Python set with 'use' subcommand.
         \\                            This ignores the default python priority list.

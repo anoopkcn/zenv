@@ -19,7 +19,7 @@ pub fn createSetupScriptFromTemplate(
     req_abs_path: []const u8,
     valid_deps_list_len: usize,
     force_deps: bool,
-    force_rebuild: bool,
+    upgrade_env: bool,
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
@@ -32,7 +32,7 @@ pub fn createSetupScriptFromTemplate(
         req_abs_path,
         valid_deps_list_len,
         force_deps,
-        force_rebuild,
+        upgrade_env,
         modules_verified,
         use_default_python,
         dev_mode,
@@ -48,7 +48,7 @@ fn createSetupScript(
     req_abs_path: []const u8,
     valid_deps_list_len: usize,
     force_deps: bool,
-    force_rebuild: bool,
+    upgrade_env: bool,
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
@@ -150,8 +150,8 @@ fn createSetupScript(
     // Set force_deps flag for the template
     try replacements.put("FORCE_DEPS_VALUE", if (force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
 
-    // Set force_rebuild flag for the template
-    try replacements.put("FORCE_REBUILD_VALUE", if (force_rebuild) "FORCE_REBUILD=true" else "FORCE_REBUILD=false");
+    // Set upgrade_env flag for the template
+    try replacements.put("UPGRADE_ENV_VALUE", if (upgrade_env) "UPGRADE_ENV=true" else "UPGRADE_ENV=false");
 
     // Set use_default_python flag for the template
     try replacements.put("USE_DEFAULT_PYTHON_VALUE", if (use_default_python) "USE_DEFAULT_PYTHON=true" else "USE_DEFAULT_PYTHON=false");
