@@ -60,6 +60,16 @@ fi
 # Handle modules_verified flag
 @@MODULES_VERIFIED_VALUE@@
 
+# Handle USE_UV flag
+@@USE_UV_VALUE@@
+if [ "$USE_UV" = "true" ]; then
+  ohai "--uv flag detected. Attempting to use 'uv' for package operations."
+  if ! command -v uv >/dev/null 2>&1; then
+    abort "'uv' command not found, but --uv flag was specified. Please install uv or run without --uv."
+  fi
+  info "Using uv version: $(uv --version)"
+fi
+
 # Check if module command exists
 if command -v module >/dev/null 2>&1; then
   ohai "Purging all modules"
@@ -270,9 +280,16 @@ if ! python -m pip --version >/dev/null 2>&1; then
 fi
 
 # Ensure build essentials are there, especially if venv was just created/upgraded
-# ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv"
-ohai "Ensuring pip and it is up-to-date in the venv"
-python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
+if [ "$USE_UV" = "true" ]; then
+  ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv using uv"
+  # Using uv pip install for these core tools.
+  # uv doesn't have a direct equivalent for --no-build-isolation for *these specific* tools.
+  # It's generally fine as uv handles build environments differently.
+  uv pip install --no-cache --link-mode=copy --upgrade pip #setuptools wheel
+else
+  ohai "Ensuring pip and it is up-to-date in the venv using pip"
+  python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
+fi
 
 # Handle dependencies installation based on force_deps flag
 @@FORCE_DEPS_VALUE@@
@@ -291,13 +308,19 @@ fi
 # Its content (or lack thereof) will be checked by subsequent -s tests.
 
 # Install dependencies
-PIP_INSTALL_OPTIONS="--ignore-installed" # Base option
+PIP_INSTALL_OPTIONS="" # Base option - ensure we don't ignore already installed packages by default
 
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   ohai "Using --force: Installing all specified dependencies from $REQUIREMENTS_PATH"
   if [ -s "$REQUIREMENTS_PATH" ]; then
-    python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
+    if [ "$USE_UV" = "true" ]; then
+      ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+      uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"` if sync behavior is not desired
+    else
+      ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
+      python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
+    fi
   else
     info "No dependencies to install (requirements file $REQUIREMENTS_PATH is empty or not found)."
   fi
@@ -333,7 +356,13 @@ else
     # Install the filtered dependencies
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded due to module conflicts)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
-      python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
+      if [ "$USE_UV" = "true" ]; then
+        ohai "Installing filtered dependencies using 'uv pip sync --no-cache --link-mode=copy $FILTERED_REQUIREMENTS'"
+        uv pip sync --no-cache --link-mode=copy "$FILTERED_REQUIREMENTS" # Consider `uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"`
+      else
+        ohai "Installing filtered dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$FILTERED_REQUIREMENTS\"'"
+        python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
+      fi
     else
       info "No additional packages need to be installed (after filtering against module packages)."
     fi
@@ -344,7 +373,13 @@ else
     ohai "No module packages to filter against, or module package list was empty."
     ohai "Installing all dependencies directly from $REQUIREMENTS_PATH"
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
+      if [ "$USE_UV" = "true" ]; then
+        ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+        uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"`
+      else
+        ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
+        python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
+      fi
     else
       info "No dependencies to install (requirements file $REQUIREMENTS_PATH is empty or not found)."
     fi
@@ -361,10 +396,22 @@ if [ "$DEV_MODE" = "true" ]; then
 
   if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
     info "Found Python package configuration in current directory"
-    python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . || {
-      warn "Failed to install current directory as editable package"
-      warn "Check that your setup.py or pyproject.toml is valid"
-    }
+    if [ "$USE_UV" = "true" ]; then
+      ohai "Installing current directory as editable package using 'uv pip install --no-cache --link-mode=copy --editable .'"
+      # For uv, --no-build-isolation is generally not needed as it handles builds differently.
+      # We are not passing $PIP_INSTALL_OPTIONS to uv for editable install.
+      # Not using --reinstall to ensure dependencies are only installed if missing/incompatible.
+      uv pip install --no-cache --link-mode=copy --editable . || {
+        warn "Failed to install current directory as editable package using uv"
+        warn "Check that your setup.py or pyproject.toml is valid"
+      }
+    else
+      ohai "Installing current directory as editable package using 'python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable .'"
+      python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . || {
+        warn "Failed to install current directory as editable package using pip"
+        warn "Check that your setup.py or pyproject.toml is valid"
+      }
+    fi
     success "Installed current directory as editable package"
   else
     warn "No setup.py or pyproject.toml found in current directory"
