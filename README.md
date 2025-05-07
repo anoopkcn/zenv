@@ -258,6 +258,9 @@ Options for setup:
   --no-host                 Bypass hostname validation, this is equivalant to
                             setting "target_machines": ["*"] in the zenv.json
 
+  --uv                      Use 'uv' instead of 'pip' for package operations.
+                            Ensure 'uv' is available when using this flag.
+
   --upgrade                 Attempt to upgrade the Python interpreter in an existing virtual
                             environment. If the environment doesn't exist or is corrupted,
                             it will be created fresh.
