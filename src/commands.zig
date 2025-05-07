@@ -674,3 +674,57 @@ pub fn handlePythonCommand(
         return;
     }
 }
+
+pub fn handleRmCommand(
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        output.printError(
+            \\Missing environment name or ID argument.
+            \\Usage: zenv rm <name|id>
+        , .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+
+    const identifier = args[2];
+
+    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+
+    const env_name_to_remove = registry.allocator.dupe(u8, entry.env_name) catch |err| {
+        output.printError("Failed to duplicate environment name for removal: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer registry.allocator.free(env_name_to_remove);
+
+    const venv_path_to_remove = registry.allocator.dupe(u8, entry.venv_path) catch |err| {
+        output.printError("Failed to duplicate venv path for removal: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer registry.allocator.free(venv_path_to_remove);
+
+    if (registry.deregister(identifier)) { // Use original identifier for deregister
+        output.print("Environment '{s}' deregistered successfully.", .{env_name_to_remove}) catch {};
+        registry.save() catch |err| {
+            output.printError("Failed to save registry after deregistering '{s}': {s}", .{ env_name_to_remove, @errorName(err) }) catch {};
+        };
+    } else {
+        output.printError("Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+        return; // Do not proceed to delete if deregistration failed.
+    }
+
+    output.print("Attempting to remove virtual environment directory: {s}", .{venv_path_to_remove}) catch {};
+    std.fs.deleteTreeAbsolute(venv_path_to_remove) catch |err| {
+        output.printError("Failed to remove directory '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
+        output.printError("You may need to remove it manually.", .{}) catch {};
+        return;
+    };
+
+    output.print("Virtual environment directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
+    output.print("Environment '{s}' fully removed.", .{env_name_to_remove}) catch {};
+}

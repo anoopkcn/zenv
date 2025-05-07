@@ -15,6 +15,7 @@ pub const Command = enum {
     deregister,
     cd,
     init,
+    rm,
     python,
     help,
     version,
@@ -33,6 +34,7 @@ pub const Command = enum {
             .{ "deregister", .deregister },
             .{ "cd", .cd },
             .{ "init", .init },
+            .{ "rm", .rm },
             .{ "python", .python },
             .{ "help", .help },
             .{ "version", .version },
@@ -90,6 +92,9 @@ fn printUsage() void {
         \\
         \\  deregister <name|id>      Remove an environment from the global registry.
         \\                            It does not remove the environment itself.
+        \\
+        \\  rm <name|id>              Deregister the environment AND remove its virtual
+        \\                            environment directory from the filesystem. Use with caution.
         \\
         \\  python <subcommand>       Python management commands:
         \\                            install <version>  :  Install a specified Python version.
@@ -172,7 +177,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .python, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .rm, .python, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -292,6 +297,7 @@ pub fn main() anyerror!void {
         .list => commands.handleListCommand(allocator, &registry, args),
         .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError),
         .deregister => commands.handleDeregisterCommand(&registry, args, handleError),
+        .rm => commands.handleRmCommand(&registry, args, handleError),
         .cd => commands.handleCdCommand(&registry, args, handleError),
         .python => try commands.handlePythonCommand(allocator, args, handleError),
 
