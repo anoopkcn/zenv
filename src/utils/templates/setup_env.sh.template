@@ -208,11 +208,28 @@ PERFORM_SELECTIVE_CLEAR=false
 
 if [ "$UPGRADE_ENV" = "true" ]; then
     if [ "$VENV_STATE" = "VALID_EXISTING" ]; then
-        ohai "--upgrade: Attempting to upgrade existing valid venv $VENV_DIR with $PYTHON_DESCRIPTION..."
-        if "$SELECTED_PYTHON_EXE" -m venv --upgrade "$VENV_DIR"; then
-            success "Successfully upgraded venv."
+        # Check what Python the existing venv is using
+        if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
+            EXISTING_PYTHON_PATH=$(grep "home =" "$VENV_DIR/pyvenv.cfg" | cut -d' ' -f3)
+            SELECTED_PYTHON_PATH=$(dirname $(dirname $($SELECTED_PYTHON_EXE -c "import sys; print(sys.executable)")))
+            
+            if [ "$EXISTING_PYTHON_PATH" != "$SELECTED_PYTHON_PATH" ]; then
+                ohai "--upgrade: Detected different Python path ($SELECTED_PYTHON_PATH vs $EXISTING_PYTHON_PATH)"
+                ohai "--upgrade: Recreating virtual environment with new Python"
+                PERFORM_SELECTIVE_CLEAR=true
+                PERFORM_VENV_CREATION=true
+            else
+                ohai "--upgrade: Attempting to upgrade existing valid venv $VENV_DIR with $PYTHON_DESCRIPTION..."
+                if "$SELECTED_PYTHON_EXE" -m venv --upgrade "$VENV_DIR"; then
+                    success "Successfully upgraded venv."
+                else
+                    warn "Failed to upgrade venv. Will clear critical components and recreate."
+                    PERFORM_SELECTIVE_CLEAR=true
+                    PERFORM_VENV_CREATION=true
+                fi
+            fi
         else
-            warn "Failed to upgrade venv. Will clear critical components and recreate."
+            ohai "--upgrade: Cannot determine Python version of existing venv. Recreating..."
             PERFORM_SELECTIVE_CLEAR=true
             PERFORM_VENV_CREATION=true
         fi
