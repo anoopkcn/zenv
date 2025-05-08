@@ -200,23 +200,23 @@ pub fn handleSetupCommand(
     const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
-    
+
     // Set up logging to a file inside the environment directory
-    const base_dir_path = if (std.fs.path.isAbsolute(config.base_dir)) 
-        config.base_dir 
-    else 
+    const base_dir_path = if (std.fs.path.isAbsolute(config.base_dir))
+        config.base_dir
+    else
         try std.fs.path.join(allocator, &[_][]const u8{ try std.fs.cwd().realpathAlloc(allocator, "."), config.base_dir });
     defer if (!std.fs.path.isAbsolute(config.base_dir)) allocator.free(base_dir_path);
-    
+
     const env_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir_path, env_name });
     defer allocator.free(env_dir_path);
-    
+
     const log_path = try std.fs.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
     defer allocator.free(log_path);
-    
+
     try output.startLogging(log_path);
     defer output.stopLogging();
-    
+
     output.print("Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
     // 0. Check the availability of modules
@@ -827,15 +827,15 @@ pub fn handleRmCommand(
         return;
     }
 
-    output.print("Attempting to remove virtual environment directory: {s}", .{venv_path_to_remove}) catch {};
+    output.print("Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
     std.fs.deleteTreeAbsolute(venv_path_to_remove) catch |err| {
-        output.printError("Failed to remove directory '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
+        output.printError("Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
         output.printError("You may need to remove it manually.", .{}) catch {};
         return;
     };
 
     output.print("Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
-    output.print("Environment '{s}' fully removed.", .{env_name_to_remove}) catch {};
+    output.print("Environment '{s}' removed.", .{env_name_to_remove}) catch {};
 }
 
 pub fn handleLogCommand(

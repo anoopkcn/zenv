@@ -183,7 +183,17 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .rm, .python, .log, .unknown => {},
+        .setup,
+        .activate,
+        .list,
+        .register,
+        .deregister,
+        .cd,
+        .rm,
+        .python,
+        .log,
+        .unknown,
+        => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
