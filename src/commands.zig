@@ -70,7 +70,7 @@ pub fn handleInitCommand(
         }
 
         if (requirements_txt_found) {
-            break :blk "\"requirements.txt\""; // JSON string literal
+            break :blk "\"requirements.txt\"";
         }
 
         // Check for pyproject.toml
@@ -87,11 +87,11 @@ pub fn handleInitCommand(
         }
 
         if (pyproject_toml_found) {
-            break :blk "\"pyproject.toml\""; // JSON string literal
+            break :blk "\"pyproject.toml\"";
         }
 
         // Neither file exists
-        break :blk "null"; // JSON null literal
+        break :blk "null";
     };
 
     replacements.put("DEV_DEPENDENCY_FILE", dev_dep_file_value) catch |err| {
