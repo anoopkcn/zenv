@@ -17,6 +17,7 @@ pub const Command = enum {
     init,
     rm,
     python,
+    log,
     help,
     version,
     @"-v",
@@ -36,6 +37,7 @@ pub const Command = enum {
             .{ "init", .init },
             .{ "rm", .rm },
             .{ "python", .python },
+            .{ "log", .log },
             .{ "help", .help },
             .{ "version", .version },
             .{ "-v", .@"-v" },
@@ -101,6 +103,9 @@ fn printUsage() void {
         \\                            install <version>  :  Install a specified Python version.
         \\                            use <version>      :  pinn a python version.
         \\                            list               :  List all installed Python versions.
+        \\
+        \\  log <name|id>             Show the setup log for the specified environment.
+        \\                            You can use the environment name or its ID (full or partial).
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
@@ -178,7 +183,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         // Let other commands proceed to config parsing
-        .setup, .activate, .list, .register, .deregister, .cd, .rm, .python, .unknown => {},
+        .setup, .activate, .list, .register, .deregister, .cd, .rm, .python, .log, .unknown => {},
     }
 
     const config_path = "zenv.json"; // Keep config path definition for backward compatibility
@@ -301,6 +306,7 @@ pub fn main() anyerror!void {
         .rm => commands.handleRmCommand(&registry, args, handleError),
         .cd => commands.handleCdCommand(&registry, args, handleError),
         .python => try commands.handlePythonCommand(allocator, args, handleError),
+        .log => commands.handleLogCommand(allocator, &registry, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

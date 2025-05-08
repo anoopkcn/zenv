@@ -837,3 +837,61 @@ pub fn handleRmCommand(
     output.print("Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
     output.print("Environment '{s}' fully removed.", .{env_name_to_remove}) catch {};
 }
+
+pub fn handleLogCommand(
+    allocator: Allocator,
+    registry: *const EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        output.printError(
+            \\Missing environment name or ID argument.
+            \\Usage: zenv log <name|id>
+        , .{}) catch {};
+        handleErrorFn(error.EnvironmentNotFound);
+        return;
+    }
+
+    const identifier = args[2];
+
+    // Look up environment in registry
+    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+
+    // Construct the path to the log file
+    const log_file_path = std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
+        output.printError("Failed to construct log file path: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer allocator.free(log_file_path);
+
+    // Check if the log file exists
+    std.fs.cwd().access(log_file_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            output.printError("No setup log found for environment '{s}'", .{entry.env_name}) catch {};
+            output.printError("The log file should be at: {s}", .{log_file_path}) catch {};
+            handleErrorFn(error.FileNotFound);
+            return;
+        } else {
+            output.printError("Error accessing log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
+            handleErrorFn(err);
+            return;
+        }
+    };
+
+    // Read and print the log file
+    const log_content = std.fs.cwd().readFileAlloc(allocator, log_file_path, 10 * 1024 * 1024) catch |err| {
+        output.printError("Failed to read log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer allocator.free(log_content);
+
+    // Output the log content
+    std.io.getStdOut().writer().print("{s}", .{log_content}) catch |err| {
+        output.printError("Error writing log to stdout: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+}
