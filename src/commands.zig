@@ -841,6 +841,130 @@ pub fn handleRmCommand(
     output.print("Environment '{s}' removed.", .{env_name_to_remove}) catch {};
 }
 
+pub fn handleRunCommand(
+    allocator: Allocator,
+    registry: *const EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    // Need at least 4 args: zenv run <env> <command>
+    if (args.len < 4) {
+        output.printError("Missing environment name or command. Usage: zenv run <name|id> <command> [args...]", .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const identifier = args[2];
+    const command = args[3];
+    const command_args = args[4..];
+
+    // Look up registry entry
+    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const venv_path = entry.venv_path;
+    
+    // Get the activation script path
+    const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "bin", "activate" }) catch |err| {
+        output.printError("Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer allocator.free(activate_path);
+
+    // Create temporary script
+    const temp_script_path = createTempRunScript(allocator, activate_path, command, command_args) catch |err| {
+        output.printError("Failed to create temporary run script: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer {
+        std.fs.cwd().deleteFile(temp_script_path) catch |err| {
+            output.print("Warning: Failed to delete temporary script: {s}", .{@errorName(err)}) catch {};
+        };
+        allocator.free(temp_script_path);
+    }
+
+    // Execute the script
+    output.print("Running command '{s}' in environment '{s}'", .{ command, entry.env_name }) catch {};
+    var script_argv = [_][]const u8{ "/bin/bash", temp_script_path };
+    var child = std.process.Child.init(&script_argv, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch |err| {
+        output.printError("Failed to spawn command: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    
+    const term = child.wait() catch |err| {
+        output.printError("Failed to wait for command: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+
+    // Check if the command was successful
+    const success = blk: {
+        if (term != .Exited) break :blk false;
+        if (term.Exited != 0) break :blk false;
+        break :blk true;
+    };
+
+    if (!success) {
+        if (term == .Exited) {
+            output.printError("Command exited with status: {d}", .{term.Exited}) catch {};
+        } else {
+            output.printError("Command terminated abnormally", .{}) catch {};
+        }
+        handleErrorFn(error.ProcessError);
+        return;
+    }
+}
+
+// Helper function to create a temporary script that activates an environment and runs a command
+fn createTempRunScript(
+    allocator: Allocator,
+    activate_path: []const u8,
+    command: []const u8,
+    args: []const []const u8,
+) ![]const u8 {
+    // Create temporary file with unique name
+    var temp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const temp_path = try std.fmt.bufPrint(&temp_path_buf, "/tmp/zenv_run_{d}.sh", .{std.time.milliTimestamp()});
+    const temp_path_owned = try allocator.dupe(u8, temp_path);
+    errdefer allocator.free(temp_path_owned);
+
+    var file = try std.fs.cwd().createFile(temp_path_owned, .{});
+    defer file.close();
+
+    // Make it executable
+    try file.chmod(0o755);
+    
+    // Write script content
+    try file.writeAll("#!/bin/bash\nset -e\n\n");
+    try file.writer().print("source \"{s}\"\n\n", .{activate_path});
+    
+    // Add command with arguments, properly escaped
+    try file.writer().print("{s}", .{command});
+    for (args) |arg| {
+        // Escape quotes in arguments
+        var escaped_arg = std.ArrayList(u8).init(allocator);
+        defer escaped_arg.deinit();
+        
+        for (arg) |char| {
+            if (char == '"' or char == '\\' or char == '$') {
+                try escaped_arg.append('\\');
+            }
+            try escaped_arg.append(char);
+        }
+        
+        try file.writer().print(" \"{s}\"", .{escaped_arg.items});
+    }
+    try file.writeAll("\n");
+
+    return temp_path_owned;
+}
+
 pub fn handleLogCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,

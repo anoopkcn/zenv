@@ -19,6 +19,7 @@ pub const Command = enum {
     rm,
     python,
     log,
+   run,
     help,
     version,
     @"-v",
@@ -29,23 +30,24 @@ pub const Command = enum {
 
     fn fromString(s: []const u8) Command {
         const command_map = .{
-            .{ "setup", .setup },
-            .{ "activate", .activate },
-            .{ "list", .list },
-            .{ "register", .register },
-            .{ "deregister", .deregister },
-            .{ "cd", .cd },
-            .{ "init", .init },
-            .{ "rm", .rm },
-            .{ "python", .python },
-            .{ "log", .log },
-            .{ "help", .help },
-            .{ "version", .version },
-            .{ "-v", .@"-v" },
-            .{ "-V", .@"-V" },
-            .{ "--version", .@"--version" },
-            .{ "--help", .@"--help" },
-        };
+                .{ "setup", .setup },
+                .{ "activate", .activate },
+                .{ "list", .list },
+                .{ "register", .register },
+                .{ "deregister", .deregister },
+                .{ "cd", .cd },
+                .{ "init", .init },
+                .{ "rm", .rm },
+                .{ "python", .python },
+                .{ "log", .log },
+                .{ "run", .run },
+                .{ "help", .help },
+                .{ "version", .version },
+                .{ "-v", .@"-v" },
+                .{ "-V", .@"-V" },
+                .{ "--version", .@"--version" },
+                .{ "--help", .@"--help" },
+            };
 
         // Linear search through the command_map
         inline for (command_map) |entry| {
@@ -107,6 +109,10 @@ fn printUsage() void {
         \\
         \\  log <name|id>             Show the setup log for the specified environment.
         \\                            You can use the environment name or its ID (full or partial).
+        \\
+        \\  run <name|id> <command>   Run a command within the specified environment.
+        \\                            You can use the environment name or its ID (full or partial).
+        \\                            The command runs in the activated environment and then exits.
         \\
         \\  version, -v, --version    Print the zenv version.
         \\
@@ -196,6 +202,7 @@ pub fn main() anyerror!void {
         .rm,
         .python,
         .log,
+        .run,
         .unknown,
         => {},
     }
@@ -367,6 +374,7 @@ pub fn main() anyerror!void {
         .cd => commands.handleCdCommand(&registry, args, handleError),
         .python => try commands.handlePythonCommand(allocator, args, handleError),
         .log => commands.handleLogCommand(allocator, &registry, args, handleError),
+        .run => commands.handleRunCommand(allocator, &registry, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
