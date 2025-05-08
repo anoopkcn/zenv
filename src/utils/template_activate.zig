@@ -102,7 +102,7 @@ fn createActivationScript(
             try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
         }
     } else {
-        try module_writer.print("echo '==> No modules specified to load'\n", .{});
+        try module_writer.print("echo 'Info: No modules specified to load'\n", .{});
     }
 
     const module_loading_slice = try module_loading_block.toOwnedSlice();

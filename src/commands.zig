@@ -858,12 +858,10 @@ pub fn handleRunCommand(
     const command = args[3];
     const command_args = args[4..];
 
-    // Look up registry entry
     const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
 
-    // Get the activation script path
-    const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "bin", "activate" }) catch |err| {
+    const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
         output.printError("Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
@@ -884,7 +882,6 @@ pub fn handleRunCommand(
     }
 
     // Execute the script
-    // output.print("Running command '{s}' in environment '{s}'", .{ command, entry.env_name }) catch {};
     var script_argv = [_][]const u8{ "/bin/bash", temp_script_path };
     var child = std.process.Child.init(&script_argv, allocator);
     child.stdin_behavior = .Inherit;
