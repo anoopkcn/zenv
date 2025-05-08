@@ -66,100 +66,99 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
-        \\Manages environments based on zenv.json configuration.
+        \\Manages Python virtual environments based on zenv.json configuration.
         \\
         \\Commands:
-        \\  init [name] [desc]        Create a new zenv.json template file in the current directory.
-        \\                            with an optional name and optional description.
-        \\                            If name is not provided, it will generate one named 'test'
+        \\  init [name] [desc]       Initializes a new 'zenv.json' in the current directory.
+        \\                           Creates a 'test' environment if 'name' is not provided.
+        \\                           Use to start defining your environments.
         \\
-        \\  setup <name>              Set up the specified environment based on zenv.json file.
-        \\                            Creates a virtual environment in <base_dir>/<name>/.
-        \\                            <base_dir> and <name> can be defined in the zenv.json file.
+        \\  setup <name>             Creates and configures the virtual environment for '<name>'.
+        \\                           Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
+        \\                           This is the primary command to build an environment.
         \\
-        \\  activate <name|id>        Output the path to the activation script.
-        \\                            You can use the environment name or its ID (full or partial).
-        \\                            use: source $(zenv activate <name|id>) to activate
+        \\  activate <name|id>       Outputs the activation script path for an environment.
+        \\                           To use: source $(zenv activate <name|id>)
         \\
-        \\  cd <name|id>              Output the project directory path.
-        \\                            You can use the environment name or its ID (full or partial).
-        \\                            To change to the project directory, use:
-        \\                            cd $(zenv cd <name|id>)
+        \\  run <name|id> <command>  Executes a <command> within the specified isolated environment.
+        \\                           Does NOT require manual activation of the environment.
         \\
-        \\  list                      List environments registered for the current machine.
+        \\  cd <name|id>             Outputs the project directory path for an environment.
+        \\                           To use: cd $(zenv cd <name|id>)
         \\
-        \\  list --all                List all registered environments.
+        \\  list                     Lists registered environments accessible on this machine.
         \\
-        \\  register <name>           Register an environment in the global registry.
-        \\                            Registers the current directory as the project directory.
+        \\  list --all               Lists all registered environments.
         \\
-        \\  deregister <name|id>      Remove an environment from the global registry.
-        \\                            It does not remove the environment itself.
+        \\  register <name>          Adds the environment '<name>' (from current 'zenv.json')
+        \\                           to the global registry, making it accessible from any location.
         \\
-        \\  rm <name|id>              Deregister the environment AND remove its virtual
-        \\                            environment directory from the filesystem.
+        \\  deregister <name|id>     Removes an environment from the global registry.
+        \\                           The virtual environment files are NOT deleted.
         \\
-        \\  python <subcommand>       Python management commands:
-        \\                            install <version>  :  Install a specified Python version.
-        \\                            use <version>      :  pinn a python version.
-        \\                            list               :  List all installed Python versions.
+        \\  rm <name|id>             De-registers the environment AND permanently deletes its
+        \\                           virtual environment directory from the filesystem.
         \\
-        \\  log <name|id>             Show the setup log for the specified environment.
-        \\                            You can use the environment name or its ID (full or partial).
+        \\  python <subcommand>      Manages Python installations used by zenv:
+        \\    install <version>      Downloads and installs a specific Python version for zenv.
+        \\    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
+        \\    list                   Shows Python versions installed and managed by zenv.
         \\
-        \\  run <name|id> <command>   Run a command within the specified environment.
-        \\                            You can use the environment name or its ID (full or partial).
-        \\                            The command runs in the activated environment and then exits.
+        \\  log <name|id>            Displays the setup log file for the specified environment.
+        \\                           Useful for troubleshooting setup issues.
         \\
-        \\  version, -v, --version    Print the zenv version.
+        \\  version, -v, --version   Prints the installed zenv version.
         \\
-        \\  help, --help              Show this help message.
+        \\  help, --help             Shows this help message.
         \\
-        \\Options for setup:
-        \\  --no-host                 Bypass hostname validation, this is equivalant to
-        \\                            setting "target_machines": ["*"] in the zenv.json
+        \\Options for 'zenv setup <name>':
+        \\  --no-host                Bypasses hostname validation during setup.
+        \\                           (Equivalent to "target_machines": ["*"] in zenv.json).
+        \\                           Use if an environment should be set up regardless of the machine.
         \\
-        \\  --init                    Initialize environment configuration before running setup.
-        \\                            Equivalent to running 'zenv init <name>' before 'zenv setup' command.
+        \\  --init                   Automatically runs 'zenv init <name>' before 'zenv setup'.
+        \\                           Convenient for creating and setting up in one step.
         \\
-        \\  --uv                      Use 'uv' instead of 'pip' for package operations.
-        \\                            Ensure 'uv' is available when using this flag.
+        \\  --uv                     Uses 'uv' instead of 'pip' for package operations.
+        \\                           Ensure 'uv' is installed and accessible.
         \\
-        \\  --upgrade                 Attempt to upgrade the Python interpreter in an existing virtual
-        \\                            environment. If the environment doesn't exist or is corrupted,
-        \\                            it will be created fresh.
+        \\  --upgrade                Attempts to upgrade Python in an existing virtual environment.
+        \\                           Recreates the environment if it's corrupted or doesn't exist.
         \\
-        \\  --python                  Use only the pinned Python set with 'use' subcommand.
-        \\                            This ignores the default python priority list.
+        \\  --python                 Forces setup to use only the zenv-pinned Python version.
+        \\                           Ignores the default Python priority list (see below).
         \\
-        \\  --dev                     Install the current directory as an editable package.
-        \\                            Equivalent to running 'pip install --editable .'
-        \\                            Requires a valid 'setup.py' or 'pyproject.toml' in the directory.
+        \\  --dev                    Installs the current directory's project in editable mode.
+        \\                           (Equivalent to 'pip install --editable .').
+        \\                           Requires a 'setup.py' or 'pyproject.toml'.
         \\
-        \\  --force                   It tries to install all dependencies even if they are already
-        \\                            provided by loaded modules.
+        \\  --force                  Forces reinstallation of all dependencies.
+        \\                           Useful if dependencies from loaded modules cause conflicts.
         \\
         \\Configuration (zenv.json):
-        \\  The 'zenv.json' file defines your environments. Environment names occupy top level
-        \\  "base_dir": "path/to/venvs", is exceptional top level key-value which specifies the
-        \\  base directory for for storing environments. The value can be a relative path,
-        \\  relative to zenv.json OR an absolute path(if path starts with a /).
+        \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
+        \\  Each top-level key is an environment name.
+        \\  "base_dir": "path/to/venvs" is a special top-level key specifying the storage
+        \\  location for virtual environments. Paths can be absolute (e.g., /path/to/venvs)
+        \\  or relative to the 'zenv.json' file's location.
         \\
         \\Registry (ZENV_DIR/registry.json):
-        \\  The global registry allows you to manage environments from any directory.
-        \\  Setting up an environment will register it OR run 'zenv register <name>' toregister.
+        \\  A global JSON file (path in ZENV_DIR environment variable, typically ~/.zenv)
+        \\  that tracks registered environments. This allows 'zenv' commands to manage
+        \\  these environments from any directory. Environments are added via 'zenv setup'
+        \\  or 'zenv register'.
         \\
-        \\Python Priority list
-        \\  1. HPC modules are loaded then Module-provided Python
-        \\  2. Explicitly configured 'fallback_python' from zenv.json
-        \\  3. zenv-managed pinned Python
-        \\  4. System python3
-        \\  5. System python
-        \\  This prority list can be ignored with 'zenv setup <name> --python' which will use,
-        \\  pinned python to manage the environement
+        \\Python Priority List (for 'zenv setup' without '--python' flag):
+        \\  zenv attempts to find a Python interpreter in the following order:
+        \\  1. HPC module-provided Python (if HPC environment modules are loaded).
+        \\  2. 'fallback_python' path explicitly configured in 'zenv.json'.
+        \\  3. zenv-pinned Python (set via 'zenv python use <version>').
+        \\  4. System 'python3'.
+        \\  5. System 'python'.
+        \\  Use 'zenv setup <name> --python' to use only the pinned version (item 3).
         \\
     ;
     std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
