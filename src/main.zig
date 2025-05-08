@@ -135,9 +135,7 @@ fn printUsage() void {
         \\
         \\Registry (ZENV_DIR/registry.json):
         \\  The global registry allows you to manage environments from any directory.
-        \\  Setting up an environment will register that environment OR
-        \\  register it with 'zenv register <name>'. Once registred one can activate
-        \\  using 'source $(zenv activate <name|id>)' from any directory.
+        \\  Setting up an environment will register it OR run 'zenv register <name>' toregister.
         \\
         \\Python Priority list
         \\  1. Module-provided Python (if HPC modules are loaded)

@@ -217,7 +217,9 @@ Usage: zenv <command> [environment_name|id] [options]
 Manages environments based on zenv.json configuration.
 
 Commands:
-  init [name] [description] Create a new zenv.json template file in the current directory.
+  init [name] [desc]        Create a new zenv.json template file in the current directory.
+                            with an optional name and optional description.
+                            If name is not provided, it will generate one named 'test'
 
   setup <name>              Set up the specified environment based on zenv.json file.
                             Creates a virtual environment in <base_dir>/<name>/.
@@ -283,9 +285,7 @@ Configuration (zenv.json):
 
 Registry (ZENV_DIR/registry.json):
   The global registry allows you to manage environments from any directory.
-  Setting up an environment will register that environment OR
-  register it with 'zenv register <name>'. Once registred one can activate
-  using 'source $(zenv activate <name|id>)' from any directory.
+  Setting up an environment will register it OR run 'zenv register <name>' toregister.
 
 Python Priority list
   1. Module-provided Python (if HPC modules are loaded)
