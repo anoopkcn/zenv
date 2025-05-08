@@ -298,8 +298,8 @@ Registry (ZENV_DIR/registry.json):
   Setting up an environment will register it OR run 'zenv register <name>' toregister.
 
 Python Priority list
-  1. Module-provided Python (if HPC modules are loaded)
-  2. Explicitly configured 'fallback_python' from zenv.json (if not null)
+  1. HPC modules are loaded then Module-provided Python
+  2. Explicitly configured 'fallback_python' from zenv.json
   3. zenv-managed pinned Python
   4. System python3
   5. System python
