@@ -252,6 +252,13 @@ Commands:
                             use <version>      :  pinn a python version.
                             list               :  List all installed Python versions.
 
+  log <name|id>             Show the setup log for the specified environment.
+                            You can use the environment name or its ID (full or partial).
+
+  run <name|id> <command>   Run a command within the specified environment.
+                            You can use the environment name or its ID (full or partial).
+                            The command runs in the activated environment and then exits.
+
   version, -v, --version    Print the zenv version.
 
   help, --help              Show this help message.
@@ -259,6 +266,9 @@ Commands:
 Options for setup:
   --no-host                 Bypass hostname validation, this is equivalant to
                             setting "target_machines": ["*"] in the zenv.json
+
+  --init                    Initialize environment configuration before running setup.
+                            Equivalent to running 'zenv init <name>' before 'zenv setup' command.
 
   --uv                      Use 'uv' instead of 'pip' for package operations.
                             Ensure 'uv' is available when using this flag.
