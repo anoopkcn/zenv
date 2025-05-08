@@ -282,7 +282,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     const install_start = time.milliTimestamp();
 
     // Run configure (typically 15% of total installation time)
-    try showInstallProgress("Configuring Python", 5);
+    try showInstallProgress("Configuring Python...", 5);
 
     var config_args = [_][]const u8{
         "./configure",
@@ -323,7 +323,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     }
 
     // Run make (typically 70% of installation time)
-    try showInstallProgress("Building Python", 20);
+    try showInstallProgress("Building Python...", 20);
 
     var make_args = [_][]const u8{ "make", "-j", cpu_count };
 
@@ -341,7 +341,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     try showInstallProgress("Build complete", 85);
 
     // Run make install (typically 15% of installation time)
-    try showInstallProgress("Installing Python", 85);
+    try showInstallProgress("Installing Python...", 85);
 
     var install_args = [_][]const u8{ "make", "install" };
 

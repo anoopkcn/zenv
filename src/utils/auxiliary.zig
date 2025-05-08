@@ -29,7 +29,7 @@ pub fn executeShellScript(
     script_abs_path: []const u8,
 ) !void {
     output.print("Running script: {s}", .{script_abs_path}) catch {};
-    var argv = [_][]const u8{ "/bin/sh", script_abs_path };
+    var argv = [_][]const u8{ "/bin/bash", script_abs_path };
     var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;

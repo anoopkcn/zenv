@@ -200,6 +200,23 @@ pub fn handleSetupCommand(
     const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
+    
+    // Set up logging to a file inside the environment directory
+    const base_dir_path = if (std.fs.path.isAbsolute(config.base_dir)) 
+        config.base_dir 
+    else 
+        try std.fs.path.join(allocator, &[_][]const u8{ try std.fs.cwd().realpathAlloc(allocator, "."), config.base_dir });
+    defer if (!std.fs.path.isAbsolute(config.base_dir)) allocator.free(base_dir_path);
+    
+    const env_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir_path, env_name });
+    defer allocator.free(env_dir_path);
+    
+    const log_path = try std.fs.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
+    defer allocator.free(log_path);
+    
+    try output.startLogging(log_path);
+    defer output.stopLogging();
+    
     output.print("Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
     // 0. Check the availability of modules
