@@ -133,6 +133,26 @@ source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 source $(zenv activate c3c4945)
 ```
 
+### Direct run without activation
+
+One could run commands and tools without explicit activation of Environments using `zenv run` command
+
+```bash
+zenv run <name|id> <command>
+```
+
+For example to run a script using python from the environment:
+
+```bash
+zenv run test python my_test_file.py
+```
+
+Or to run a server:
+
+```bash
+zenv run test mkdocs serve
+```
+
 ### Registering and Deregistering Environments
 
 A metadata information about the environments are stored at `ZENV_DIR/registry.json`. by default `ZENV_DIR` is `$HOME/.zenv`.
