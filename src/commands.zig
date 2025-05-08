@@ -52,6 +52,38 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
+    // Determine the dependency file for the "dev" environment
+    const dev_dep_file_value: []const u8 = blk: {
+        const req_txt_exists = cwd.access("requirements.txt", .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                output.printError("Accessing requirements.txt: {s}", .{@errorName(err)}) catch {};
+                std.process.exit(1);
+            }
+            break :blk false;
+        };
+        if (req_txt_exists) {
+            break :blk "\"requirements.txt\"";
+        }
+
+        const pyproject_exists = cwd.access("pyproject.toml", .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                output.printError("Accessing pyproject.toml: {s}", .{@errorName(err)}) catch {};
+                std.process.exit(1);
+            }
+            break :blk false;
+        };
+        if (pyproject_exists) {
+            break :blk "\"pyproject.toml\"";
+        }
+
+        break :blk "null";
+    };
+
+    replacements.put("DEV_DEPENDENCY_FILE", dev_dep_file_value) catch |err| {
+        output.printError("Adding DEV_DEPENDENCY_FILE replacement: {s}", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+
     // Process the template using our JSON template utility
     const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
         output.printError("Processing template: {s}", .{@errorName(err)}) catch {};

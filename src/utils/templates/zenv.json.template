@@ -25,7 +25,7 @@
         "Python"
     ],
     "dependencies": ["tqdm"],
-    "dependency_file": "requirements.txt",
+    "dependency_file": @@DEV_DEPENDENCY_FILE@@,
     "setup_commands": [
       "echo 'Development environment setup complete!'"
     ],
