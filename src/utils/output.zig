@@ -12,17 +12,17 @@ pub fn startLogging(path: []const u8) !void {
     if (log_enabled) {
         stopLogging();
     }
-    
+
     const dir_path = std.fs.path.dirname(path) orelse ".";
     std.fs.cwd().makePath(dir_path) catch |err| {
         if (err != error.PathAlreadyExists) {
             return err;
         }
     };
-    
+
     log_file = try fs.cwd().createFile(path, .{ .truncate = false, .read = true });
     log_enabled = true;
-    
+
     try print("Logging started: output will be saved to {s}", .{path});
 }
 
@@ -53,7 +53,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) !void {
     const stdout = std.io.getStdOut().writer();
     const message = try std.fmt.allocPrint(std.heap.page_allocator, "Info: " ++ fmt ++ "\n", args);
     defer std.heap.page_allocator.free(message);
-    
+
     try stdout.writeAll(message);
     try logMessage(message);
 }
@@ -63,7 +63,7 @@ pub fn printError(comptime fmt: []const u8, args: anytype) !void {
     const stderr = std.io.getStdErr().writer();
     const message = try std.fmt.allocPrint(std.heap.page_allocator, "Error: " ++ fmt ++ "\n", args);
     defer std.heap.page_allocator.free(message);
-    
+
     try stderr.writeAll(message);
     try logMessage(message);
 }
@@ -73,7 +73,7 @@ pub fn printNoNewline(comptime fmt: []const u8, args: anytype) !void {
     const stdout = std.io.getStdOut().writer();
     const message = try std.fmt.allocPrint(std.heap.page_allocator, fmt, args);
     defer std.heap.page_allocator.free(message);
-    
+
     try stdout.writeAll(message);
     try logMessage(message);
 }

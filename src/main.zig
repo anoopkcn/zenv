@@ -6,6 +6,7 @@ const options = @import("options");
 const commands = @import("commands.zig");
 const configurations = @import("utils/config.zig");
 const output = @import("utils/output.zig");
+const flags_module = @import("utils/flags.zig");
 
 pub const Command = enum {
     setup,
@@ -114,6 +115,9 @@ fn printUsage() void {
         \\Options for setup:
         \\  --no-host                 Bypass hostname validation, this is equivalant to
         \\                            setting "target_machines": ["*"] in the zenv.json
+        \\
+        \\  --init                    Initialize environment configuration before running setup.
+        \\                            Equivalent to running 'zenv init <name>' before 'zenv setup' command.
         \\
         \\  --uv                      Use 'uv' instead of 'pip' for package operations.
         \\                            Ensure 'uv' is available when using this flag.
@@ -296,8 +300,54 @@ pub fn main() anyerror!void {
     var config: ?configurations.ZenvConfig = null;
     defer if (config != null) config.?.deinit();
 
-    // Only try to load the config file for setup and register commands
-    if (command == .setup or command == .register) {
+    // For setup command, check if we need to init first
+    if (command == .setup) {
+        // Check for --init flag
+        const flags = flags_module.CommandFlags.fromArgs(args);
+        const init_flag = flags.init_mode;
+
+        if (init_flag) {
+            // Check if config file already exists
+            const config_exists = blk: {
+                std.fs.cwd().access(config_path, .{}) catch |err| {
+                    if (err != error.FileNotFound) {
+                        output.printError("Accessing current directory: {s}", .{@errorName(err)}) catch {};
+                        handleError(err);
+                        break :blk false;
+                    }
+                    // File doesn't exist
+                    break :blk false;
+                };
+                break :blk true;
+            };
+
+            if (!config_exists) {
+                // Create init args
+                var init_args = std.ArrayList([]const u8).init(allocator);
+                defer init_args.deinit();
+
+                try init_args.append("zenv"); // Args[0] is the program name
+                try init_args.append("init");
+                try init_args.append(args[2]); // Environment name
+
+                // Add description if provided
+                if (args.len > 3) {
+                    try init_args.append(args[3]);
+                }
+
+                // Run init to create config
+                output.print("--init flag detected. Creating config file first...", .{}) catch {};
+                commands.handleInitCommand(allocator, init_args.items);
+                output.print("Proceeding with setup...", .{}) catch {};
+            }
+        }
+
+        // Now load the config
+        config = configurations.parse(allocator, config_path) catch |err| {
+            handleError(err);
+            return; // Exit after handling error
+        };
+    } else if (command == .register) {
         config = configurations.parse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error

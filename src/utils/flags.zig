@@ -7,6 +7,7 @@ pub const CommandFlags = struct {
     use_default_python: bool = false, // Whether to force using the default Python from ZENV_DIR/default-python
     dev_mode: bool = false, // Whether to install the current directory as an editable package
     use_uv: bool = false, // Whether to use 'uv' instead of 'pip'
+    init_mode: bool = false, // Whether to initialize the environment before setup
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
@@ -25,6 +26,8 @@ pub const CommandFlags = struct {
                 flags.dev_mode = true;
             } else if (std.mem.eql(u8, arg, "--uv")) {
                 flags.use_uv = true;
+            } else if (std.mem.eql(u8, arg, "--init")) {
+                flags.init_mode = true;
             }
         }
 

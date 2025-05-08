@@ -159,7 +159,7 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    if (args.len > 3 or args.len > 2 ) {
+    if (args.len > 3 or args.len > 2) {
         output.print("Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
     } else {
         output.print("Created zenv.json. Run 'zenv setup test", .{}) catch {};
@@ -193,6 +193,9 @@ pub fn handleSetupCommand(
     }
     if (flags.upgrade_env) {
         output.print("Upgrade flag detected. Will attempt to upgrade existing virtual environment or create new.", .{}) catch {};
+    }
+    if (flags.init_mode) {
+        output.print("Init flag detected. Using configuration created by --init.", .{}) catch {};
     }
 
     // Get and validate the environment config
