@@ -54,29 +54,43 @@ pub fn handleInitCommand(
 
     // Determine the dependency file for the "dev" environment
     const dev_dep_file_value: []const u8 = blk: {
-        const req_txt_exists = cwd.access("requirements.txt", .{}) catch |err| {
-            if (err != error.FileNotFound) {
+        var requirements_txt_found: bool = false;
+        // Check for requirements.txt
+        if (cwd.access("requirements.txt", .{})) |_| {
+            requirements_txt_found = true;
+        } else |err| {
+            if (err == error.FileNotFound) {
+                requirements_txt_found = false;
+            } else {
+                // For errors other than FileNotFound, print and exit
                 output.printError("Accessing requirements.txt: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
-            break :blk false;
-        };
-        if (req_txt_exists) {
-            break :blk "\"requirements.txt\"";
         }
 
-        const pyproject_exists = cwd.access("pyproject.toml", .{}) catch |err| {
-            if (err != error.FileNotFound) {
+        if (requirements_txt_found) {
+            break :blk "\"requirements.txt\""; // JSON string literal
+        }
+
+        // Check for pyproject.toml
+        var pyproject_toml_found: bool = false;
+        if (cwd.access("pyproject.toml", .{})) |_| {
+            pyproject_toml_found = true;
+        } else |err| {
+            if (err == error.FileNotFound) {
+                pyproject_toml_found = false;
+            } else {
                 output.printError("Accessing pyproject.toml: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
-            break :blk false;
-        };
-        if (pyproject_exists) {
-            break :blk "\"pyproject.toml\"";
         }
 
-        break :blk "null";
+        if (pyproject_toml_found) {
+            break :blk "\"pyproject.toml\""; // JSON string literal
+        }
+
+        // Neither file exists
+        break :blk "null"; // JSON null literal
     };
 
     replacements.put("DEV_DEPENDENCY_FILE", dev_dep_file_value) catch |err| {
