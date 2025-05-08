@@ -19,7 +19,7 @@ pub const Command = enum {
     rm,
     python,
     log,
-   run,
+    run,
     help,
     version,
     @"-v",
@@ -30,24 +30,24 @@ pub const Command = enum {
 
     fn fromString(s: []const u8) Command {
         const command_map = .{
-                .{ "setup", .setup },
-                .{ "activate", .activate },
-                .{ "list", .list },
-                .{ "register", .register },
-                .{ "deregister", .deregister },
-                .{ "cd", .cd },
-                .{ "init", .init },
-                .{ "rm", .rm },
-                .{ "python", .python },
-                .{ "log", .log },
-                .{ "run", .run },
-                .{ "help", .help },
-                .{ "version", .version },
-                .{ "-v", .@"-v" },
-                .{ "-V", .@"-V" },
-                .{ "--version", .@"--version" },
-                .{ "--help", .@"--help" },
-            };
+            .{ "setup", .setup },
+            .{ "activate", .activate },
+            .{ "list", .list },
+            .{ "register", .register },
+            .{ "deregister", .deregister },
+            .{ "cd", .cd },
+            .{ "init", .init },
+            .{ "rm", .rm },
+            .{ "python", .python },
+            .{ "log", .log },
+            .{ "run", .run },
+            .{ "help", .help },
+            .{ "version", .version },
+            .{ "-v", .@"-v" },
+            .{ "-V", .@"-V" },
+            .{ "--version", .@"--version" },
+            .{ "--help", .@"--help" },
+        };
 
         // Linear search through the command_map
         inline for (command_map) |entry| {
@@ -66,7 +66,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages environments based on zenv.json configuration.

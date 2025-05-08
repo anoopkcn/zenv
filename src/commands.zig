@@ -861,7 +861,7 @@ pub fn handleRunCommand(
     // Look up registry entry
     const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
-    
+
     // Get the activation script path
     const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "bin", "activate" }) catch |err| {
         output.printError("Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
@@ -884,7 +884,7 @@ pub fn handleRunCommand(
     }
 
     // Execute the script
-    output.print("Running command '{s}' in environment '{s}'", .{ command, entry.env_name }) catch {};
+    // output.print("Running command '{s}' in environment '{s}'", .{ command, entry.env_name }) catch {};
     var script_argv = [_][]const u8{ "/bin/bash", temp_script_path };
     var child = std.process.Child.init(&script_argv, allocator);
     child.stdin_behavior = .Inherit;
@@ -896,7 +896,7 @@ pub fn handleRunCommand(
         handleErrorFn(err);
         return;
     };
-    
+
     const term = child.wait() catch |err| {
         output.printError("Failed to wait for command: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
@@ -939,25 +939,25 @@ fn createTempRunScript(
 
     // Make it executable
     try file.chmod(0o755);
-    
+
     // Write script content
     try file.writeAll("#!/bin/bash\nset -e\n\n");
     try file.writer().print("source \"{s}\"\n\n", .{activate_path});
-    
+
     // Add command with arguments, properly escaped
     try file.writer().print("{s}", .{command});
     for (args) |arg| {
         // Escape quotes in arguments
         var escaped_arg = std.ArrayList(u8).init(allocator);
         defer escaped_arg.deinit();
-        
+
         for (arg) |char| {
             if (char == '"' or char == '\\' or char == '$') {
                 try escaped_arg.append('\\');
             }
             try escaped_arg.append(char);
         }
-        
+
         try file.writer().print(" \"{s}\"", .{escaped_arg.items});
     }
     try file.writeAll("\n");
