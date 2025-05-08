@@ -708,7 +708,7 @@ pub fn handleRmCommand(
     };
     defer registry.allocator.free(venv_path_to_remove);
 
-    if (registry.deregister(identifier)) { // Use original identifier for deregister
+    if (registry.deregister(identifier)) {
         output.print("Environment '{s}' deregistered successfully.", .{env_name_to_remove}) catch {};
         registry.save() catch |err| {
             output.printError("Failed to save registry after deregistering '{s}': {s}", .{ env_name_to_remove, @errorName(err) }) catch {};
@@ -716,7 +716,7 @@ pub fn handleRmCommand(
     } else {
         output.printError("Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
-        return; // Do not proceed to delete if deregistration failed.
+        return;
     }
 
     output.print("Attempting to remove virtual environment directory: {s}", .{venv_path_to_remove}) catch {};
@@ -726,6 +726,6 @@ pub fn handleRmCommand(
         return;
     };
 
-    output.print("Virtual environment directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
+    output.print("Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
     output.print("Environment '{s}' fully removed.", .{env_name_to_remove}) catch {};
 }
