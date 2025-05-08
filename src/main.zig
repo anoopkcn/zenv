@@ -66,7 +66,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages Python virtual environments based on zenv.json configuration.
@@ -273,21 +273,81 @@ pub fn main() anyerror!void {
                             \\Failed to access the environment registry. Check permissions for ZENV_DIR
                         , .{}) catch {};
                     },
+                    error.ArgsError => {
+                        output.printError(
+                            \\Invalid command-line arguments provided. Check usage with 'zenv help'
+                        , .{}) catch {};
+                    },
+                    error.EnvironmentNotRegistered => {
+                        output.printError(
+                            \\The specified environment is not registered. Use 'zenv list --all' and 'zenv register <name>'
+                        , .{}) catch {};
+                    },
+                    error.MissingPythonExecutable => {
+                        output.printError(
+                            \\A required Python executable was not found or is not configured
+                        , .{}) catch {};
+                        output.printError(
+                            \\Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json
+                        , .{}) catch {};
+                    },
+                    error.InvalidRegistryFormat => {
+                        output.printError(
+                            \\The environment registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
+                        , .{}) catch {};
+                    },
+                    error.ConfigFileReadError => {
+                        output.printError(
+                            \\Error reading the configuration file '{s}'. Check permissions and file integrity
+                        , .{config_path}) catch {};
+                    },
+                    error.HostnameParseError => {
+                        output.printError(
+                            \\Failed to parse the system hostname
+                        , .{}) catch {};
+                    },
+                    error.IoError => {
+                        output.printError(
+                            \\An I/O error occurred. Check file system permissions and disk space
+                        , .{}) catch {};
+                    },
+                    error.OutOfMemory => {
+                        output.printError(
+                            \\The application ran out of memory. Try freeing up system resources
+                        , .{}) catch {};
+                    },
+                    error.PathTraversalAttempt => {
+                        output.printError(
+                            \\A path traversal attempt was detected and blocked for security reasons
+                        , .{}) catch {};
+                    },
+                    error.EnvironmentVariableNotFound => {
+                        output.printError(
+                            \\A required environment variable was not found. Please ensure it is set
+                        , .{}) catch {};
+                    },
+                    error.InvalidWtf8 => {
+                        output.printError(
+                            \\An environment variable contained invalid UTF-8 (WTF-8) characters
+                        , .{}) catch {};
+                    },
                     error.ProcessError => {
-                        // For process errors, don't show additional output
+                        // For process errors, don't show additional output (already handled by the process itself)
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     error.ModuleLoadError => {
-                        // Module load errors are handled specially with no stack trace
+                        // Module load errors are handled specially with no stack trace (already handled by module loader)
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     else => {
-                        output.printError("Unexpected error", .{}) catch {};
+                        output.printError("An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
                         std.debug.dumpStackTrace(trace.*);
                     },
                 }
             } else {
-                output.printError("{s} (no trace available)", .{@errorName(err)}) catch {};
+                // This case should ideally not be reached if all errors are ZenvError or std.os.windows.ANOERROR
+                // However, if it is, it means an error occurred without a return trace.
+                output.printError("Error: {s} (no trace available)", .{@errorName(err)}) catch {};
             }
             process.exit(1);
         }

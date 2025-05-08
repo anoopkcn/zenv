@@ -158,8 +158,9 @@ pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
         if (err == error.FileNotFound) {
             return null;
         }
-        output.printError("Failed to read default-python file: {s}", .{@errorName(err)}) catch {};
-        return null;
+        // For other errors, propagate them so they can be handled by the central error handler
+        output.printError("Failed to read default-python file: {s}", .{@errorName(err)}) catch {}; // Keep user informed
+        return err; // Propagate the error
     };
 
     return std.mem.trim(u8, content, "\n\r\t ");

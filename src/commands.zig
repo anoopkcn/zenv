@@ -229,13 +229,13 @@ pub fn handleSetupCommand(
         const modules_available = env.validateModules(allocator, env_config, flags.force_deps) catch |err| {
             output.printError("Failed to validate modules: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(error.ModuleLoadError);
-            return;
+            return error.ModuleLoadError;
         };
 
         if (!modules_available) {
             // Error messages already printed by validateModules
             handleErrorFn(error.ModuleLoadError);
-            return;
+            return error.ModuleLoadError;
         }
 
         output.print("All modules appear to be available.", .{}) catch {};
@@ -282,12 +282,12 @@ pub fn handleSetupCommand(
             if (err == error.FileNotFound) {
                 output.printError("Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
                 handleErrorFn(err); // Use the original file not found error
-                return; // Exit setup command
+                return err; // Exit setup command
             } else {
                 // Handle other potential access errors
                 output.printError("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
                 handleErrorFn(err);
-                return;
+                return err;
             }
         };
 
@@ -304,7 +304,7 @@ pub fn handleSetupCommand(
         const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
             output.printError("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             handleErrorFn(error.PathResolutionFailed); // Use specific error
-            return; // Exit setup command
+            return error.PathResolutionFailed; // Exit setup command
         };
         // No need to defer free because the arena will handle cleanup
 
@@ -359,7 +359,7 @@ pub fn handleSetupCommand(
         flags.use_uv,
     ) catch |err| {
         handleErrorFn(err);
-        return;
+        return err;
     };
     deps_need_cleanup = false;
 
@@ -369,7 +369,7 @@ pub fn handleSetupCommand(
     // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-        output.printError("Could not get current working directory: {s}", .{@errorName(err)}) catch {};
+        output.printError("Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -531,7 +531,7 @@ pub fn handleRegisterCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError("Missing environment name argument. Usage: zenv register <name>", .{}) catch {};
+        output.printError("Missing environment name argument. Usage: zenv register <n>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -660,6 +660,7 @@ pub fn handleDeregisterCommand(
     } else {
         output.printError("Failed to unregister environment '{s}'.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
+        return;
     }
 }
 
@@ -740,7 +741,7 @@ pub fn handlePythonCommand(
         output.printError("Missing subcommand for 'python' command", .{}) catch {};
         output.print("Available subcommands: install, use, list", .{}) catch {};
         handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const subcommand = args[2];
@@ -771,7 +772,7 @@ pub fn handlePythonCommand(
             output.printError("Missing version argument for 'python use' command", .{}) catch {};
             output.print("Usage: zenv python use <version>", .{}) catch {};
             handleErrorFn(error.ArgsError);
-            return;
+            return error.ArgsError;
         }
 
         const version = args[3];
@@ -783,7 +784,7 @@ pub fn handlePythonCommand(
         output.printError("Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
         output.print("Available subcommands: install, use, list", .{}) catch {};
         handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 }
 
@@ -834,6 +835,7 @@ pub fn handleRmCommand(
     std.fs.deleteTreeAbsolute(venv_path_to_remove) catch |err| {
         output.printError("Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
         output.printError("You may need to remove it manually.", .{}) catch {};
+        handleErrorFn(err);
         return;
     };
 
