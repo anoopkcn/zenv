@@ -14,6 +14,7 @@ const EnvironmentRegistry = configurations.EnvironmentRegistry;
 
 pub fn handleInitCommand(
     allocator: Allocator,
+    args: []const []const u8,
 ) void {
     const cwd = std.fs.cwd();
     const config_path = "zenv.json";
@@ -46,13 +47,13 @@ pub fn handleInitCommand(
     var replacements = std.StringHashMap([]const u8).init(allocator);
     defer replacements.deinit();
 
-    // Add replacements for the template
+    // Add common replacements for all templates
     replacements.put("HOSTNAME", hostname) catch |err| {
-        output.printError("Creating replacements: {s}", .{@errorName(err)}) catch {};
+        output.printError("Creating HOSTNAME replacement: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
 
-    // Determine the dependency file for the "dev" environment
+    // Determine the dependency file (used by both templates)
     const dev_dep_file_value: []const u8 = blk: {
         var requirements_txt_found: bool = false;
         // Check for requirements.txt
@@ -98,11 +99,52 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    // Process the template using our JSON template utility
-    const processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
-        output.printError("Processing template: {s}", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
+    var processed_content: []const u8 = undefined;
+
+    // Check if a custom environment name is provided
+    if (args.len > 2) {
+        const custom_env_name = args[2];
+        var desc_to_free: ?[]const u8 = null; // To manage freeing memory only if we allocated it.
+
+        const custom_env_desc = if (args.len > 3) blk: {
+            // Use the user-provided description from args[3]
+            // This slice is valid for the lifetime of `args`, which is fine for `replacements`
+            break :blk args[3];
+        } else blk: {
+            // Generate default description if not provided
+            const generated_desc = std.fmt.allocPrint(allocator, "Description for {s}", .{custom_env_name}) catch |err| {
+                output.printError("Formatting custom env description: {s}", .{@errorName(err)}) catch {};
+                std.process.exit(1);
+            };
+            desc_to_free = generated_desc; // Mark this for freeing later
+            break :blk generated_desc;
+        };
+
+        if (desc_to_free) |d_free| {
+            defer allocator.free(d_free);
+        }
+
+        replacements.put("ENV_NAME", custom_env_name) catch |err| {
+            output.printError("Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+        replacements.put("ENV_DESCRIPTION", custom_env_desc) catch |err| {
+            output.printError("Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+
+        // Process the custom template
+        processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
+            output.printError("Processing custom template: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+    } else {
+        // Process the default template
+        processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
+            output.printError("Processing default template: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+    }
     defer allocator.free(processed_content);
 
     // Write template to file
@@ -117,8 +159,11 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    output.print("Created zenv.json template in the current directory.", .{}) catch {};
-    output.print("Edit it to customize your environments.", .{}) catch {};
+    if (args.len > 3 or args.len > 2 ) {
+        output.print("Created zenv.json. Run 'zenv setup {s}", .{args[2]}) catch {};
+    } else {
+        output.print("Created zenv.json. Run 'zenv setup test", .{}) catch {};
+    }
 }
 
 pub fn handleSetupCommand(

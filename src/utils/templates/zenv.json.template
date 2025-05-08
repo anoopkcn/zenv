@@ -1,14 +1,10 @@
 {
   "base_dir": "zenv",
   "test": {
-    "target_machines": ["jureca", "juwels", "@@HOSTNAME@@"],
+    "target_machines": ["@@HOSTNAME@@"],
     "description": "Test python environment",
     "fallback_python": null,
-    "modules": [
-        "Stages/2025",
-        "StdEnv",
-        "Python"
-    ],
+    "modules": [],
     "dependencies": [],
     "dependency_file": null,
     "setup_commands": [],

@@ -1,0 +1,14 @@
+{
+  "base_dir": "zenv",
+  "@@ENV_NAME@@": {
+    "target_machines": ["@@HOSTNAME@@"],
+    "description": "@@ENV_DESCRIPTION@@",
+    "fallback_python": null,
+    "modules": [],
+    "dependencies": [],
+    "dependency_file": @@DEV_DEPENDENCY_FILE@@,
+    "setup_commands": [],
+    "custom_activate_vars": {},
+    "activate_commands": []
+  }
+}

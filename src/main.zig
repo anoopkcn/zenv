@@ -174,7 +174,7 @@ pub fn main() anyerror!void {
         },
         .init => {
             // Handle init command directly to avoid loading config
-            commands.handleInitCommand(allocator);
+            commands.handleInitCommand(allocator, args);
             process.exit(0);
         },
         // Let other commands proceed to config parsing
