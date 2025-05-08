@@ -67,7 +67,9 @@ fn printUsage() void {
         \\Manages environments based on zenv.json configuration.
         \\
         \\Commands:
-        \\  init                      Create a new zenv.json template file in the current directory.
+        \\  init [name] [desc]        Create a new zenv.json template file in the current directory.
+        \\                            with an optional name and optional description.
+        \\                            If name is not provided, it will generate one named 'test'
         \\
         \\  setup <name>              Set up the specified environment based on zenv.json file.
         \\                            Creates a virtual environment in <base_dir>/<name>/.

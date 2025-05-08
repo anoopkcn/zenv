@@ -160,7 +160,7 @@ pub fn handleInitCommand(
     };
 
     if (args.len > 3 or args.len > 2 ) {
-        output.print("Created zenv.json. Run 'zenv setup {s}", .{args[2]}) catch {};
+        output.print("Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
     } else {
         output.print("Created zenv.json. Run 'zenv setup test", .{}) catch {};
     }
