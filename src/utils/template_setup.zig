@@ -194,19 +194,29 @@ fn createSetupScript(
             try module_list_str.appendSlice(module_name);
         }
 
-        try module_writer.print("echo 'Info: Loading required modules'\n", .{});
-        try module_writer.print("echo 'Info: Loading modules: {s}'\n", .{module_list_str.items});
+        if (env_config.modules_file) |modules_file| {
+            try module_writer.print("echo 'Info: Loading required modules from file: {s}'\n", .{modules_file});
+        } else {
+            try module_writer.print("echo 'Info: Loading required modules'\n", .{});
+        }
+        try module_writer.print("echo 'Info: Loading {d} modules:'\n", .{env_config.modules.items.len});
+        for (env_config.modules.items, 0..) |module_name, idx| {
+            try module_writer.print("echo '  - Module #{d}: \"{s}\"'\n", .{ idx + 1, module_name });
+        }
 
         // The set +e and error checking are now in the template itself, based on modules_verified
 
         // Load each module
         for (env_config.modules.items) |module_name| {
+            // Add debug information before loading
+            try module_writer.print("info \"Attempting to load module: '{s}'\"\n", .{module_name});
+
             if (modules_verified) {
                 // Just load the module when pre-verified, we already checked they exist
-                try module_writer.print("module load {s}\n", .{module_name});
+                try module_writer.print("safe_module_load '{s}'\n", .{module_name});
             } else {
                 // Load with error handling when not pre-verified
-                try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
+                try module_writer.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
             }
         }
     } else {

@@ -100,10 +100,14 @@ fn createActivationScript(
             try module_list_str.appendSlice(module_name);
         }
 
-        try module_writer.print("echo 'Info: Loading modules - {s}'\n", .{module_list_str.items});
+        try module_writer.print("echo 'Info: Loading {d} modules:'\n", .{env_config.modules.items.len});
+        // for (env_config.modules.items, 0..) |module_name, idx| {
+        //     try module_writer.print("echo '  - Module #{d}: \"{s}\"'\n", .{idx + 1, module_name});
+        // }
 
         for (env_config.modules.items) |module_name| {
-            try module_writer.print("module load {s} || handle_module_error \"{s}\"\n", .{ module_name, module_name });
+            // try module_writer.print("echo \"Info: Attempting to load module: '{s}'\"\n", .{module_name});
+            try module_writer.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
         }
     } else {
         try module_writer.print("echo 'Info: No modules specified to load'\n", .{});

@@ -5,6 +5,7 @@
     "description": "Test python environment",
     "fallback_python": null,
     "modules": [],
+    "modules_file":null,
     "dependencies": [],
     "dependency_file": null,
     "setup_commands": [],
@@ -20,6 +21,7 @@
         "StdEnv",
         "Python"
     ],
+    "modules_file":null,
     "dependencies": ["tqdm"],
     "dependency_file": @@DEV_DEPENDENCY_FILE@@,
     "setup_commands": [

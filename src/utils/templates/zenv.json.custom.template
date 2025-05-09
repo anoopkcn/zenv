@@ -5,6 +5,7 @@
     "description": "@@ENV_DESCRIPTION@@",
     "fallback_python": null,
     "modules": [],
+    "modules_file":null,
     "dependencies": [],
     "dependency_file": @@DEV_DEPENDENCY_FILE@@,
     "setup_commands": [],

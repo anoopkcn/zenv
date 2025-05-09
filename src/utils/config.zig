@@ -44,6 +44,7 @@ pub const EnvironmentConfig = struct {
     target_machines: ArrayList([]const u8),
     description: ?[]const u8 = null,
     modules: ArrayList([]const u8),
+    modules_file: ?[]const u8 = null,
     dependency_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
     fallback_python: ?[]const u8 = null,
@@ -58,6 +59,7 @@ pub const EnvironmentConfig = struct {
             .dependencies = ArrayList([]const u8).init(allocator),
             .custom_activate_vars = StringHashMap([]const u8).init(allocator),
             .description = null,
+            .modules_file = null,
             .dependency_file = null,
             .setup_commands = null,
             .activate_commands = null,
@@ -83,6 +85,7 @@ pub const EnvironmentConfig = struct {
         self.custom_activate_vars.deinit();
 
         if (self.description) |desc| self.target_machines.allocator.free(desc);
+        if (self.modules_file) |mfile| self.target_machines.allocator.free(mfile);
         if (self.dependency_file) |req| self.target_machines.allocator.free(req);
 
         if (self.setup_commands) |*cmds| {
@@ -274,6 +277,8 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         env.fallback_python = try Parse.getString(allocator, env_value.object.get("fallback_python") orelse json.Value{ .null = {} }, null);
 
         env.description = try Parse.getString(allocator, env_value.object.get("description") orelse json.Value{ .null = {} }, null);
+
+        env.modules_file = try Parse.getString(allocator, env_value.object.get("modules_file") orelse json.Value{ .null = {} }, null);
 
         env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
 

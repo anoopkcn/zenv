@@ -147,6 +147,10 @@ fn printUsage() void {
         \\  "base_dir": "path/to/venvs" is a special top-level key specifying the storage
         \\  location for virtual environments. Paths can be absolute (e.g., /path/to/venvs)
         \\  or relative to the 'zenv.json' file's location.
+        \\  "modules_file": "path/to/file.txt" can be specified in an environment to load
+        \\  module names from an external file. The file can contain module names separated
+        \\  by spaces, tabs, commas, or newlines. When specified, any modules listed in the
+        \\  "modules" array are ignored.
         \\
         \\Registry (ZENV_DIR/registry.json):
         \\  A global JSON file (path in ZENV_DIR environment variable, typically ~/.zenv)

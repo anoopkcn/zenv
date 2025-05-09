@@ -37,8 +37,45 @@ abort() {
 }
 
 # Define a function to handle module errors
+# Handle module errors
 handle_module_error() {
-  abort "Failed to load module '$1'"
+  warn "Failed to load module '$1'"
+  warn "This may be due to a typo, encoding issue, or the module not being available."
+  warn "Continuing with setup, but functionality may be limited."
+  
+  # Try to suggest available modules that might match
+  if command -v module >/dev/null 2>&1; then
+    local module_pattern=$(echo "$1" | tr -c '[:alnum:]' '.')
+    if [ -n "$module_pattern" ]; then
+      info "Modules that might match (grep pattern '${module_pattern}'):"
+      module avail 2>/dev/null | grep -i "$module_pattern" | head -n 5 | sed 's/^/    Suggestion: /' || true
+    fi
+  fi
+}
+
+# Define function to safely load a module and handle errors
+safe_module_load() {
+  local module_name="$1"
+  # Check for problematic characters in module name
+  if echo "$module_name" | LC_ALL=C grep -q '[^[:print:]]'; then
+    warn "Module name contains non-printable characters. Displaying hex representation:"
+    echo -n "$module_name" | hexdump -C
+    warn "Skipping problematic module."
+    return 1
+  fi
+  
+  # Debug: show exact module name being loaded
+  info "Loading module (exact name): '$module_name'"
+  
+  # Try to load the module
+  module load "$module_name" 2>/tmp/zenv_module_err || {
+    local err_output=$(cat /tmp/zenv_module_err)
+    warn "Failed to load module '$module_name': $err_output"
+    return 1
+  }
+  
+  info "Successfully loaded module: $module_name"
+  return 0
 }
 
 # Handle upgrade_env flag
@@ -88,9 +125,13 @@ if command -v module >/dev/null 2>&1; then
   ohai "Purging all modules"
   module --force purge
 
+  # Set up error handling for module loading
+  set +e  # Don't exit on module load errors
+  
+  ohai "Beginning module loading process"
   # Load modules based on verification status
   if [ "$MODULES_VERIFIED" = "true" ]; then
-    # ohai "Modules were pre-verified, proceeding with loading"
+    info "Modules were pre-verified, proceeding with loading"
     # We still need to load the modules to access the Python they provide
     # But if any fails, we'll continue since we verified they should work
     @@MODULE_LOADING_BLOCK@@
@@ -98,17 +139,32 @@ if command -v module >/dev/null 2>&1; then
     # Load all required modules with full error checking
     @@MODULE_LOADING_BLOCK@@
   fi
+  
+  # Reset error handling to exit on errors
+  set -e
 
   # After loading modules, check which Python is now available in the PATH
   MODULE_PYTHON=""
   if command -v python3 >/dev/null 2>&1; then
     MODULE_PYTHON=$(which python3)
     ohai "Found Python in PATH after loading modules: $MODULE_PYTHON"
-    info "Version: $($MODULE_PYTHON --version 2>&1)"
+    # Verify Python is working properly
+    if $MODULE_PYTHON --version >/dev/null 2>&1; then
+      info "Python version: $($MODULE_PYTHON --version 2>&1)"
+    else
+      warn "Python executable exists but failed to get version. It may be misconfigured."
+      MODULE_PYTHON=""
+    fi
   elif command -v python >/dev/null 2>&1; then
     MODULE_PYTHON=$(which python)
     ohai "Found Python in PATH after loading modules: $MODULE_PYTHON"
-    info "Version: $($MODULE_PYTHON --version 2>&1)"
+    # Verify Python is working properly
+    if $MODULE_PYTHON --version >/dev/null 2>&1; then
+      info "Python version: $($MODULE_PYTHON --version 2>&1)"
+    else
+      warn "Python executable exists but failed to get version. It may be misconfigured."
+      MODULE_PYTHON=""
+    fi
   else
     warn "No Python found in PATH after loading modules."
     if [ -n "@@FALLBACK_PYTHON@@" ] && [ "@@FALLBACK_PYTHON@@" != "python3" ]; then
@@ -116,6 +172,14 @@ if command -v module >/dev/null 2>&1; then
     else
       info "Will try system Python executables"
     fi
+  fi
+  
+  # List loaded modules for debugging
+  if command -v module >/dev/null 2>&1; then
+    info "Currently loaded modules:"
+    module avail 2>/dev/null | grep -i "^  " | head -n 20 | sed 's/^/    Available: /' || true
+    info "Currently loaded modules:"
+    module list 2>&1 | sed 's/^/    Loaded: /' || echo "    Failed to list modules"
   fi
 
   ohai "Checking Python packages provided by modules"
