@@ -69,10 +69,10 @@ Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`). _Windows s
 ### Initialize and setup an environment
 
 ```bash
-zenv init
-# This creates a `zenv.json` configuration file TEMPLATE in your project directory
+zenv init [name] [description]
+# This creates a `zenv.json` configuration file in your project directory
 # You can then modify this json file according to your needs and run:
-zenv setup <name_of_your_environment>
+zenv setup <name>
 # This will also register the environment to global ZENV_DIR/registry.json
 ```
 
