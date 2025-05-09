@@ -34,7 +34,7 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
                 .message = try allocator.dupe(u8, "Configuration file not found"),
                 .context = try allocator.dupe(u8, file_path),
             });
-            
+
             // Print the error and return it
             printValidationErrors(errors);
             return errors;
@@ -49,13 +49,13 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
 
     // Validate the JSON content
     const validation_result = try validateJsonContent(allocator, file_content);
-    
+
     // If there are validation errors, print them
     if (validation_result != null) {
         printValidationErrors(validation_result.?);
         return validation_result;
     }
-    
+
     return null;
 }
 
@@ -558,10 +558,10 @@ const Position = struct {
 fn findErrorPosition(content: []const u8) !Position {
     // For syntax errors, we need to scan the file to find the approximate location
     // This is a simplistic approach that works for most common errors
-    
+
     var line: usize = 1;
     var column: usize = 1;
-    
+
     for (content, 0..) |c, i| {
         if (c == '\n') {
             line += 1;
@@ -569,7 +569,7 @@ fn findErrorPosition(content: []const u8) !Position {
         } else {
             column += 1;
         }
-        
+
         // For now, we just return the position at the end of the file
         // In a more sophisticated implementation, we would analyze the error
         // and try to find the exact position
@@ -577,7 +577,7 @@ fn findErrorPosition(content: []const u8) !Position {
             return Position{ .line = line, .column = column };
         }
     }
-    
+
     return Position{ .line = 1, .column = 1 };
 }
 
@@ -585,7 +585,7 @@ fn findErrorPosition(content: []const u8) !Position {
 fn findValuePosition(content: []const u8, value: json.Value) !Position {
     // This is a simplistic implementation that just scans for the value
     // A more sophisticated implementation would track positions during parsing
-    
+
     const value_str = switch (value) {
         .string => |s| s,
         .integer => |i| std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{i}) catch "0",
@@ -596,10 +596,10 @@ fn findValuePosition(content: []const u8, value: json.Value) !Position {
         .object => "{",
         else => "value",
     };
-    
+
     var line: usize = 1;
     var column: usize = 1;
-    
+
     var i: usize = 0;
     while (i < content.len) : (i += 1) {
         if (content[i] == '\n') {
@@ -608,13 +608,13 @@ fn findValuePosition(content: []const u8, value: json.Value) !Position {
         } else {
             column += 1;
         }
-        
+
         // Try to match the value at this position
-        if (i + value_str.len <= content.len and std.mem.eql(u8, content[i..i+value_str.len], value_str)) {
+        if (i + value_str.len <= content.len and std.mem.eql(u8, content[i .. i + value_str.len], value_str)) {
             return Position{ .line = line, .column = column };
         }
     }
-    
+
     // If we can't find the value, return position 1,1
     return Position{ .line = 1, .column = 1 };
 }
@@ -629,7 +629,7 @@ fn findObjectPosition(content: []const u8, object: json.ObjectMap) !Position {
 fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_number: usize) !?[]const u8 {
     var current_line: usize = 1;
     var line_start: usize = 0;
-    
+
     for (content, 0..) |c, i| {
         if (c == '\n') {
             if (current_line == line_number) {
@@ -640,12 +640,12 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
             line_start = i + 1;
         }
     }
-    
+
     // Handle the last line
     if (current_line == line_number) {
         return try allocator.dupe(u8, content[line_start..]);
     }
-    
+
     return null;
 }
 
@@ -670,21 +670,21 @@ pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
 
         if (err.context) |ctx| {
             output.printError("Context: {s}", .{ctx}) catch {};
-            
+
             // Print a marker pointing to the column
             if (err.column > 0) {
                 var marker = std.ArrayList(u8).init(std.heap.page_allocator);
                 defer marker.deinit();
-                
+
                 // Create spaces up to the column
                 const spaces = @min(err.column - 1, ctx.len);
                 for (0..spaces) |_| {
                     marker.append(' ') catch break;
                 }
-                
+
                 // Add the marker
                 marker.append('^') catch {};
-                
+
                 output.printError("         {s}", .{marker.items}) catch {};
             }
         }
@@ -695,7 +695,7 @@ pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
 pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_module.ZenvConfig {
     // First validate the configuration
     const validation_errors = try validateConfigFile(allocator, config_path);
-    
+
     if (validation_errors) |errors| {
         defer {
             for (errors.items) |*err| {
@@ -703,11 +703,11 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
             }
             errors.deinit();
         }
-        
+
         // Error messages already printed in validateConfigFile
         return error.InvalidFormat;
     }
-    
+
     // If validation passed, parse the configuration
     return config_module.parse(allocator, config_path);
 }

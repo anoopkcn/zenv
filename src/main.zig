@@ -7,6 +7,7 @@ const commands = @import("commands.zig");
 const configurations = @import("utils/config.zig");
 const output = @import("utils/output.zig");
 const flags_module = @import("utils/flags.zig");
+const validation = @import("utils/validation.zig");
 
 pub const Command = enum {
     setup,
@@ -20,6 +21,7 @@ pub const Command = enum {
     python,
     log,
     run,
+    validate,
     help,
     version,
     @"-v",
@@ -41,6 +43,7 @@ pub const Command = enum {
             .{ "python", .python },
             .{ "log", .log },
             .{ "run", .run },
+            .{ "validate", .validate },
             .{ "help", .help },
             .{ "version", .version },
             .{ "-v", .@"-v" },
@@ -66,7 +69,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages Python virtual environments based on zenv.json configuration.
@@ -106,6 +109,9 @@ fn printUsage() void {
         \\    install <version>      Downloads and installs a specific Python version for zenv.
         \\    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
         \\    list                   Shows Python versions installed and managed by zenv.
+        \\
+        \\  validate                 Validates the configuration file in the current directory.
+        \\                           Reports errors with line numbers and field names if found.
         \\
         \\  log <name|id>            Displays the setup log file for the specified environment.
         \\                           Useful for troubleshooting setup issues.
@@ -209,6 +215,7 @@ pub fn main() anyerror!void {
         .python,
         .log,
         .run,
+        .validate,
         .unknown,
         => {},
     }
@@ -247,6 +254,11 @@ pub fn main() anyerror!void {
                     error.JsonParseError => {
                         output.printError(
                             \\Invalid JSON format in '{s}'. Check syntax
+                        , .{config_path}) catch {};
+                    },
+                    error.InvalidFormat => {
+                        output.printError(
+                            \\Invalid JSON format in '{s}'. Check syntax for details above
                         , .{config_path}) catch {};
                     },
                     error.ConfigInvalid => {
@@ -415,13 +427,13 @@ pub fn main() anyerror!void {
             }
         }
 
-        // Now load the config
-        config = configurations.parse(allocator, config_path) catch |err| {
+        // Now load the config with validation
+        config = validation.validateAndParse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
         };
     } else if (command == .register) {
-        config = configurations.parse(allocator, config_path) catch |err| {
+        config = validation.validateAndParse(allocator, config_path) catch |err| {
             handleError(err);
             return; // Exit after handling error
         };
@@ -441,6 +453,58 @@ pub fn main() anyerror!void {
         .python => try commands.handlePythonCommand(allocator, args, handleError),
         .log => commands.handleLogCommand(allocator, &registry, args, handleError),
         .run => commands.handleRunCommand(allocator, &registry, args, handleError),
+        .validate => {
+            // Use custom config path if provided as an argument
+            var validate_config_path: []const u8 = config_path;
+
+            if (args.len > 2) {
+                validate_config_path = args[2];
+                output.print("Using provided file path: {s}", .{validate_config_path}) catch {};
+            } else {
+                output.print("Using default config path: {s}", .{validate_config_path}) catch {};
+            }
+
+            // Check if file exists before validating
+            if (std.fs.cwd().openFile(validate_config_path, .{})) |file| {
+                file.close();
+                output.print("File exists, proceeding with validation", .{}) catch {};
+            } else |err| {
+                output.printError("Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
+                process.exit(1);
+            }
+
+            // Modified validate implementation for single file validation
+            const validateSingleFile = struct {
+                fn handleValidationError(err: anyerror) void {
+                    // Use a modified error handler with the correct file path
+                    switch (err) {
+                        error.ConfigFileNotFound, error.JsonParseError, error.InvalidFormat, error.ConfigInvalid => {
+                            // Syntax check already printed details
+                            process.exit(1);
+                        },
+                        else => handleError(err),
+                    }
+                }
+            }.handleValidationError;
+
+            if (validation.validateConfigFile(allocator, validate_config_path)) |errors_opt| {
+                if (errors_opt) |errors| {
+                    // Errors were found and already printed by validateConfigFile
+                    // Clean up errors
+                    for (errors.items) |*err| {
+                        err.deinit(allocator);
+                    }
+                    errors.deinit();
+                    process.exit(1);
+                } else {
+                    // No errors found
+                    output.print("Configuration file is valid!", .{}) catch {};
+                }
+            } else |err| {
+                validateSingleFile(err);
+                process.exit(1);
+            }
+        },
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
