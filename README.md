@@ -83,10 +83,11 @@ Example of a `zenv.json` file:
   "test": {
     "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
     "fallback_python": null,
-    "dependency_file": "requirements.txt",
     "description": "Basic environment for jureca and juwels",
     "modules": ["Stages/2025", "StdEnv", "Python", "CUDA"],
-    "dependencies": ["numpy>=1.20.0", "pandas"]
+    "modules_file": null,
+    "dependencies": ["numpy>=1.20.0", "pandas"],
+    "dependency_file": "requirements.txt"
   }
 }
 ```
