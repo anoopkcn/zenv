@@ -24,6 +24,7 @@ source @@VENV_PATH@@/bin/activate
 
 # Prevent Python from writing .pyc files to save inodes
 export PYTHONDONTWRITEBYTECODE=1
+@@ZENV_ENV_DIR@@
 
 @@CUSTOM_VAR_EXPORTS@@
 

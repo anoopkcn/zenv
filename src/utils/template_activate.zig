@@ -81,6 +81,10 @@ fn createActivationScript(
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_PATH", venv_path);
 
+    const zenv_env_dir_export_line = try std.fmt.allocPrint(allocator, "export ZENV_ENV_DIR={s}", .{venv_path});
+    defer allocator.free(zenv_env_dir_export_line);
+    try replacements.put("ZENV_ENV_DIR", zenv_env_dir_export_line);
+
     // Generate the module loading block
     var module_loading_block = std.ArrayList(u8).init(allocator);
     defer module_loading_block.deinit();
