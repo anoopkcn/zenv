@@ -138,6 +138,9 @@ fn printUsage() void {
         \\  --force                  Forces reinstallation of all dependencies.
         \\                           Useful if dependencies from loaded modules cause conflicts.
         \\
+        \\  --no-cache               Disables the package cache when installing dependencies.
+        \\                           Ensures fresh package downloads for each installation.
+        \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
         \\  Each top-level key is an environment name.

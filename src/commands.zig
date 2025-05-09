@@ -197,6 +197,9 @@ pub fn handleSetupCommand(
     if (flags.init_mode) {
         output.print("Init flag detected. Using configuration created by --init.", .{}) catch {};
     }
+    if (flags.no_cache) {
+        output.print("No-cache flag detected. Will disable package cache during dependency installation.", .{}) catch {};
+    }
 
     // Get and validate the environment config
     const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
@@ -357,6 +360,7 @@ pub fn handleSetupCommand(
         flags.use_default_python,
         flags.dev_mode,
         flags.use_uv,
+        flags.no_cache,
     ) catch |err| {
         handleErrorFn(err);
         return err;

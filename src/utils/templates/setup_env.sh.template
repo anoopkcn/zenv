@@ -77,6 +77,12 @@ if [ "$USE_UV" = "true" ]; then
   info "Using uv version: $(uv --version)"
 fi
 
+# Handle NO_CACHE flag
+@@NO_CACHE_VALUE@@
+if [ "$NO_CACHE" = "true" ]; then
+  ohai "--no-cache flag detected. Will disable package cache during installation."
+fi
+
 # Check if module command exists
 if command -v module >/dev/null 2>&1; then
   ohai "Purging all modules"
@@ -313,10 +319,18 @@ if [ "$USE_UV" = "true" ]; then
   # Using uv pip install for these core tools.
   # uv doesn't have a direct equivalent for --no-build-isolation for *these specific* tools.
   # It's generally fine as uv handles build environments differently.
-  uv pip install --no-cache --link-mode=copy --upgrade pip #setuptools wheel
+  if [ "$NO_CACHE" = "true" ]; then
+    uv pip install --no-cache --link-mode=copy --upgrade pip #setuptools wheel
+  else
+    uv pip install --link-mode=copy --upgrade pip #setuptools wheel
+  fi
 else
   ohai "Ensuring pip and it is up-to-date in the venv using pip"
-  python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
+  if [ "$NO_CACHE" = "true" ]; then
+    python -m pip install --ignore-installed --no-build-isolation --no-cache-dir --upgrade pip #setuptools wheel
+  else
+    python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
+  fi
 fi
 
 # Handle dependencies installation based on force_deps flag
@@ -337,14 +351,22 @@ fi
 
 # Install dependencies
 PIP_INSTALL_OPTIONS="" # Base option - ensure we don't ignore already installed packages by default
+if [ "$NO_CACHE" = "true" ]; then
+  PIP_INSTALL_OPTIONS="$PIP_INSTALL_OPTIONS --no-cache-dir"
+fi
 
 if [ "$FORCE_DEPS" = "true" ]; then
   # Install all dependencies regardless of module packages
   ohai "Using --force: Installing all specified dependencies from $REQUIREMENTS_PATH"
   if [ -s "$REQUIREMENTS_PATH" ]; then
     if [ "$USE_UV" = "true" ]; then
-      ohai "Installing dependencies using 'uv pip install --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
-      uv pip install --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"` if install behavior is not desired
+      if [ "$NO_CACHE" = "true" ]; then
+        ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+        uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH"
+      else
+        ohai "Installing dependencies using 'uv pip sync --link-mode=copy $REQUIREMENTS_PATH'"
+        uv pip sync --link-mode=copy "$REQUIREMENTS_PATH"
+      fi
     else
       ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
       python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
@@ -385,8 +407,13 @@ else
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded due to module conflicts)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
       if [ "$USE_UV" = "true" ]; then
-        ohai "Installing filtered dependencies using 'uv pip install --no-cache --link-mode=copy -r \"$FILTERED_REQUIREMENTS\"'"
-        uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"
+        if [ "$NO_CACHE" = "true" ]; then
+          ohai "Installing filtered dependencies using 'uv pip install --no-cache --link-mode=copy -r \"$FILTERED_REQUIREMENTS\"'"
+          uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"
+        else
+          ohai "Installing filtered dependencies using 'uv pip install --link-mode=copy -r \"$FILTERED_REQUIREMENTS\"'"
+          uv pip install --link-mode=copy -r "$FILTERED_REQUIREMENTS"
+        fi
       else
         ohai "Installing filtered dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$FILTERED_REQUIREMENTS\"'"
         python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
@@ -402,8 +429,13 @@ else
     ohai "Installing all dependencies directly from $REQUIREMENTS_PATH"
     if [ -s "$REQUIREMENTS_PATH" ]; then
       if [ "$USE_UV" = "true" ]; then
-        ohai "Installing dependencies using 'uv pip install --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
-        uv pip install --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"`
+        if [ "$NO_CACHE" = "true" ]; then
+          ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+          uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH"
+        else
+          ohai "Installing dependencies using 'uv pip sync --link-mode=copy $REQUIREMENTS_PATH'"
+          uv pip sync --link-mode=copy "$REQUIREMENTS_PATH"
+        fi
       else
         ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
         python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
@@ -425,14 +457,22 @@ if [ "$DEV_MODE" = "true" ]; then
   if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
     info "Found Python package configuration in current directory"
     if [ "$USE_UV" = "true" ]; then
-      ohai "Installing current directory as editable package using 'uv pip install --no-cache --link-mode=copy --editable .'"
-      # For uv, --no-build-isolation is generally not needed as it handles builds differently.
-      # We are not passing $PIP_INSTALL_OPTIONS to uv for editable install.
-      # Not using --reinstall to ensure dependencies are only installed if missing/incompatible.
-      uv pip install --no-cache --link-mode=copy --editable . || {
-        warn "Failed to install current directory as editable package using uv"
-        warn "Check that your setup.py or pyproject.toml is valid"
-      }
+      if [ "$NO_CACHE" = "true" ]; then
+        ohai "Installing current directory as editable package using 'uv pip install --no-cache --link-mode=copy --editable .'"
+        # For uv, --no-build-isolation is generally not needed as it handles builds differently.
+        # We are not passing $PIP_INSTALL_OPTIONS to uv for editable install.
+        # Not using --reinstall to ensure dependencies are only installed if missing/incompatible.
+        uv pip install --no-cache --link-mode=copy --editable . || {
+          warn "Failed to install current directory as editable package using uv"
+          warn "Check that your setup.py or pyproject.toml is valid"
+        }
+      else
+        ohai "Installing current directory as editable package using 'uv pip install --link-mode=copy --editable .'"
+        uv pip install --link-mode=copy --editable . || {
+          warn "Failed to install current directory as editable package using uv"
+          warn "Check that your setup.py or pyproject.toml is valid"
+        }
+      fi
     else
       ohai "Installing current directory as editable package using 'python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable .'"
       python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . || {

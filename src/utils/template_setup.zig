@@ -24,6 +24,7 @@ pub fn createSetupScriptFromTemplate(
     use_default_python: bool,
     dev_mode: bool,
     use_uv: bool,
+    no_cache: bool,
 ) ![]const u8 {
     return try createSetupScript(
         allocator,
@@ -38,6 +39,7 @@ pub fn createSetupScriptFromTemplate(
         use_default_python,
         dev_mode,
         use_uv,
+        no_cache,
     );
 }
 
@@ -55,6 +57,7 @@ fn createSetupScript(
     use_default_python: bool,
     dev_mode: bool,
     use_uv: bool,
+    no_cache: bool,
 ) ![]const u8 {
     try output.print("Creating setup script for '{s}'...", .{env_name});
 
@@ -164,6 +167,9 @@ fn createSetupScript(
 
     // Set use_uv flag for the template
     try replacements.put("USE_UV_VALUE", if (use_uv) "USE_UV=true" else "USE_UV=false");
+
+    // Set no_cache flag for the template
+    try replacements.put("NO_CACHE_VALUE", if (no_cache) "NO_CACHE=true" else "NO_CACHE=false");
 
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)

@@ -8,6 +8,7 @@ pub const CommandFlags = struct {
     dev_mode: bool = false, // Whether to install the current directory as an editable package
     use_uv: bool = false, // Whether to use 'uv' instead of 'pip'
     init_mode: bool = false, // Whether to initialize the environment before setup
+    no_cache: bool = false, // Whether to disable package cache when installing dependencies
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
@@ -28,6 +29,8 @@ pub const CommandFlags = struct {
                 flags.use_uv = true;
             } else if (std.mem.eql(u8, arg, "--init")) {
                 flags.init_mode = true;
+            } else if (std.mem.eql(u8, arg, "--no-cache")) {
+                flags.no_cache = true;
             }
         }
 
