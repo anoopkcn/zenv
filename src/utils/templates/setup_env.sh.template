@@ -212,7 +212,7 @@ if [ "$UPGRADE_ENV" = "true" ]; then
         if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
             EXISTING_PYTHON_PATH=$(grep "home =" "$VENV_DIR/pyvenv.cfg" | cut -d' ' -f3)
             SELECTED_PYTHON_PATH=$(dirname $(dirname $($SELECTED_PYTHON_EXE -c "import sys; print(sys.executable)")))
-            
+
             if [ "$EXISTING_PYTHON_PATH" != "$SELECTED_PYTHON_PATH" ]; then
                 ohai "--upgrade: Detected different Python path ($SELECTED_PYTHON_PATH vs $EXISTING_PYTHON_PATH)"
                 ohai "--upgrade: Recreating virtual environment with new Python"
@@ -343,8 +343,8 @@ if [ "$FORCE_DEPS" = "true" ]; then
   ohai "Using --force: Installing all specified dependencies from $REQUIREMENTS_PATH"
   if [ -s "$REQUIREMENTS_PATH" ]; then
     if [ "$USE_UV" = "true" ]; then
-      ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
-      uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"` if sync behavior is not desired
+      ohai "Installing dependencies using 'uv pip install --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+      uv pip install --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"` if install behavior is not desired
     else
       ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
       python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
@@ -385,8 +385,8 @@ else
     ohai "Installing $INSTALLED_COUNT package(s) from filtered requirements ($EXCLUDED_COUNT excluded due to module conflicts)"
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
       if [ "$USE_UV" = "true" ]; then
-        ohai "Installing filtered dependencies using 'uv pip sync --no-cache --link-mode=copy $FILTERED_REQUIREMENTS'"
-        uv pip sync --no-cache --link-mode=copy "$FILTERED_REQUIREMENTS" # Consider `uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"`
+        ohai "Installing filtered dependencies using 'uv pip install --no-cache --link-mode=copy -r \"$FILTERED_REQUIREMENTS\"'"
+        uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"
       else
         ohai "Installing filtered dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$FILTERED_REQUIREMENTS\"'"
         python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
@@ -402,8 +402,8 @@ else
     ohai "Installing all dependencies directly from $REQUIREMENTS_PATH"
     if [ -s "$REQUIREMENTS_PATH" ]; then
       if [ "$USE_UV" = "true" ]; then
-        ohai "Installing dependencies using 'uv pip sync --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
-        uv pip sync --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"`
+        ohai "Installing dependencies using 'uv pip install --no-cache --link-mode=copy $REQUIREMENTS_PATH'"
+        uv pip install --no-cache --link-mode=copy "$REQUIREMENTS_PATH" # Consider `uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"`
       else
         ohai "Installing dependencies using 'python -m pip install $PIP_INSTALL_OPTIONS -r \"$REQUIREMENTS_PATH\"'"
         python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
