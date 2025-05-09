@@ -207,6 +207,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "fallback_python": "<path_to_python_or_null>",
     "description": "<optional_description_or_null>",
     "modules": ["<module1>", "<module2>"],
+    "modules_file": "<path_to_modulesfile_or_null>"
     "dependency_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
     "dependencies": ["<package_name_version>"],
     "setup_commands": ["<custom commands to run during setup process>"],
@@ -222,6 +223,8 @@ One can have multiple environment configurations in the same `zenv.json` file an
 ```
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
+
+The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
 
 ## Help
 
@@ -272,6 +275,9 @@ Commands:
     use <version>          Sets <version> as the pinned Python for zenv to prioritize.
     list                   Shows Python versions installed and managed by zenv.
 
+  validate                 Validates the configuration file in the current directory.
+                           Reports errors with line numbers and field names if found.
+
   log <name|id>            Displays the setup log file for the specified environment.
                            Useful for troubleshooting setup issues.
 
@@ -303,12 +309,14 @@ Options for 'zenv setup <name>':
   --force                  Forces reinstallation of all dependencies.
                            Useful if dependencies from loaded modules cause conflicts.
 
+  --no-cache               Disables the package cache when installing dependencies.
+                           Ensures fresh package downloads for each installation.
+
 Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
-  Each top-level key is an environment name.
-  "base_dir": "path/to/venvs" is a special top-level key specifying the storage
-  location for virtual environments. Paths can be absolute (e.g., /path/to/venvs)
-  or relative to the 'zenv.json' file's location.
+  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
+  top-level key specifying the storage location for virtual environments.
+  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
 
 Registry (ZENV_DIR/registry.json):
   A global JSON file (path in ZENV_DIR environment variable, typically ~/.zenv)
