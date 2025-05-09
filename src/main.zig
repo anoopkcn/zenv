@@ -110,7 +110,8 @@ fn printUsage() void {
         \\    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
         \\    list                   Shows Python versions installed and managed by zenv.
         \\
-        \\  validate                 Validates the configuration file in the current directory.
+        \\  validate [config]        Validates the configuration file. If no arguent provided it
+        \\                           will validate the 'zenv.json' file in the current directory.
         \\                           Reports errors with line numbers and field names if found.
         \\
         \\  log <name|id>            Displays the setup log file for the specified environment.
