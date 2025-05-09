@@ -76,7 +76,7 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.Arra
         const err_msg = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{err_name});
 
         // Find position information
-        const position = findErrorPosition(content) catch .{ .line = 0, .column = 0 };
+        const position = findErrorPosition(content, err_name) catch Position{ .line = 0, .column = 0 };
 
         // Get context around the error
         const context = getContextAroundPosition(allocator, content, position.line) catch null;
@@ -86,6 +86,7 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.Arra
             .column = position.column,
             .message = err_msg,
             .context = context,
+            .field_path = "",
         });
 
         return errors;
@@ -555,30 +556,81 @@ const Position = struct {
 };
 
 /// Find the position of an error in the JSON text
-fn findErrorPosition(content: []const u8) !Position {
+fn findErrorPosition(content: []const u8, _: []const u8) !Position {
     // For syntax errors, we need to scan the file to find the approximate location
-    // This is a simplistic approach that works for most common errors
+    // This approach attempts to locate common JSON syntax errors
 
     var line: usize = 1;
     var column: usize = 1;
+    var in_string = false;
+    var escape_next = false;
 
-    for (content, 0..) |c, i| {
+    // Track brackets and braces for balance checking
+    var stack = std.ArrayList(struct { char: u8, pos: Position }).init(std.heap.page_allocator);
+    defer stack.deinit();
+
+    for (content) |c| {
+        const current_pos = Position{ .line = line, .column = column };
+
         if (c == '\n') {
             line += 1;
             column = 1;
+            // Newline in a string is invalid in JSON
+            if (in_string) {
+                return current_pos;
+            }
         } else {
             column += 1;
         }
 
-        // For now, we just return the position at the end of the file
-        // In a more sophisticated implementation, we would analyze the error
-        // and try to find the exact position
-        if (i == content.len - 1) {
-            return Position{ .line = line, .column = column };
+        if (escape_next) {
+            escape_next = false;
+        } else if (c == '\\') {
+            escape_next = true;
+        } else if (c == '"') {
+            in_string = !in_string;
+        } else if (!in_string) {
+            // Check for balanced brackets
+            if (c == '{' or c == '[') {
+                try stack.append(.{ .char = c, .pos = current_pos });
+            } else if (c == '}') {
+                if (stack.items.len == 0 or stack.items[stack.items.len - 1].char != '{') {
+                    return current_pos;
+                }
+                _ = stack.pop();
+            } else if (c == ']') {
+                if (stack.items.len == 0 or stack.items[stack.items.len - 1].char != '[') {
+                    return current_pos;
+                }
+                _ = stack.pop();
+            }
+
+            // Check for invalid characters outside of strings
+            if (!(std.ascii.isWhitespace(c) or
+                c == '{' or c == '}' or c == '[' or c == ']' or
+                c == ':' or c == ',' or c == '"' or
+                std.ascii.isDigit(c) or c == '-' or c == '.' or c == '+' or
+                c == 't' or c == 'r' or c == 'u' or c == 'e' or
+                c == 'f' or c == 'a' or c == 'l' or c == 's' or
+                c == 'n'))
+            {
+                return current_pos;
+            }
         }
     }
 
-    return Position{ .line = 1, .column = 1 };
+    // Check for unclosed string
+    if (in_string) {
+        return Position{ .line = line, .column = column };
+    }
+
+    // Check for unbalanced brackets
+    if (stack.items.len > 0) {
+        return stack.items[stack.items.len - 1].pos;
+    }
+
+    // If no specific issue found, return the end position
+    return Position{ .line = line, .column = column };
 }
 
 /// Find the position of a JSON value in the text
@@ -657,7 +709,7 @@ pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
         }
 
         if (err.line > 0) {
-            output.printError("Error at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
+            output.printError("Error at approximate line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
         } else {
             output.printError("Error: {s}", .{err.message}) catch {};
         }
