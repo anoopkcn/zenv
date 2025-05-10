@@ -709,7 +709,7 @@ pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
         }
 
         if (err.line > 0) {
-            output.printError("Error at approximate line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
+            output.printError("Error approximately at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
         } else {
             output.printError("Error: {s}", .{err.message}) catch {};
         }

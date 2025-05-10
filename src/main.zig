@@ -449,58 +449,7 @@ pub fn main() anyerror!void {
         .python => try commands.handlePythonCommand(allocator, args, handleError),
         .log => commands.handleLogCommand(allocator, &registry, args, handleError),
         .run => commands.handleRunCommand(allocator, &registry, args, handleError),
-        .validate => {
-            // Use custom config path if provided as an argument
-            var validate_config_path: []const u8 = config_path;
-
-            if (args.len > 2) {
-                validate_config_path = args[2];
-                output.print("Using provided file path: {s}", .{validate_config_path}) catch {};
-            } else {
-                output.print("Using default config path: {s}", .{validate_config_path}) catch {};
-            }
-
-            // Check if file exists before validating
-            if (std.fs.cwd().openFile(validate_config_path, .{})) |file| {
-                file.close();
-                output.print("File exists, proceeding with validation", .{}) catch {};
-            } else |err| {
-                output.printError("Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
-                process.exit(1);
-            }
-
-            // Modified validate implementation for single file validation
-            const validateSingleFile = struct {
-                fn handleValidationError(err: anyerror) void {
-                    // Use a modified error handler with the correct file path
-                    switch (err) {
-                        error.ConfigFileNotFound, error.JsonParseError, error.InvalidFormat, error.ConfigInvalid => {
-                            // Syntax check already printed details
-                            process.exit(1);
-                        },
-                        else => handleError(err),
-                    }
-                }
-            }.handleValidationError;
-
-            if (validation.validateConfigFile(allocator, validate_config_path)) |errors_opt| {
-                if (errors_opt) |errors| {
-                    // Errors were found and already printed by validateConfigFile
-                    // Clean up errors
-                    for (errors.items) |*err| {
-                        err.deinit(allocator);
-                    }
-                    errors.deinit();
-                    process.exit(1);
-                } else {
-                    // No errors found
-                    output.print("Configuration file is valid!", .{}) catch {};
-                }
-            } else |err| {
-                validateSingleFile(err);
-                process.exit(1);
-            }
-        },
+        .validate => commands.handleValidateCommand(allocator, config_path, args, handleError),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

@@ -7,6 +7,7 @@ const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
 const python = @import("utils/python.zig");
 const configurations = @import("utils/config.zig");
+const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -1025,4 +1026,63 @@ pub fn handleLogCommand(
         handleErrorFn(err);
         return;
     };
+}
+
+pub fn handleValidateCommand(
+    allocator: Allocator,
+    config_path: []const u8,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+
+    // Use custom config path if provided as an argument
+    var validate_config_path: []const u8 = config_path;
+
+    if (args.len > 2) {
+        validate_config_path = args[2];
+        output.print("Using provided file path: {s}", .{validate_config_path}) catch {};
+    } else {
+        output.print("Using default config path: {s}", .{validate_config_path}) catch {};
+    }
+
+    // Check if file exists before validating
+    if (std.fs.cwd().openFile(validate_config_path, .{})) |file| {
+        file.close();
+        output.print("File exists, proceeding with validation", .{}) catch {};
+    } else |err| {
+        output.printError("Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
+        std.process.exit(1);
+    }
+
+    // Modified validate implementation for single file validation
+    const validateSingleFile = struct {
+        fn handleValidationError(err: anyerror) void {
+            // Use a modified error handler with the correct file path
+            switch (err) {
+                error.ConfigFileNotFound, error.JsonParseError, error.InvalidFormat, error.ConfigInvalid => {
+                    // Syntax check already printed details
+                    std.process.exit(1);
+                },
+                else => handleErrorFn(err),
+            }
+        }
+    }.handleValidationError;
+
+    if (validation.validateConfigFile(allocator, validate_config_path)) |errors_opt| {
+        if (errors_opt) |errors| {
+            // Errors were found and already printed by validateConfigFile
+            // Clean up errors
+            for (errors.items) |*err| {
+                err.deinit(allocator);
+            }
+            errors.deinit();
+            std.process.exit(1);
+        } else {
+            // No errors found
+            output.print("Configuration file is valid!", .{}) catch {};
+        }
+    } else |err| {
+        validateSingleFile(err);
+        std.process.exit(1);
+    }
 }
