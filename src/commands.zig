@@ -767,9 +767,10 @@ pub fn handlePythonCommand(
             return;
         };
 
-        const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
-        try output.print("Pinning newly installed Python {s}", .{installed_version});
-        try python.setDefaultPythonPath(allocator, installed_version);
+        // DO NOT PINN PYTHON VERSION HERE
+        // const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
+        // try output.print("Pinning newly installed Python {s}", .{installed_version});
+        // try python.setDefaultPythonPath(allocator, installed_version);
     } else if (std.mem.eql(u8, subcommand, "use")) {
         // Python use [version] command
         if (args.len < 4) {

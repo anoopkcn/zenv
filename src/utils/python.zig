@@ -174,7 +174,7 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
     const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
     defer allocator.free(filename);
 
-    output.print("Downloading Python {s} from {s}", .{ version, url }) catch {};
+    // output.print("Downloading Python {s} from {s}", .{ version, url }) catch {};
 
     // Use our download utility instead of curl
     const dl_path = try download.downloadToTemp(allocator, url, filename, .{
@@ -309,19 +309,19 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     try showInstallProgress("Configuration complete", 15);
 
     // Determine the number of CPU cores for parallel build
-    var cpu_count = try allocator.dupeZ(u8, "4"); // Default to 4 cores as a safe value
+    const cpu_count = try allocator.dupeZ(u8, "4"); // Default to 4 cores as a safe value
     defer allocator.free(cpu_count);
 
     // Try to get the actual CPU count if possible
-    if (std.Thread.getCpuCount()) |count| {
-        if (count > 1) {
-            const cores_to_use = @max(count - 1, 1); // Use one less than available to avoid system freeze
-            allocator.free(cpu_count);
-            cpu_count = try std.fmt.allocPrintZ(allocator, "{d}", .{cores_to_use});
-        }
-    } else |_| {
-        // If we can't get the CPU count, stick with default
-    }
+    // if (std.Thread.getCpuCount()) |count| {
+    //     if (count > 1) {
+    //         const cores_to_use = @max(count - 1, 1); // Use one less than available to avoid system freeze
+    //         allocator.free(cpu_count);
+    //         cpu_count = try std.fmt.allocPrintZ(allocator, "{d}", .{cores_to_use});
+    //     }
+    // } else |_| {
+    //     // If we can't get the CPU count, stick with default
+    // }
 
     // Run make (typically 70% of installation time)
     try showInstallProgress("Building Python...", 20);
@@ -374,7 +374,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const python_version = version orelse DEFAULT_PYTHON_VERSION;
 
-    output.print("Installing Python version {s}", .{python_version}) catch {};
+    // output.print("Installing Python version {s}", .{python_version}) catch {};
 
     // Get the installation directory
     const base_install_dir = try getDefaultInstallDir(allocator);
@@ -433,5 +433,4 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     output.print("Python {s} has been successfully installed!", .{python_version}) catch {};
     output.print("Installation path: {s}", .{install_dir}) catch {};
     output.print("This Python version has been pinned 'ZENV_DIR/default-python'", .{}) catch {};
-    output.print("You can install packages with zenv setup commands now", .{}) catch {};
 }
