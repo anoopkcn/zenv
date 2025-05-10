@@ -216,7 +216,7 @@ pub fn main() anyerror!void {
         => {},
     }
 
-    const config_path = "zenv.json"; // Keep config path definition for backward compatibility
+    const config_path = "zenv.json";
 
     const handleError = struct {
         pub fn func(err: anyerror) void {
