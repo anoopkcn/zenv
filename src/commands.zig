@@ -192,7 +192,7 @@ pub fn handleSetupCommand(
     if (flags.skip_hostname_check) {
         output.print("No-host flag detected. Bypassing hostname validation.", .{}) catch {};
     }
-    if (flags.upgrade_env) {
+    if (flags.rebuild_env) {
         output.print("Upgrade flag detected. Will attempt to upgrade existing virtual environment or create new.", .{}) catch {};
     }
     if (flags.init_mode) {
@@ -356,7 +356,7 @@ pub fn handleSetupCommand(
         base_dir,
         &all_required_deps,
         flags.force_deps,
-        flags.upgrade_env,
+        flags.rebuild_env,
         modules_verified,
         flags.use_default_python,
         flags.dev_mode,

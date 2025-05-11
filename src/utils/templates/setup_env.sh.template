@@ -78,10 +78,10 @@ safe_module_load() {
   return 0
 }
 
-# Handle upgrade_env flag
-@@UPGRADE_ENV_VALUE@@ # Sets UPGRADE_ENV shell variable
-if [ "$UPGRADE_ENV" = "true" ]; then
-  ohai "Upgrade flag (--upgrade) detected."
+# Handle rebuild_env flag
+@@REBUILD_ENV_VALUE@@ # Sets REBUILD_ENV shell variable
+if [ "$REBUILD_ENV" = "true" ]; then
+  ohai "Upgrade flag (--rebuild) detected."
   info "Will attempt to upgrade existing Python in venv, or create new if missing/corrupted."
 else
   ohai "Normal setup mode (create if missing/corrupted, use existing if valid)."
@@ -276,7 +276,7 @@ fi
 PERFORM_VENV_CREATION=false
 PERFORM_SELECTIVE_CLEAR=false
 
-if [ "$UPGRADE_ENV" = "true" ]; then
+if [ "$REBUILD_ENV" = "true" ]; then
     if [ "$VENV_STATE" = "VALID_EXISTING" ]; then
         # Check what Python the existing venv is using
         if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
@@ -284,12 +284,12 @@ if [ "$UPGRADE_ENV" = "true" ]; then
             SELECTED_PYTHON_PATH=$(dirname $(dirname $($SELECTED_PYTHON_EXE -c "import sys; print(sys.executable)")))
 
             if [ "$EXISTING_PYTHON_PATH" != "$SELECTED_PYTHON_PATH" ]; then
-                ohai "--upgrade: Detected different Python path ($SELECTED_PYTHON_PATH vs $EXISTING_PYTHON_PATH)"
-                ohai "--upgrade: Recreating virtual environment with new Python"
+                ohai "--rebuild: Detected different Python path ($SELECTED_PYTHON_PATH vs $EXISTING_PYTHON_PATH)"
+                ohai "--rebuild: Recreating virtual environment with new Python"
                 PERFORM_SELECTIVE_CLEAR=true
                 PERFORM_VENV_CREATION=true
             else
-                ohai "--upgrade: Attempting to upgrade existing valid venv $VENV_DIR with $PYTHON_DESCRIPTION..."
+                ohai "--rebuild: Attempting to upgrade existing valid venv $VENV_DIR with $PYTHON_DESCRIPTION..."
                 if "$SELECTED_PYTHON_EXE" -m venv --upgrade "$VENV_DIR"; then
                     success "Successfully upgraded venv."
                 else
@@ -299,22 +299,22 @@ if [ "$UPGRADE_ENV" = "true" ]; then
                 fi
             fi
         else
-            ohai "--upgrade: Cannot determine Python version of existing venv. Recreating..."
+            ohai "--rebuild: Cannot determine Python version of existing venv. Recreating..."
             PERFORM_SELECTIVE_CLEAR=true
             PERFORM_VENV_CREATION=true
         fi
     elif [ "$VENV_STATE" = "NEW" ]; then
-        ohai "--upgrade: Venv directory $VENV_DIR is new or has no venv components. Creating new venv with $PYTHON_DESCRIPTION."
+        ohai "--rebuild: Venv directory $VENV_DIR is new or has no venv components. Creating new venv with $PYTHON_DESCRIPTION."
         PERFORM_VENV_CREATION=true
     elif [ "$VENV_STATE" = "CORRUPTED_OR_INCOMPLETE" ]; then
-        ohai "--upgrade: Existing venv $VENV_DIR seems corrupted/incomplete. Clearing critical components and recreating with $PYTHON_DESCRIPTION."
+        ohai "--rebuild: Existing venv $VENV_DIR seems corrupted/incomplete. Clearing critical components and recreating with $PYTHON_DESCRIPTION."
         PERFORM_SELECTIVE_CLEAR=true
         PERFORM_VENV_CREATION=true
     elif [ "$VENV_STATE" = "NON_EXISTENT" ]; then # Handle if dir wasn't pre-created
-        ohai "--upgrade: Venv directory $VENV_DIR does not exist. Creating new venv with $PYTHON_DESCRIPTION."
+        ohai "--rebuild: Venv directory $VENV_DIR does not exist. Creating new venv with $PYTHON_DESCRIPTION."
         PERFORM_VENV_CREATION=true
     fi
-else # Not using --upgrade flag
+else # Not using --rebuild flag
     if [ "$VENV_STATE" = "VALID_EXISTING" ]; then
         ohai "Using existing valid virtual environment $VENV_DIR."
         # No action needed on venv itself

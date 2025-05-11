@@ -297,7 +297,7 @@ Options for 'zenv setup <name>':
   --uv                     Uses 'uv' instead of 'pip' for package operations.
                            Ensure 'uv' is installed and accessible.
 
-  --upgrade                Attempts to upgrade Python in an existing virtual environment.
+  --rebuild                Attempts to rebuild existing virtual environment.
                            Recreates the environment if it's corrupted or doesn't exist.
 
   --python                 Forces setup to use only the zenv-pinned Python version.
