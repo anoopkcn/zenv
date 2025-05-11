@@ -15,7 +15,7 @@ zig-cache/
 zenv.json
 .zig-cache
 requirements.txt
-test/
+tests
 NOTES.md
 .DS_store
 .envrc

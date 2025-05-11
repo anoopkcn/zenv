@@ -74,7 +74,6 @@ mkdir -p "${INSTALL_DIR}" || abort "Failed to create directory: ${INSTALL_DIR}."
 TMP_DOWNLOAD_PATH=$(mktemp "${TMPDIR:-/tmp}/zenv-download-XXXXXX")
 TMP_EXTRACT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zenv-extract-XXXXXX")
 
-ohai "Downloading..."
 curl -SL --progress-bar --fail -o "${TMP_DOWNLOAD_PATH}" "${DOWNLOAD_URL}" || abort "Download failed"
 
 ohai "Extracting and installing..."
@@ -90,7 +89,7 @@ if [ "$NO_MODIFY_PATH" = "1" ]; then
 elif echo "$PATH" | grep -q "${INSTALL_DIR}"; then
   info "${INSTALL_DIR} is already in your PATH."
 else
-  info "Adding ${INSTALL_DIR} to your PATH..."
+  info "Adding ${INSTALL_DIR} to your PATH"
 
   # For display in messages
   INSTALL_DIR_DISPLAY="${INSTALL_DIR}"
@@ -139,32 +138,15 @@ else
   fi
 
   if [ ${#UPDATED_FILES[@]} -gt 0 ]; then
-    echo
     info "Updated shell configuration files:"
     for file in "${UPDATED_FILES[@]}"; do
       echo "  - $file"
     done
-
-    # Apply the changes immediately
-    info "Applying PATH changes to current shell..."
-    export PATH="$INSTALL_DIR:$PATH"
-
-    if [ "$SHELL_NAME" = "fish" ]; then
-      # For fish shell, we need a different approach for future sessions
-      if command_exists fish; then
-        fish -c "set -gx PATH \"$INSTALL_DIR\" \$PATH"
-      fi
-      info "PATH updated for current session (fish shell configuration will apply on next login)"
-    else
-      success "PATH updated for current session"
-    fi
   else
     info "Add this to your shell config: export PATH=\"${INSTALL_DIR_DISPLAY}:\$PATH\""
-    # Also update the current session
-    export PATH="$INSTALL_DIR:$PATH"
-    info "PATH updated for current session only"
   fi
 fi
 
+success "Source your config file to update current shell."
 success "Run 'zenv help' to get started."
 exit 0
