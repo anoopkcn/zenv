@@ -141,12 +141,13 @@ else
     info "Updated shell configuration files:"
     for file in "${UPDATED_FILES[@]}"; do
       echo "  - $file"
+      info "You should run 'source $file'"
     done
   else
     info "Add this to your shell config: export PATH=\"${INSTALL_DIR_DISPLAY}:\$PATH\""
+    info "Then source the config file"
   fi
 fi
 
-success "Source your config file to update current shell."
 success "Run 'zenv help' to get started."
 exit 0
