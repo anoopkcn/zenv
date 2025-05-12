@@ -154,6 +154,16 @@ Or to run a server:
 zenv run test mkdocs serve
 ```
 
+OR make environment avilable for your editor without activaton:
+
+```bash
+# for vim or neovim
+zenv run test vim 
+
+# for vs code 
+# zenv run test code -n .
+```
+
 ### Registering and Deregistering Environments
 
 A metadata information about the environments are stored at `ZENV_DIR/registry.json`. by default `ZENV_DIR` is `$HOME/.zenv`.
