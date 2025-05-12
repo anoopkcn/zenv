@@ -67,7 +67,7 @@ DOWNLOAD_URL=$(grep '"browser_download_url":' "$api_response_file" | grep -F "${
 rm -f "$api_response_file"; unset api_response_file
 
 [ -z "$DOWNLOAD_URL" ] && abort "Could not find download URL for ${ASSET_NAME} in the latest release."
-ohai "Found download URL: ${DOWNLOAD_URL}"
+ohai "Download URL: ${DOWNLOAD_URL}"
 
 # --- Install Binary ---
 mkdir -p "${INSTALL_DIR}" || abort "Failed to create directory: ${INSTALL_DIR}."
@@ -140,7 +140,7 @@ else
   if [ ${#UPDATED_FILES[@]} -gt 0 ]; then
     info "Updated shell configuration files:"
     for file in "${UPDATED_FILES[@]}"; do
-      echo "  - $file"
+      echo "  $file"
       info "You should run 'source $file'"
     done
   else
