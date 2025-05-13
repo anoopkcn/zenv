@@ -130,9 +130,9 @@ fn createActivationScript(
         var vars_iter = env_config.custom_activate_vars.iterator();
         while (vars_iter.next()) |entry| {
             // Basic quoting for safety, assumes no complex shell injection needed
-            try custom_var_exports.writer().print("export {s}='", .{entry.key_ptr.*});
+            try custom_var_exports.writer().print("export {s}=\"", .{entry.key_ptr.*});
             try template.escapeShellValue(entry.value_ptr.*, custom_var_exports.writer());
-            try custom_var_exports.writer().print("'\n", .{});
+            try custom_var_exports.writer().print("\"\n", .{});
 
             // Add to the unset commands
             try custom_var_unset.writer().print("  unset {s}\n", .{entry.key_ptr.*});
