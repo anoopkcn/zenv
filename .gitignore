@@ -19,3 +19,4 @@ tests
 NOTES.md
 .DS_store
 .envrc
+Makefile
