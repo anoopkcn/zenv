@@ -151,6 +151,8 @@ zenv run test python my_test_file.py
 Or to run a server:
 
 ```bash
+zenv run test jupyter notebook
+# OR
 zenv run test mkdocs serve
 ```
 
