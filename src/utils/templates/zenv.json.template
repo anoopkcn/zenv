@@ -9,8 +9,9 @@
     "dependencies": [],
     "dependency_file": null,
     "setup_commands": [],
-    "custom_activate_vars": {},
-    "activate_commands": []
+    "activate_commands": [],
+    "setup_hook": null,
+    "activate_hook": null
   },
   "dev": {
     "target_machines": ["@@HOSTNAME@@"],
@@ -27,12 +28,11 @@
     "setup_commands": [
       "echo 'Development environment setup complete!'"
     ],
-    "custom_activate_vars": {
-      "DEVELOPMENT": "true"
-    },
     "activate_commands": [
       "echo 'Running custom activation commands for development environment...'",
       "echo 'Current Python: '$(which python)"
-    ]
+    ],
+    "setup_hook": null,
+    "activate_hook": null
   }
 }

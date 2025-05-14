@@ -9,7 +9,8 @@
     "dependencies": [],
     "dependency_file": @@DEV_DEPENDENCY_FILE@@,
     "setup_commands": [],
-    "custom_activate_vars": {},
-    "activate_commands": []
+    "activate_commands": [],
+    "setup_hook": null,
+    "activate_hook": null
   }
 }

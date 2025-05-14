@@ -154,6 +154,10 @@ fn printUsage() void {
         \\  top-level key specifying the storage location for virtual environments.
         \\  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
         \\
+        \\  Hook scripts can be specified using "activate_hook" and "setup_hook" fields,
+        \\  which point to shell scripts that will be copied to the environment directory and
+        \\  executed during activation or setup.
+        \\
         \\Registry (ZENV_DIR/registry.json):
         \\  A global JSON file (path in ZENV_DIR environment variable, typically ~/.zenv)
         \\  that tracks registered environments. This allows 'zenv' commands to manage

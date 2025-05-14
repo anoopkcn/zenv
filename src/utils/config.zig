@@ -48,22 +48,24 @@ pub const EnvironmentConfig = struct {
     dependency_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
     fallback_python: ?[]const u8 = null,
-    custom_activate_vars: StringHashMap([]const u8),
     setup_commands: ?ArrayList([]const u8) = null,
     activate_commands: ?ArrayList([]const u8) = null,
+    activate_hook: ?[]const u8 = null,
+    setup_hook: ?[]const u8 = null,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
             .target_machines = ArrayList([]const u8).init(allocator),
             .modules = ArrayList([]const u8).init(allocator),
             .dependencies = ArrayList([]const u8).init(allocator),
-            .custom_activate_vars = StringHashMap([]const u8).init(allocator),
             .description = null,
             .modules_file = null,
             .dependency_file = null,
             .setup_commands = null,
             .activate_commands = null,
             .fallback_python = null,
+            .activate_hook = null,
+            .setup_hook = null,
         };
     }
 
@@ -76,13 +78,6 @@ pub const EnvironmentConfig = struct {
 
         for (self.dependencies.items) |item| self.dependencies.allocator.free(item);
         self.dependencies.deinit();
-
-        var iter = self.custom_activate_vars.iterator();
-        while (iter.next()) |entry| {
-            self.custom_activate_vars.allocator.free(entry.key_ptr.*);
-            self.custom_activate_vars.allocator.free(entry.value_ptr.*);
-        }
-        self.custom_activate_vars.deinit();
 
         if (self.description) |desc| self.target_machines.allocator.free(desc);
         if (self.modules_file) |mfile| self.target_machines.allocator.free(mfile);
@@ -99,6 +94,8 @@ pub const EnvironmentConfig = struct {
         }
 
         if (self.fallback_python) |py_exec| self.target_machines.allocator.free(py_exec);
+        if (self.activate_hook) |hook| self.target_machines.allocator.free(hook);
+        if (self.setup_hook) |hook| self.target_machines.allocator.free(hook);
     }
 };
 
@@ -282,6 +279,10 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
 
         env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
 
+        env.activate_hook = try Parse.getString(allocator, env_value.object.get("activate_hook") orelse json.Value{ .null = {} }, null);
+
+        env.setup_hook = try Parse.getString(allocator, env_value.object.get("setup_hook") orelse json.Value{ .null = {} }, null);
+
         // Optional arrays
         if (env_value.object.get("modules")) |mods| {
             env.modules = try Parse.getStringArray(allocator, mods);
@@ -289,10 +290,6 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
 
         if (env_value.object.get("dependencies")) |deps| {
             env.dependencies = try Parse.getStringArray(allocator, deps);
-        }
-
-        if (env_value.object.get("custom_activate_vars")) |vars| {
-            env.custom_activate_vars = try Parse.getStringMap(allocator, vars);
         }
 
         if (env_value.object.get("setup_commands")) |cmds| {

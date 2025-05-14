@@ -57,9 +57,9 @@ source @@VENV_PATH@@/bin/activate
 export PYTHONDONTWRITEBYTECODE=1
 @@ZENV_ENV_DIR@@
 
-@@CUSTOM_VAR_EXPORTS@@
-
 @@ACTIVATE_COMMANDS_BLOCK@@
+
+@@ACTIVATE_HOOK_BLOCK@@
 
 # echo "Info: Environment '@@ENV_NAME@@' activated"
 # echo "Info: Description@@ENV_DESCRIPTION@@"
@@ -78,8 +78,7 @@ deactivate_all() {
     module --force purge || echo "Warning: Failed to purge modules" >&2
   fi
 
-  # Then unset any custom environment variables
-  @@CUSTOM_VAR_UNSET@@
+  # No custom environment variables to unset
 
   # Unset PYTHONDONTWRITEBYTECODE
   if [ -n "$PYTHONDONTWRITEBYTECODE" ]; then

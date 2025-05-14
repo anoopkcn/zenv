@@ -40,6 +40,66 @@ fn createActivationScript(
     // Check if base_dir is absolute
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
+    // Create scripts directory for hook scripts if needed
+    var scripts_rel_path: []const u8 = undefined;
+    if (is_absolute_base_dir) {
+        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
+    } else {
+        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
+    }
+    defer allocator.free(scripts_rel_path);
+
+    // Create the scripts directory
+    if (is_absolute_base_dir) {
+        std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
+            if (err != error.PathAlreadyExists) {
+                output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
+                // Continue anyway, as this is not a critical error
+            }
+        };
+    } else {
+        fs.cwd().makePath(scripts_rel_path) catch |err| {
+            output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
+            // Continue anyway, as this is not a critical error
+        };
+    }
+
+    // Handle activate_hook script copying if present
+    var activate_hook_block = std.ArrayList(u8).init(allocator);
+    defer activate_hook_block.deinit();
+    var activate_hook_path: ?[]const u8 = null;
+    defer if (activate_hook_path) |path| allocator.free(path);
+
+    if (env_config.activate_hook) |hook_path| {
+        // Copy the hook script to the environment's scripts directory
+        if (copyHookScript(allocator, hook_path, scripts_rel_path, "activate_hook.sh", is_absolute_base_dir, cwd_path)) |dest_path| {
+            defer allocator.free(dest_path);
+            activate_hook_path = try allocator.dupe(u8, dest_path);
+
+            try activate_hook_block.writer().print(
+                \\
+                \\# Execute custom activation hook script if it exists
+                \\if [ -f "{s}" ]; then
+                \\  echo "Info: Running activation hook script: {s}"
+                \\  # Source the hook script to maintain environment variables
+                \\  source "{s}" || echo "Warning: Activation hook script failed with exit code $?"
+                \\else
+                \\  echo "Warning: Activation hook script not found at {s}"
+                \\fi
+                \\
+            , .{ dest_path, dest_path, dest_path, dest_path });
+        } else |err| {
+            output.printError("Failed to copy activation hook script: {s}", .{@errorName(err)}) catch {};
+            // Continue anyway, but add a warning in the script
+            try activate_hook_block.writer().print(
+                \\
+                \\# Warning: Failed to copy activation hook script from '{s}'
+                \\echo "Warning: Failed to copy activation hook script from '{s}'"
+                \\
+            , .{ hook_path, hook_path });
+        }
+    }
+
     // Generate the activation script path using base_dir
     var script_rel_path: []const u8 = undefined;
     var script_abs_path: []const u8 = undefined;
@@ -117,33 +177,10 @@ fn createActivationScript(
     defer allocator.free(module_loading_slice);
     try replacements.put("MODULE_LOADING_BLOCK", module_loading_slice);
 
-    // Generate custom variable exports
-    var custom_var_exports = std.ArrayList(u8).init(allocator);
-    defer custom_var_exports.deinit();
-    var custom_var_unset = std.ArrayList(u8).init(allocator);
-    defer custom_var_unset.deinit();
-
-    if (env_config.custom_activate_vars.count() > 0) {
-        try custom_var_exports.writer().print("# Set custom environment variables\n", .{});
-        try custom_var_unset.writer().print("  echo \"Unsetting custom variables...\"\n", .{});
-
-        var vars_iter = env_config.custom_activate_vars.iterator();
-        while (vars_iter.next()) |entry| {
-            // Basic quoting for safety, assumes no complex shell injection needed
-            try custom_var_exports.writer().print("export {s}=\"", .{entry.key_ptr.*});
-            try template.escapeShellValue(entry.value_ptr.*, custom_var_exports.writer());
-            try custom_var_exports.writer().print("\"\n", .{});
-
-            // Add to the unset commands
-            try custom_var_unset.writer().print("  unset {s}\n", .{entry.key_ptr.*});
-        }
-        try custom_var_exports.writer().print("\n", .{});
-    }
-
-    // Get the owned slices for exports and unsets
-    const exports_slice = try custom_var_exports.toOwnedSlice();
+    // Create empty placeholders for template compatibility
+    const exports_slice = try allocator.dupe(u8, "");
     defer allocator.free(exports_slice);
-    const unset_slice = try custom_var_unset.toOwnedSlice();
+    const unset_slice = try allocator.dupe(u8, "");
     defer allocator.free(unset_slice);
 
     try replacements.put("CUSTOM_VAR_EXPORTS", exports_slice);
@@ -164,6 +201,11 @@ fn createActivationScript(
     const activate_commands_slice = try activate_commands_block.toOwnedSlice();
     defer allocator.free(activate_commands_slice);
     try replacements.put("ACTIVATE_COMMANDS_BLOCK", activate_commands_slice);
+
+    // Add the hook script block to replacements
+    const activate_hook_slice = try activate_hook_block.toOwnedSlice();
+    defer allocator.free(activate_hook_slice);
+    try replacements.put("ACTIVATE_HOOK_BLOCK", activate_hook_slice);
 
     // Add optional description
     var description_text = std.ArrayList(u8).init(allocator);
@@ -192,4 +234,65 @@ fn createActivationScript(
     try file.chmod(0o755);
 
     output.print("Activation script created at {s}", .{script_abs_path}) catch {};
+}
+
+// Helper function to copy hook scripts to the environment's scripts directory
+fn copyHookScript(
+    allocator: Allocator,
+    hook_path: []const u8,
+    scripts_dir: []const u8,
+    dest_filename: []const u8,
+    is_absolute_base_dir: bool,
+    cwd_path: []const u8,
+) ![]const u8 {
+    // First, check if hook script exists
+    const source_exists = blk: {
+        fs.cwd().access(hook_path, .{}) catch |err| {
+            if (err == error.FileNotFound) {
+                output.printError("Hook script not found: {s}", .{hook_path}) catch {};
+                return err;
+            }
+            output.printError("Error accessing hook script {s}: {s}", .{ hook_path, @errorName(err) }) catch {};
+            return err;
+        };
+        break :blk true;
+    };
+
+    if (!source_exists) {
+        return error.FileNotFound;
+    }
+
+    // Construct destination path
+    var dest_path: []const u8 = undefined;
+    if (is_absolute_base_dir) {
+        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
+    } else {
+        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, scripts_dir, dest_filename });
+    }
+    errdefer allocator.free(dest_path);
+
+    // Copy the script file
+    var source_file = try fs.cwd().openFile(hook_path, .{});
+    defer source_file.close();
+
+    var dest_file = if (is_absolute_base_dir)
+        try std.fs.createFileAbsolute(dest_path, .{})
+    else
+        try fs.cwd().createFile(dest_path, .{});
+    defer dest_file.close();
+
+    // Copy the content
+    var buffer: [8192]u8 = undefined;
+    var bytes_read: usize = 0;
+    while (true) {
+        bytes_read = try source_file.read(&buffer);
+        if (bytes_read == 0) break;
+        try dest_file.writeAll(buffer[0..bytes_read]);
+    }
+
+    // Make the destination file executable
+    try dest_file.chmod(0o755);
+
+    output.print("Copied hook script from {s} to {s}", .{ hook_path, dest_path }) catch {};
+    return dest_path;
 }

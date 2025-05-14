@@ -427,6 +427,46 @@ fn validateEnvironment(
         }
     }
 
+    // activate_hook: optional string
+    if (value.object.get("activate_hook")) |hook| {
+        if (hook != .string and hook != .null) {
+            const position = try findValuePosition(content, hook);
+            const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+            try errors.append(ValidationError{
+                .line = position.line,
+                .column = position.column,
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "In environment '{s}', 'activate_hook' must be a string or null",
+                    .{env_name},
+                ),
+                .context = context,
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate_hook", .{path}),
+            });
+        }
+    }
+
+    // setup_hook: optional string
+    if (value.object.get("setup_hook")) |hook| {
+        if (hook != .string and hook != .null) {
+            const position = try findValuePosition(content, hook);
+            const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+            try errors.append(ValidationError{
+                .line = position.line,
+                .column = position.column,
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "In environment '{s}', 'setup_hook' must be a string or null",
+                    .{env_name},
+                ),
+                .context = context,
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup_hook", .{path}),
+            });
+        }
+    }
+
     // setup_commands: optional array of strings
     if (value.object.get("setup_commands")) |commands| {
         if (commands != .array and commands != .null) {
@@ -499,49 +539,6 @@ fn validateEnvironment(
                         ),
                         .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.activate_commands[{d}]", .{ path, i }),
-                    });
-                }
-            }
-        }
-    }
-
-    // custom_activate_vars: object with string values
-    if (value.object.get("custom_activate_vars")) |vars| {
-        if (vars != .object) {
-            const position = try findValuePosition(content, vars);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
-            try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'custom_activate_vars' must be an object",
-                    .{env_name},
-                ),
-                .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.custom_activate_vars", .{path}),
-            });
-        } else {
-            var var_it = vars.object.iterator();
-            while (var_it.next()) |var_entry| {
-                const var_name = var_entry.key_ptr.*;
-                const var_value = var_entry.value_ptr.*;
-
-                if (var_value != .string) {
-                    const position = try findValuePosition(content, var_value);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
-                    try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', custom_activate_vars.{s} must be a string",
-                            .{ env_name, var_name },
-                        ),
-                        .context = context,
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.custom_activate_vars.{s}", .{ path, var_name }),
                     });
                 }
             }

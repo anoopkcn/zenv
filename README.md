@@ -160,9 +160,9 @@ OR make environment avilable for your editor without activaton:
 
 ```bash
 # for vim or neovim
-zenv run test vim 
+zenv run test vim
 
-# for vs code 
+# for vs code
 # zenv run test code -n .
 ```
 
@@ -224,10 +224,9 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "dependency_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
     "dependencies": ["<package_name_version>"],
     "setup_commands": ["<custom commands to run during setup process>"],
-    "custom_activate_vars": {
-      "ENV_VAR_NAME": "value"
-    },
-    "activate_commands": ["<custom commands to run during activation process>"]
+    "activate_commands": ["<custom commands to run during activation process>"],
+    "setup_hook": "<path_to_custom_setup_script_or_null>",
+    "activate_hook": "<path_to_custom_activation_script_or_null>"
   },
   "<another_name>": {
     "target_machines": ["<anothor_machine_identifier>"]
@@ -236,6 +235,8 @@ One can have multiple environment configurations in the same `zenv.json` file an
 ```
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
+
+For custom scripts, you can use `activate_hook` and `setup_hook` to specify paths to shell scripts that will be copied to the environment's directory and executed during activation or setup. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
 The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
 

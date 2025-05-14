@@ -560,6 +560,9 @@ fi
 # Run custom setup commands if provided
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
 
+# Run setup hook script if provided
+@@SETUP_HOOK_BLOCK@@
+
 success "Setup completed successfully for Environment '@@ENV_NAME@@'"
 success "To activate, run: source $(realpath @@ACTIVATE_SCRIPT_PATH@@)"
 success "Or from anywhere: source \$(zenv activate @@ENV_NAME@@)"
