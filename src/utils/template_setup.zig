@@ -245,7 +245,7 @@ fn createSetupScript(
 
         // Copy the script to the environment's scripts directory
         const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
-            output.printError("Failed to copy setup script '{s}': {s}", .{hook_path, @errorName(err)}) catch {};
+            output.printError("Failed to copy setup script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
             // Continue anyway, but add a warning in the script
             try setup_hook_block.writer().print(
                 \\

@@ -295,39 +295,39 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         if (env_value.object.get("setup")) |setup_value| {
             if (setup_value == .object) {
                 var setup_config = ScriptConfig.init();
-                
+
                 // Parse script field
                 if (setup_value.object.get("script")) |script_value| {
                     setup_config.script = try Parse.getString(allocator, script_value, null);
                 }
-                
+
                 // Parse commands array
                 if (setup_value.object.get("commands")) |cmds_value| {
                     if (cmds_value != .null) {
                         setup_config.commands = try Parse.getStringArray(allocator, cmds_value);
                     }
                 }
-                
+
                 env.setup = setup_config;
             }
         }
-        
+
         if (env_value.object.get("activate")) |activate_value| {
             if (activate_value == .object) {
                 var activate_config = ScriptConfig.init();
-                
+
                 // Parse script field
                 if (activate_value.object.get("script")) |script_value| {
                     activate_config.script = try Parse.getString(allocator, script_value, null);
                 }
-                
+
                 // Parse commands array
                 if (activate_value.object.get("commands")) |cmds_value| {
                     if (cmds_value != .null) {
                         activate_config.commands = try Parse.getStringArray(allocator, cmds_value);
                     }
                 }
-                
+
                 env.activate = activate_config;
             }
         }

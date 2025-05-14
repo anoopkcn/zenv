@@ -93,7 +93,7 @@ fn createActivationScript(
                 \\
                 \\echo "Warning: Failed to copy activation script from '{s}'"
                 \\
-            , .{ hook_path });
+            , .{hook_path});
         }
     }
 
