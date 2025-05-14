@@ -63,7 +63,6 @@ export PYTHONDONTWRITEBYTECODE=1
 
 # Add deactivate_all function to completely deactivate
 deactivate_all() {
-  # Check if deactivate function exists (from venv)
   if command -v deactivate >/dev/null 2>&1; then
     echo "Info: Running venv deactivate"
     deactivate
@@ -72,10 +71,8 @@ deactivate_all() {
   # Purge modules if module command exists
   if command -v module >/dev/null 2>&1; then
     echo "Info: Purging loaded modules..."
-    module --force purge || echo "Warning: Failed to purge modules" >&2
+    module purge || echo "Warning: Failed to purge modules" >&2
   fi
-
-  # No custom environment variables to unset
 
   # Unset PYTHONDONTWRITEBYTECODE
   if [ -n "$PYTHONDONTWRITEBYTECODE" ]; then
