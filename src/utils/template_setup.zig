@@ -233,23 +233,24 @@ fn createSetupScript(
         };
     }
 
-    // Handle setup_hook script copying if present
+    // Handle setup hook script copying if present
     var setup_hook_block = std.ArrayList(u8).init(allocator);
     defer setup_hook_block.deinit();
     var setup_hook_path: ?[]const u8 = null;
     defer if (setup_hook_path) |path| allocator.free(path);
 
-    if (env_config.setup_hook) |hook_path| {
-        output.print("Processing setup hook: '{s}'", .{hook_path}) catch {};
+    if (env_config.setup != null and env_config.setup.?.script != null) {
+        const hook_path = env_config.setup.?.script.?;
+        output.print("Processing setup script: '{s}'", .{hook_path}) catch {};
 
-        // Copy the hook script to the environment's scripts directory
+        // Copy the script to the environment's scripts directory
         const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
-            output.printError("Failed to copy setup hook script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
+            output.printError("Failed to copy setup script '{s}': {s}", .{hook_path, @errorName(err)}) catch {};
             // Continue anyway, but add a warning in the script
             try setup_hook_block.writer().print(
                 \\
-                \\# Warning: Failed to copy setup hook script from '{s}'
-                \\echo "Warning: Failed to copy setup hook script from '{s}'"
+                \\# Warning: Failed to copy setup script from '{s}'
+                \\echo "Warning: Failed to copy setup script from '{s}'"
                 \\
             , .{ hook_path, hook_path });
 
@@ -261,12 +262,13 @@ fn createSetupScript(
 
         try setup_hook_block.writer().print(
             \\
-            \\# Execute custom setup hook script if it exists
+            \\# Execute custom setup script if it exists
             \\if [ -f "{s}" ]; then
-            \\  echo "Info: Running setup hook script: {s}"
-            \\  source "{s}" || echo "Warning: Setup hook script failed with exit code $?"
+            \\  echo "Info: Running setup script: {s}"
+            \\  # Source the script to maintain environment variables
+            \\  source "{s}" || echo "Warning: Setup script failed with exit code $?"
             \\else
-            \\  echo "Warning: Setup hook script not found at {s}"
+            \\  echo "Warning: Setup script not found at {s}"
             \\fi
             \\
         , .{ dest_path, dest_path, dest_path, dest_path });
@@ -414,11 +416,11 @@ fn createSetupScript(
     defer custom_setup_commands_block.deinit();
     const custom_writer = custom_setup_commands_block.writer();
 
-    if (env_config.setup_commands != null and env_config.setup_commands.?.items.len > 0) {
+    if (env_config.setup != null and env_config.setup.?.commands != null and env_config.setup.?.commands.?.items.len > 0) {
         try custom_writer.print("echo 'Info: Step 5: Running custom setup commands'\n", .{});
         try custom_writer.print("# Activate again just in case custom commands need the venv\n", .{});
         try custom_writer.print("source {s}/bin/activate\n", .{venv_dir});
-        for (env_config.setup_commands.?.items) |cmd| {
+        for (env_config.setup.?.commands.?.items) |cmd| {
             try custom_writer.print("{s}\n", .{cmd});
         }
         try custom_writer.print("\n", .{});

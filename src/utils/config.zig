@@ -40,6 +40,26 @@ fn generateSHA1ID(
 // Config Structs
 // =======================
 
+pub const ScriptConfig = struct {
+    commands: ?ArrayList([]const u8) = null,
+    script: ?[]const u8 = null,
+
+    pub fn init() ScriptConfig {
+        return .{
+            .commands = null,
+            .script = null,
+        };
+    }
+
+    pub fn deinit(self: *ScriptConfig, allocator: Allocator) void {
+        if (self.commands) |*cmds| {
+            for (cmds.items) |item| allocator.free(item);
+            cmds.deinit();
+        }
+        if (self.script) |script_path| allocator.free(script_path);
+    }
+};
+
 pub const EnvironmentConfig = struct {
     target_machines: ArrayList([]const u8),
     description: ?[]const u8 = null,
@@ -48,10 +68,8 @@ pub const EnvironmentConfig = struct {
     dependency_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
     fallback_python: ?[]const u8 = null,
-    setup_commands: ?ArrayList([]const u8) = null,
-    activate_commands: ?ArrayList([]const u8) = null,
-    activate_hook: ?[]const u8 = null,
-    setup_hook: ?[]const u8 = null,
+    setup: ?ScriptConfig = null,
+    activate: ?ScriptConfig = null,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
@@ -61,11 +79,9 @@ pub const EnvironmentConfig = struct {
             .description = null,
             .modules_file = null,
             .dependency_file = null,
-            .setup_commands = null,
-            .activate_commands = null,
             .fallback_python = null,
-            .activate_hook = null,
-            .setup_hook = null,
+            .setup = null,
+            .activate = null,
         };
     }
 
@@ -83,19 +99,15 @@ pub const EnvironmentConfig = struct {
         if (self.modules_file) |mfile| self.target_machines.allocator.free(mfile);
         if (self.dependency_file) |req| self.target_machines.allocator.free(req);
 
-        if (self.setup_commands) |*cmds| {
-            for (cmds.items) |item| cmds.allocator.free(item);
-            cmds.deinit();
+        if (self.setup) |*setup_config| {
+            setup_config.deinit(self.target_machines.allocator);
         }
 
-        if (self.activate_commands) |*cmds| {
-            for (cmds.items) |item| cmds.allocator.free(item);
-            cmds.deinit();
+        if (self.activate) |*activate_config| {
+            activate_config.deinit(self.target_machines.allocator);
         }
 
         if (self.fallback_python) |py_exec| self.target_machines.allocator.free(py_exec);
-        if (self.activate_hook) |hook| self.target_machines.allocator.free(hook);
-        if (self.setup_hook) |hook| self.target_machines.allocator.free(hook);
     }
 };
 
@@ -279,9 +291,46 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
 
         env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
 
-        env.activate_hook = try Parse.getString(allocator, env_value.object.get("activate_hook") orelse json.Value{ .null = {} }, null);
-
-        env.setup_hook = try Parse.getString(allocator, env_value.object.get("setup_hook") orelse json.Value{ .null = {} }, null);
+        // Parse setup and activate script configs
+        if (env_value.object.get("setup")) |setup_value| {
+            if (setup_value == .object) {
+                var setup_config = ScriptConfig.init();
+                
+                // Parse script field
+                if (setup_value.object.get("script")) |script_value| {
+                    setup_config.script = try Parse.getString(allocator, script_value, null);
+                }
+                
+                // Parse commands array
+                if (setup_value.object.get("commands")) |cmds_value| {
+                    if (cmds_value != .null) {
+                        setup_config.commands = try Parse.getStringArray(allocator, cmds_value);
+                    }
+                }
+                
+                env.setup = setup_config;
+            }
+        }
+        
+        if (env_value.object.get("activate")) |activate_value| {
+            if (activate_value == .object) {
+                var activate_config = ScriptConfig.init();
+                
+                // Parse script field
+                if (activate_value.object.get("script")) |script_value| {
+                    activate_config.script = try Parse.getString(allocator, script_value, null);
+                }
+                
+                // Parse commands array
+                if (activate_value.object.get("commands")) |cmds_value| {
+                    if (cmds_value != .null) {
+                        activate_config.commands = try Parse.getStringArray(allocator, cmds_value);
+                    }
+                }
+                
+                env.activate = activate_config;
+            }
+        }
 
         // Optional arrays
         if (env_value.object.get("modules")) |mods| {
@@ -292,17 +341,7 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
             env.dependencies = try Parse.getStringArray(allocator, deps);
         }
 
-        if (env_value.object.get("setup_commands")) |cmds| {
-            if (cmds != .null) {
-                env.setup_commands = try Parse.getStringArray(allocator, cmds);
-            }
-        }
-
-        if (env_value.object.get("activate_commands")) |cmds| {
-            if (cmds != .null) {
-                env.activate_commands = try Parse.getStringArray(allocator, cmds);
-            }
-        }
+        // Setup and activate fields are now handled by the ScriptConfig parsing above
 
         // Add to environments with duped key
         const env_key = try allocator.dupe(u8, env_name);

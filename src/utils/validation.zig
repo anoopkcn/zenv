@@ -427,10 +427,10 @@ fn validateEnvironment(
         }
     }
 
-    // activate_hook: optional string
-    if (value.object.get("activate_hook")) |hook| {
-        if (hook != .string and hook != .null) {
-            const position = try findValuePosition(content, hook);
+    // setup: optional object with commands and script
+    if (value.object.get("setup")) |setup_obj| {
+        if (setup_obj != .object and setup_obj != .null) {
+            const position = try findValuePosition(content, setup_obj);
             const context = getContextAroundPosition(allocator, content, position.line) catch null;
 
             try errors.append(ValidationError{
@@ -438,56 +438,17 @@ fn validateEnvironment(
                 .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
-                    "In environment '{s}', 'activate_hook' must be a string or null",
+                    "In environment '{s}', 'setup' must be an object or null",
                     .{env_name},
                 ),
                 .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate_hook", .{path}),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup", .{path}),
             });
-        }
-    }
-
-    // setup_hook: optional string
-    if (value.object.get("setup_hook")) |hook| {
-        if (hook != .string and hook != .null) {
-            const position = try findValuePosition(content, hook);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
-            try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'setup_hook' must be a string or null",
-                    .{env_name},
-                ),
-                .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup_hook", .{path}),
-            });
-        }
-    }
-
-    // setup_commands: optional array of strings
-    if (value.object.get("setup_commands")) |commands| {
-        if (commands != .array and commands != .null) {
-            const position = try findValuePosition(content, commands);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
-            try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'setup_commands' must be an array or null",
-                    .{env_name},
-                ),
-                .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup_commands", .{path}),
-            });
-        } else if (commands == .array) {
-            for (commands.array.items, 0..) |cmd, i| {
-                if (cmd != .string) {
-                    const position = try findValuePosition(content, cmd);
+        } else if (setup_obj == .object) {
+            // Validate script field
+            if (setup_obj.object.get("script")) |script| {
+                if (script != .string and script != .null) {
+                    const position = try findValuePosition(content, script);
                     const context = getContextAroundPosition(allocator, content, position.line) catch null;
 
                     try errors.append(ValidationError{
@@ -495,38 +456,19 @@ fn validateEnvironment(
                         .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
-                            "In environment '{s}', 'setup_commands[{d}]' must be a string",
-                            .{ env_name, i },
+                            "In environment '{s}', 'setup.script' must be a string or null",
+                            .{env_name},
                         ),
                         .context = context,
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.setup_commands[{d}]", .{ path, i }),
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.script", .{path}),
                     });
                 }
             }
-        }
-    }
 
-    // activate_commands: optional array of strings
-    if (value.object.get("activate_commands")) |commands| {
-        if (commands != .array and commands != .null) {
-            const position = try findValuePosition(content, commands);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
-            try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'activate_commands' must be an array or null",
-                    .{env_name},
-                ),
-                .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate_commands", .{path}),
-            });
-        } else if (commands == .array) {
-            for (commands.array.items, 0..) |cmd, i| {
-                if (cmd != .string) {
-                    const position = try findValuePosition(content, cmd);
+            // Validate commands field
+            if (setup_obj.object.get("commands")) |commands| {
+                if (commands != .array and commands != .null) {
+                    const position = try findValuePosition(content, commands);
                     const context = getContextAroundPosition(allocator, content, position.line) catch null;
 
                     try errors.append(ValidationError{
@@ -534,14 +476,158 @@ fn validateEnvironment(
                         .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
-                            "In environment '{s}', 'activate_commands[{d}]' must be a string",
-                            .{ env_name, i },
+                            "In environment '{s}', 'setup.commands' must be an array or null",
+                            .{env_name},
                         ),
                         .context = context,
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.activate_commands[{d}]", .{ path, i }),
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands", .{path}),
+                    });
+                } else if (commands == .array) {
+                    for (commands.array.items, 0..) |cmd, i| {
+                        if (cmd != .string) {
+                            const position = try findValuePosition(content, cmd);
+                            const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+                            try errors.append(ValidationError{
+                                .line = position.line,
+                                .column = position.column,
+                                .message = try std.fmt.allocPrint(
+                                    allocator,
+                                    "In environment '{s}', 'setup.commands[{d}]' must be a string",
+                                    .{ env_name, i },
+                                ),
+                                .context = context,
+                                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands[{d}]", .{ path, i }),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // activate: optional object with commands and script
+    if (value.object.get("activate")) |activate_obj| {
+        if (activate_obj != .object and activate_obj != .null) {
+            const position = try findValuePosition(content, activate_obj);
+            const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+            try errors.append(ValidationError{
+                .line = position.line,
+                .column = position.column,
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "In environment '{s}', 'activate' must be an object or null",
+                    .{env_name},
+                ),
+                .context = context,
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate", .{path}),
+            });
+        } else if (activate_obj == .object) {
+            // Validate script field
+            if (activate_obj.object.get("script")) |script| {
+                if (script != .string and script != .null) {
+                    const position = try findValuePosition(content, script);
+                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+                    try errors.append(ValidationError{
+                        .line = position.line,
+                        .column = position.column,
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "In environment '{s}', 'activate.script' must be a string or null",
+                            .{env_name},
+                        ),
+                        .context = context,
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.script", .{path}),
                     });
                 }
             }
+
+            // Validate commands field
+            if (activate_obj.object.get("commands")) |commands| {
+                if (commands != .array and commands != .null) {
+                    const position = try findValuePosition(content, commands);
+                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+                    try errors.append(ValidationError{
+                        .line = position.line,
+                        .column = position.column,
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "In environment '{s}', 'activate.commands' must be an array or null",
+                            .{env_name},
+                        ),
+                        .context = context,
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands", .{path}),
+                    });
+                } else if (commands == .array) {
+                    for (commands.array.items, 0..) |cmd, i| {
+                        if (cmd != .string) {
+                            const position = try findValuePosition(content, cmd);
+                            const context = getContextAroundPosition(allocator, content, position.line) catch null;
+
+                            try errors.append(ValidationError{
+                                .line = position.line,
+                                .column = position.column,
+                                .message = try std.fmt.allocPrint(
+                                    allocator,
+                                    "In environment '{s}', 'activate.commands[{d}]' must be a string",
+                                    .{ env_name, i },
+                                ),
+                                .context = context,
+                                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands[{d}]", .{ path, i }),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Whitelist approach: only allow specific fields in environment configuration
+    const allowed_fields = [_][]const u8{
+        "target_machines",
+        "description",
+        "modules",
+        "modules_file",
+        "dependencies",
+        "dependency_file",
+        "fallback_python",
+        "setup",
+        "activate"
+    };
+
+    // Check each field in the environment config
+    var field_iter = value.object.iterator();
+    while (field_iter.next()) |entry| {
+        const field_name = entry.key_ptr.*;
+
+        // Check if field is in the allowed list
+        var is_allowed = false;
+        for (allowed_fields) |allowed| {
+            if (std.mem.eql(u8, field_name, allowed)) {
+                is_allowed = true;
+                break;
+            }
+        }
+
+        // If not allowed, add validation error
+        if (!is_allowed) {
+            const field_position = try findValuePosition(content, entry.value_ptr.*);
+            const context = getContextAroundPosition(allocator, content, field_position.line) catch null;
+
+            try errors.append(ValidationError{
+                .line = field_position.line,
+                .column = field_position.column,
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "In environment '{s}', '{s}' is not a recognized field.",
+                    .{ env_name, field_name },
+                ),
+                .context = context,
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, field_name }),
+            });
         }
     }
 }

@@ -64,39 +64,36 @@ fn createActivationScript(
         };
     }
 
-    // Handle activate_hook script copying if present
+    // Handle activation script copying if present
     var activate_hook_block = std.ArrayList(u8).init(allocator);
     defer activate_hook_block.deinit();
     var activate_hook_path: ?[]const u8 = null;
     defer if (activate_hook_path) |path| allocator.free(path);
 
-    if (env_config.activate_hook) |hook_path| {
-        // Copy the hook script to the environment's scripts directory
+    if (env_config.activate != null and env_config.activate.?.script != null) {
+        const hook_path = env_config.activate.?.script.?;
+        // Copy the script to the environment's scripts directory
         if (copyHookScript(allocator, hook_path, scripts_rel_path, "activate_hook.sh", is_absolute_base_dir, cwd_path)) |dest_path| {
             defer allocator.free(dest_path);
             activate_hook_path = try allocator.dupe(u8, dest_path);
 
             try activate_hook_block.writer().print(
                 \\
-                \\# Execute custom activation hook script if it exists
                 \\if [ -f "{s}" ]; then
-                \\  echo "Info: Running activation hook script: {s}"
-                \\  # Source the hook script to maintain environment variables
-                \\  source "{s}" || echo "Warning: Activation hook script failed with exit code $?"
+                \\  source "{s}" || echo "Warning: Activation script failed with exit code $?"
                 \\else
-                \\  echo "Warning: Activation hook script not found at {s}"
+                \\  echo "Warning: Activation script not found at {s}"
                 \\fi
                 \\
-            , .{ dest_path, dest_path, dest_path, dest_path });
+            , .{ dest_path, dest_path, dest_path });
         } else |err| {
-            output.printError("Failed to copy activation hook script: {s}", .{@errorName(err)}) catch {};
+            output.printError("Failed to copy activation script: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, but add a warning in the script
             try activate_hook_block.writer().print(
                 \\
-                \\# Warning: Failed to copy activation hook script from '{s}'
-                \\echo "Warning: Failed to copy activation hook script from '{s}'"
+                \\echo "Warning: Failed to copy activation script from '{s}'"
                 \\
-            , .{ hook_path, hook_path });
+            , .{ hook_path });
         }
     }
 
@@ -190,9 +187,9 @@ fn createActivationScript(
     var activate_commands_block = std.ArrayList(u8).init(allocator);
     defer activate_commands_block.deinit();
 
-    if (env_config.activate_commands != null and env_config.activate_commands.?.items.len > 0) {
+    if (env_config.activate != null and env_config.activate.?.commands != null and env_config.activate.?.commands.?.items.len > 0) {
         try activate_commands_block.writer().print("# Run custom activation commands\n", .{});
-        for (env_config.activate_commands.?.items) |cmd| {
+        for (env_config.activate.?.commands.?.items) |cmd| {
             try activate_commands_block.writer().print("{s}\n", .{cmd});
         }
         try activate_commands_block.writer().print("\n", .{});

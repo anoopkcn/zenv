@@ -8,9 +8,13 @@
     "modules_file":null,
     "dependencies": [],
     "dependency_file": @@DEV_DEPENDENCY_FILE@@,
-    "setup_commands": [],
-    "setup_hook": null,
-    "activate_commands": [],
-    "activate_hook": null
+    "setup": {
+      "commands": [],
+      "script": null
+    },
+    "activate": {
+      "commands": [],
+      "script": null
+    }
   }
 }
