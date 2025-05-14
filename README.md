@@ -90,8 +90,7 @@ zenv setup <name>
 }
 ```
 
-Check the [Configuration Reference](#configuration-reference) for full list of key-values
-The optional `dependency_file` which can be (`requirements.txt` or a `pyproject.toml` file). If you run `zenv init` this will be automatically populated according to what is in your project.
+Check the [Configuration Reference](#configuration-reference) for full list of key-values. The optional `dependency_file` can be `requirements.txt` OR  `pyproject.toml` file. If you run `zenv init` then it will be automatically populated according to what is found in the project.
 
 ### Listing environments
 
@@ -223,13 +222,13 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
     "dependencies": ["<package name with or without version>"],
     "setup": {
-          "commands": ["<list of shell commands which is run during setup>"],
-          "script": "<path to a shell script which is run during setup>"
-        },
-        "activate": {
-          "commands": ["<list of shell commands which is run during activation>"],
-          "script": "<path to a shell script which will be run during activation>"
-        }
+      "commands": ["<list of shell commands which is run during setup>"],
+      "script": "<path to a shell script which is run during setup>"
+    },
+    "activate": {
+      "commands": ["<list of shell commands which is run during activation>"],
+      "script": "<path to a shell script which will be run during activation>"
+    }
   },
   "<another_name>": {
     "target_machines": ["<anothor machine identifier>"]
