@@ -245,14 +245,24 @@ fn copyHookScript(
     is_absolute_base_dir: bool,
     cwd_path: []const u8,
 ) ![]const u8 {
-    // First, check if hook script exists
+    // Determine if the hook_path is absolute or relative
+    const resolved_hook_path = if (std.fs.path.isAbsolute(hook_path))
+        hook_path
+    else
+        try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
+
+    defer if (!std.fs.path.isAbsolute(hook_path)) allocator.free(resolved_hook_path);
+
+    output.print("Looking for hook script at: {s}", .{resolved_hook_path}) catch {};
+
+    // Check if hook script exists
     const source_exists = blk: {
-        fs.cwd().access(hook_path, .{}) catch |err| {
+        fs.cwd().access(resolved_hook_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                output.printError("Hook script not found: {s}", .{hook_path}) catch {};
+                output.printError("Hook script not found: {s}", .{resolved_hook_path}) catch {};
                 return err;
             }
-            output.printError("Error accessing hook script {s}: {s}", .{ hook_path, @errorName(err) }) catch {};
+            output.printError("Error accessing hook script {s}: {s}", .{ resolved_hook_path, @errorName(err) }) catch {};
             return err;
         };
         break :blk true;
@@ -272,7 +282,7 @@ fn copyHookScript(
     errdefer allocator.free(dest_path);
 
     // Copy the script file
-    var source_file = try fs.cwd().openFile(hook_path, .{});
+    var source_file = try fs.cwd().openFile(resolved_hook_path, .{});
     defer source_file.close();
 
     var dest_file = if (is_absolute_base_dir)
@@ -293,6 +303,6 @@ fn copyHookScript(
     // Make the destination file executable
     try dest_file.chmod(0o755);
 
-    output.print("Copied hook script from {s} to {s}", .{ hook_path, dest_path }) catch {};
+    output.print("Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
     return dest_path;
 }

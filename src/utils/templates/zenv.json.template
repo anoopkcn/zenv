@@ -9,8 +9,8 @@
     "dependencies": [],
     "dependency_file": null,
     "setup_commands": [],
-    "activate_commands": [],
     "setup_hook": null,
+    "activate_commands": [],
     "activate_hook": null
   },
   "dev": {
@@ -28,11 +28,11 @@
     "setup_commands": [
       "echo 'Development environment setup complete!'"
     ],
+    "setup_hook": null,
     "activate_commands": [
       "echo 'Running custom activation commands for development environment...'",
       "echo 'Current Python: '$(which python)"
     ],
-    "setup_hook": null,
     "activate_hook": null
   }
 }

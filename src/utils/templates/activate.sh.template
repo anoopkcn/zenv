@@ -61,9 +61,6 @@ export PYTHONDONTWRITEBYTECODE=1
 
 @@ACTIVATE_HOOK_BLOCK@@
 
-# echo "Info: Environment '@@ENV_NAME@@' activated"
-# echo "Info: Description@@ENV_DESCRIPTION@@"
-
 # Add deactivate_all function to completely deactivate
 deactivate_all() {
   # Check if deactivate function exists (from venv)

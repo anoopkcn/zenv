@@ -43,6 +43,13 @@ pub fn createSetupScriptFromTemplate(
     );
 }
 
+fn fileExists(path: []const u8) bool {
+    fs.cwd().access(path, .{}) catch {
+        return false;
+    };
+    return true;
+}
+
 // Helper function to copy hook scripts to the environment's scripts directory
 fn copyHookScript(
     allocator: Allocator,
@@ -52,20 +59,40 @@ fn copyHookScript(
     is_absolute_base_dir: bool,
     cwd_path: []const u8,
 ) ![]const u8 {
-    // First, check if hook script exists
-    const source_exists = blk: {
-        fs.cwd().access(hook_path, .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                output.printError("Hook script not found: {s}", .{hook_path}) catch {};
-                return err;
-            }
-            output.printError("Error accessing hook script {s}: {s}", .{ hook_path, @errorName(err) }) catch {};
-            return err;
-        };
-        break :blk true;
-    };
+    var source_path: []const u8 = undefined;
+    var path_allocd = false;
 
-    if (!source_exists) {
+    // 1. Try hook_path as-is (if absolute)
+    if (std.fs.path.isAbsolute(hook_path)) {
+        source_path = hook_path;
+        path_allocd = false;
+    } else {
+        // 2. Try relative to cwd (where zenv.json is)
+        const rel_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
+        defer allocator.free(rel_path);
+
+        if (accessFile(rel_path)) {
+            source_path = try allocator.dupe(u8, rel_path);
+            path_allocd = true;
+        } else {
+            // 3. Try just the filename in current directory
+            if (accessFile(hook_path)) {
+                source_path = hook_path;
+                path_allocd = false;
+            } else {
+                // No path worked, report error
+                output.printError("Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
+                return error.FileNotFound;
+            }
+        }
+    }
+    defer if (path_allocd) allocator.free(source_path);
+
+    output.print("Found hook script at: {s}", .{source_path}) catch {};
+
+    // Ensure the source file really exists and is readable before proceeding
+    if (!accessFile(source_path)) {
+        output.printError("Hook script found but cannot be read: {s}", .{source_path}) catch {};
         return error.FileNotFound;
     }
 
@@ -74,37 +101,65 @@ fn copyHookScript(
     if (is_absolute_base_dir) {
         dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
     } else {
-        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, scripts_dir, dest_filename });
+        // For relative paths, scripts_dir is already joined with cwd_path earlier
+        // so we should not include cwd_path again
+        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
     }
     errdefer allocator.free(dest_path);
 
-    // Copy the script file
-    var source_file = try fs.cwd().openFile(hook_path, .{});
+    // Copy the script file - add extra debug info
+    output.print("Attempting to open source file: {s}", .{source_path}) catch {};
+    var source_file = fs.cwd().openFile(source_path, .{}) catch |err| {
+        output.printError("Failed to open source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
+    };
     defer source_file.close();
 
+    output.print("Attempting to create destination file: {s}", .{dest_path}) catch {};
     var dest_file = if (is_absolute_base_dir)
-        try std.fs.createFileAbsolute(dest_path, .{})
+        std.fs.createFileAbsolute(dest_path, .{}) catch |err| {
+            output.printError("Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            return error.FileNotFound;
+        }
     else
-        try fs.cwd().createFile(dest_path, .{});
+        fs.cwd().createFile(dest_path, .{}) catch |err| {
+            output.printError("Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            return error.FileNotFound;
+        };
     defer dest_file.close();
 
     // Copy the content
     var buffer: [8192]u8 = undefined;
     var bytes_read: usize = 0;
     while (true) {
-        bytes_read = try source_file.read(&buffer);
+        bytes_read = source_file.read(&buffer) catch |err| {
+            output.printError("Error reading from source file '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+            return error.FileNotFound;
+        };
         if (bytes_read == 0) break;
-        try dest_file.writeAll(buffer[0..bytes_read]);
+        dest_file.writeAll(buffer[0..bytes_read]) catch |err| {
+            output.printError("Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            return error.FileNotFound;
+        };
     }
 
     // Make the destination file executable
-    try dest_file.chmod(0o755);
+    dest_file.chmod(0o755) catch |err| {
+        output.printError("Failed to set permissions on '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        // Continue anyway, this is not critical
+    };
 
-    output.print("Copied hook script from {s} to {s}", .{ hook_path, dest_path }) catch {};
+    output.print("Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
     return dest_path;
 }
 
-// Create setup script for the environment using templating
+fn accessFile(path: []const u8) bool {
+    fs.cwd().access(path, .{}) catch {
+        return false;
+    };
+    return true;
+}
+
 fn createSetupScript(
     allocator: Allocator,
     env_config: *const EnvironmentConfig,
@@ -122,11 +177,11 @@ fn createSetupScript(
 ) ![]const u8 {
     try output.print("Creating setup script for '{s}'...", .{env_name});
 
-    // Get absolute path of current working directory
+    // Get absolute path of current working directory (where zenv.json is)
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    output.print("Current working directory: {s}", .{cwd_path}) catch {};
 
-    // Check if base_dir is absolute
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
     // Virtual environment absolute path
@@ -161,17 +216,20 @@ fn createSetupScript(
     defer allocator.free(scripts_rel_path);
 
     // Create the scripts directory
+    output.print("Creating scripts directory: {s}", .{scripts_rel_path}) catch {};
     if (is_absolute_base_dir) {
         std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
             if (err != error.PathAlreadyExists) {
-                output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
+                output.printError("Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
                 // Continue anyway, as this is not a critical error
             }
         };
     } else {
         fs.cwd().makePath(scripts_rel_path) catch |err| {
-            output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
-            // Continue anyway, as this is not a critical error
+            if (err != error.PathAlreadyExists) {
+                output.printError("Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
+                // Continue anyway, as this is not a critical error
+            }
         };
     }
 
@@ -182,25 +240,11 @@ fn createSetupScript(
     defer if (setup_hook_path) |path| allocator.free(path);
 
     if (env_config.setup_hook) |hook_path| {
-        // Copy the hook script to the environment's scripts directory
-        if (copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path)) |dest_path| {
-            defer allocator.free(dest_path);
-            setup_hook_path = try allocator.dupe(u8, dest_path);
+        output.print("Processing setup hook: '{s}'", .{hook_path}) catch {};
 
-            try setup_hook_block.writer().print(
-                \\
-                \\# Execute custom setup hook script if it exists
-                \\if [ -f "{s}" ]; then
-                \\  echo "Info: Running setup hook script: {s}"
-                \\  # Source the hook script to maintain environment variables
-                \\  source "{s}" || echo "Warning: Setup hook script failed with exit code $?"
-                \\else
-                \\  echo "Warning: Setup hook script not found at {s}"
-                \\fi
-                \\
-            , .{ dest_path, dest_path, dest_path, dest_path });
-        } else |err| {
-            output.printError("Failed to copy setup hook script: {s}", .{@errorName(err)}) catch {};
+        // Copy the hook script to the environment's scripts directory
+        const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
+            output.printError("Failed to copy setup hook script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
             // Continue anyway, but add a warning in the script
             try setup_hook_block.writer().print(
                 \\
@@ -208,7 +252,24 @@ fn createSetupScript(
                 \\echo "Warning: Failed to copy setup hook script from '{s}'"
                 \\
             , .{ hook_path, hook_path });
-        }
+
+            // Skip the rest of this hook processing
+            return error.FileNotFound;
+        };
+        defer allocator.free(dest_path);
+        setup_hook_path = try allocator.dupe(u8, dest_path);
+
+        try setup_hook_block.writer().print(
+            \\
+            \\# Execute custom setup hook script if it exists
+            \\if [ -f "{s}" ]; then
+            \\  echo "Info: Running setup hook script: {s}"
+            \\  source "{s}" || echo "Warning: Setup hook script failed with exit code $?"
+            \\else
+            \\  echo "Warning: Setup hook script not found at {s}"
+            \\fi
+            \\
+        , .{ dest_path, dest_path, dest_path, dest_path });
     }
 
     // Create a map for template replacements
@@ -372,7 +433,6 @@ fn createSetupScript(
     defer allocator.free(setup_hook_slice);
     try replacements.put("SETUP_HOOK_BLOCK", setup_hook_slice);
 
-    // Process the template
     const processed_content = try template.processTemplateString(allocator, SETUP_ENV_TEMPLATE, replacements);
     return processed_content;
 }
