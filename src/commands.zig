@@ -224,6 +224,21 @@ pub fn handleSetupCommand(
     try output.startLogging(log_path);
     defer output.stopLogging();
 
+    // Log the command that was used to start the setup
+    var command_str = std.ArrayList(u8).init(allocator);
+    // Note: don't free command_str until after installation is complete
+    for (args, 0..) |arg, i| {
+        if (i > 0) {
+            command_str.writer().print(" ", .{}) catch {};
+        }
+        if (std.mem.indexOf(u8, arg, " ") != null) {
+            // Quote arguments with spaces
+            command_str.writer().print("\"{s}\"", .{arg}) catch {};
+        } else {
+            command_str.writer().print("{s}", .{arg}) catch {};
+        }
+    }
+    output.print("Command: {s}", .{command_str.items}) catch {};
     output.print("Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
     // 0. Check the availability of modules
@@ -362,11 +377,14 @@ pub fn handleSetupCommand(
         flags.dev_mode,
         flags.use_uv,
         flags.no_cache,
+        command_str.items,
     ) catch |err| {
         handleErrorFn(err);
+        command_str.deinit();
         return err;
     };
     deps_need_cleanup = false;
+    command_str.deinit();
 
     // 4. Create the final activation script (using a separate utility)
     try aux.createActivationScript(allocator, env_config, env_name, base_dir);

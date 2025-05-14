@@ -25,6 +25,7 @@ pub fn createSetupScriptFromTemplate(
     dev_mode: bool,
     use_uv: bool,
     no_cache: bool,
+    command_str: ?[]const u8,
 ) ![]const u8 {
     return try createSetupScript(
         allocator,
@@ -40,6 +41,7 @@ pub fn createSetupScriptFromTemplate(
         dev_mode,
         use_uv,
         no_cache,
+        command_str,
     );
 }
 
@@ -174,6 +176,7 @@ fn createSetupScript(
     dev_mode: bool,
     use_uv: bool,
     no_cache: bool,
+    command_str: ?[]const u8,
 ) ![]const u8 {
     try output.print("Creating setup script for '{s}'...", .{env_name});
 
@@ -284,6 +287,13 @@ fn createSetupScript(
     // Add basic replacements for the template
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_DIR", venv_dir);
+
+    // Add command string if provided
+    if (command_str) |cmd| {
+        try replacements.put("COMMAND_STRING", cmd);
+    } else {
+        try replacements.put("COMMAND_STRING", "unknown");
+    }
 
     // Get the fallback python to use
     var fallback_python: []const u8 = undefined;
