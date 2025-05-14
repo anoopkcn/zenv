@@ -101,6 +101,7 @@ if [ "$USE_DEFAULT_PYTHON" = "true" ]; then
 fi
 
 # Handle development mode flag
+# Handle dev_mode flag
 @@DEV_MODE_VALUE@@
 if [ "$DEV_MODE" = "true" ]; then
   ohai "Development mode flag (--dev) detected"
@@ -532,25 +533,27 @@ if [ "$DEV_MODE" = "true" ]; then
         # For uv, --no-build-isolation is generally not needed as it handles builds differently.
         # We are not passing $PIP_INSTALL_OPTIONS to uv for editable install.
         # Not using --reinstall to ensure dependencies are only installed if missing/incompatible.
-        uv pip install --no-cache --link-mode=copy --editable . || {
+        uv pip install --no-cache --link-mode=copy --editable . --no-deps || {
           warn "Failed to install current directory as editable package using uv"
           warn "Check that your setup.py or pyproject.toml is valid"
         }
       else
         ohai "Installing current directory as editable package using 'uv pip install --link-mode=copy --editable .'"
-        uv pip install --link-mode=copy --editable . || {
+        uv pip install --link-mode=copy --editable . --no-deps || {
           warn "Failed to install current directory as editable package using uv"
           warn "Check that your setup.py or pyproject.toml is valid"
         }
       fi
     else
-      ohai "Installing current directory as editable package using 'python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable .'"
-      python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . || {
+      ohai "Installing current directory as editable package using 'python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . --no-deps'"
+      python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . --no-deps || {
         warn "Failed to install current directory as editable package using pip"
         warn "Check that your setup.py or pyproject.toml is valid"
       }
     fi
-    success "Installed current directory as editable package"
+    info "Installed current directory as editable package (without dependencies)"
+    info "Dependencies are handled separately according to module filtering rules"
+    success "Editable installation complete"
   else
     warn "No setup.py or pyproject.toml found in current directory"
     warn "Skipping editable install. Create one of these files if needed."
