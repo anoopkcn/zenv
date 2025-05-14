@@ -586,7 +586,17 @@ fn validateEnvironment(
     }
 
     // Whitelist approach: only allow specific fields in environment configuration
-    const allowed_fields = [_][]const u8{ "target_machines", "description", "modules", "modules_file", "dependencies", "dependency_file", "fallback_python", "setup", "activate" };
+    const allowed_fields = [_][]const u8{
+        "target_machines",
+        "description",
+        "modules",
+        "modules_file",
+        "dependencies",
+        "dependency_file",
+        "fallback_python",
+        "setup",
+        "activate",
+    };
 
     // Check each field in the environment config
     var field_iter = value.object.iterator();
