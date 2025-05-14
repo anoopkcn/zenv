@@ -76,23 +76,22 @@ zenv setup <name>
 # This will also register the environment to global ZENV_DIR/registry.json
 ```
 
-Example of a `zenv.json` file:
+**A minimal example of a `zenv.json` file**:
 
 ```json
 {
+  "base_dir": "zenv"
   "test": {
-    "target_machines": ["jrlogin*.jureca", "*.juwels", "jrc*"],
-    "fallback_python": null,
-    "description": "Basic environment for jureca and juwels",
-    "modules": ["Stages/2025", "StdEnv", "Python", "CUDA"],
-    "modules_file": null,
-    "dependencies": ["numpy>=1.20.0", "pandas"],
+    "target_machines": ["jrlogin*.jureca", "*"],
+    "description": "Basic environment JURECA and any machine",
+    "modules": ["Stages/2025", "StdEnv", "Python"],
     "dependency_file": "requirements.txt"
   }
 }
 ```
 
-Provided `dependencies` will be installed in addition to the dependencies found in the optional `dependency_file` which can be (`requirements.txt` or a `pyproject.toml` file)
+Check the [Configuration Reference](#configuration-reference) for full list of key-values
+The optional `dependency_file` which can be (`requirements.txt` or a `pyproject.toml` file). If you run `zenv init` this will be automatically populated according to what is in your project.
 
 ### Listing environments
 
@@ -214,25 +213,31 @@ One can have multiple environment configurations in the same `zenv.json` file an
 
 ```json
 {
-  "base_dir": "<opional_base_dir>",
+  "base_dir": "<base dirrectory where all envs listed in the config will be stored>",
   "<name>": {
-    "target_machines": ["<machine_identifier>"],
-    "fallback_python": "<path_to_python_or_null>",
-    "description": "<optional_description_or_null>",
+    "target_machines": ["<machine identifier accepts wild card *>"],
+    "fallback_python": "<path to python executable OR null>",
+    "description": "<optional description OR null>",
     "modules": ["<module1>", "<module2>"],
-    "modules_file": "<path_to_modulesfile_or_null>"
-    "dependency_file": "<optional_path_to_requirements_txt_or_pyproject_toml_or_null>",
-    "dependencies": ["<package_name_version>"],
-    "setup_commands": ["<custom commands to run during setup process>"],
-    "activate_commands": ["<custom commands to run during activation process>"],
-    "setup_hook": "<path_to_custom_setup_script_or_null>",
-    "activate_hook": "<path_to_custom_activation_script_or_null>"
+    "modules_file": "<path to modules file OR null>"
+    "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
+    "dependencies": ["<package name with or without version>"],
+    "setup": {
+          "commands": ["<list of shell commands which is run during setup>"],
+          "script": "<path to a shell script which is run during setup>"
+        },
+        "activate": {
+          "commands": ["<list of shell commands which is run during activation>"],
+          "script": "<path to a shell script which will be run during activation>"
+        }
   },
   "<another_name>": {
-    "target_machines": ["<anothor_machine_identifier>"]
+    "target_machines": ["<anothor machine identifier>"]
   }
 }
 ```
+
+One can run `zenv validate` to validate the config file. It there are errors in the JSON it will try to inform the context of the error.
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
