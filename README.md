@@ -1,6 +1,6 @@
 # zenv
 
-zenv: Python Environment Manager for HPC and Development Systems
+Python Environment Manager for HPC and Development Systems
 
 `zenv` is a command-line tool written in Zig that manages Python virtual environments, primarily designed for High-Performance Computing (HPC) environments and development systems.
 
