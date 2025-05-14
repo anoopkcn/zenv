@@ -49,7 +49,7 @@ pub fn executeShellScript(
         return error.ProcessError;
     }
 
-    output.print("Setup script completed successfully", .{}) catch {};
+    // output.print("Setup script completed successfully", .{}) catch {};
 }
 
 pub fn setupEnvironmentDirectory(
