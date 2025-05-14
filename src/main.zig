@@ -122,25 +122,21 @@ fn printUsage() void {
         \\  help, --help             Shows this help message.
         \\
         \\Options for 'zenv setup <name>':
-        \\  --no-host                Bypasses hostname validation during setup.
-        \\                           (Equivalent to "target_machines": ["*"] in zenv.json).
-        \\                           Use if an environment should be set up regardless of the machine.
-        \\
         \\  --init                   Automatically runs 'zenv init <name>' before 'zenv setup'.
         \\                           Convenient for creating and setting up in one step.
+        \\
+        \\  --dev                    Installs the current directory's project in editable mode.
+        \\                           Equivalent to 'pip install --editable .' command.
         \\
         \\  --uv                     Uses 'uv' instead of 'pip' for package operations.
         \\                           Ensure 'uv' is installed and accessible.
         \\
-        \\  --rebuild                Attempts to upgrade Python in an existing virtual environment.
-        \\                           Recreates the environment if it's corrupted or doesn't exist.
+        \\  --no-host                Bypasses hostname validation during setup.
+        \\                           (Equivalent to "target_machines": ["*"] in zenv.json).
+        \\                           Use if an environment should be set up regardless of the machine.
         \\
-        \\  --python                 Forces setup to use only the zenv-pinned Python version.
+        \\  --python                 Use the zenv-pinned Python for creating environment.
         \\                           Ignores the default Python priority list (see below).
-        \\
-        \\  --dev                    Installs the current directory's project in editable mode.
-        \\                           (Equivalent to 'pip install --editable .').
-        \\                           Requires a 'setup.py' or 'pyproject.toml'.
         \\
         \\  --force                  Forces reinstallation of all dependencies.
         \\                           Useful if dependencies from loaded modules cause conflicts.
@@ -148,18 +144,19 @@ fn printUsage() void {
         \\  --no-cache               Disables the package cache when installing dependencies.
         \\                           Ensures fresh package downloads for each installation.
         \\
+        \\  --rebuild                Attempts to upgrade Python in an existing virtual environment.
+        \\                           Recreates the environment if it's corrupted or doesn't exist.
+        \\                           Use with caution. If you have changes then running the 
+        \\                           setup command again is enough to update the environment.
+        \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
         \\  top-level key specifying the storage location for virtual environments.
         \\  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
         \\
-        \\  Hook scripts can be specified using "activate_hook" and "setup_hook" fields,
-        \\  which point to shell scripts that will be copied to the environment directory and
-        \\  executed during activation or setup.
-        \\
         \\Registry (ZENV_DIR/registry.json):
-        \\  A global JSON file (path in ZENV_DIR environment variable, typically ~/.zenv)
+        \\  A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
         \\  that tracks registered environments. This allows 'zenv' commands to manage
         \\  these environments from any directory. Environments are added via 'zenv setup'
         \\  or 'zenv register'.
@@ -167,11 +164,10 @@ fn printUsage() void {
         \\Python Priority List (for 'zenv setup' without '--python' flag):
         \\  zenv attempts to find a Python interpreter in the following order:
         \\  1. HPC module-provided Python (if HPC environment modules are loaded).
-        \\  2. 'fallback_python' path explicitly configured in 'zenv.json'.
+        \\  2. Path explicitly specified by the 'fallback_python' key in zenv.json.
         \\  3. zenv-pinned Python (set via 'zenv python use <version>').
-        \\  4. System 'python3'.
-        \\  5. System 'python'.
-        \\  Use 'zenv setup <name> --python' to use only the pinned version (item 3).
+        \\  4. System Python.
+        \\  Use 'zenv setup <name> --python' to use only the pinned version.
         \\
     ;
     std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
