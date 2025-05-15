@@ -82,7 +82,7 @@ zenv setup <name>
 {
   "base_dir": "zenv"
   "test": {
-    "target_machines": ["jrlogin*.jureca", "*"],
+    "target_machines": ["*"],
     "description": "Basic environment JURECA and any machine",
     "modules": ["Stages/2025", "StdEnv", "Python"],
     "dependency_file": "requirements.txt"
@@ -236,7 +236,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
 }
 ```
 
-One can run `zenv validate` to validate the config file. It there are errors in the JSON it will try to inform the context of the error.
+One can run `zenv validate` to validate the config file. If there are errors in the JSON it will try to inform the context of the error.
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
