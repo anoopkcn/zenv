@@ -288,17 +288,17 @@ Commands:
   rm <name|id>             De-registers the environment AND permanently deletes its
                            virtual environment directory from the filesystem.
 
-  python <subcommand>      Manages Python installations used by zenv:
-    install <version>      Downloads and installs a specific Python version for zenv.
-    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
-    list                   Shows Python versions installed and managed by zenv.
-
   validate [config]        Validates the configuration file. If no arguent provided it
                            will validate the 'zenv.json' file in the current directory.
                            Reports errors with line numbers and field names if found.
 
   log <name|id>            Displays the setup log file for the specified environment.
                            Useful for troubleshooting setup issues.
+
+  python <subcommand>      Manages Python installations:
+    install <version>      Downloads and installs a specific Python version for zenv.
+    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
+    list                   Shows Python versions installed and managed by zenv.
 
   version, -v, --version   Prints the installed zenv version.
 
@@ -329,7 +329,7 @@ Options for 'zenv setup <name>':
 
   --rebuild                Attempts to upgrade Python in an existing virtual environment.
                            Recreates the environment if it's corrupted or doesn't exist.
-                           Use with caution. If you have changes then running the
+                           Use with caution. If you have changes then running the 
                            setup command again is enough to update the environment.
 
 Configuration (zenv.json):
