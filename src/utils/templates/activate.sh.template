@@ -46,8 +46,8 @@ if command -v module >/dev/null 2>&1; then
   # List loaded modules for verification
   # echo "Info: Currently loaded modules:"
   # module list 2>&1 | sed 's/^/  /' || echo "  Failed to list modules"
-else
-  echo 'Info: Skipping module operations'
+# else
+#   echo 'Info: Skipping module operations'
 fi
 
 # Activate the Python virtual environment
