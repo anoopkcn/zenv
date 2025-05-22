@@ -112,7 +112,7 @@ fn printUsage() void {
         \\  log <name|id>            Displays the setup log file for the specified environment.
         \\                           Useful for troubleshooting setup issues.
         \\
-        \\  python <subcommand>      Manages Python installations:
+        \\  python <subcommand>      (Experimantal feature) Manages Python installations:
         \\    install <version>      Downloads and installs a specific Python version for zenv.
         \\    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
         \\    list                   Shows Python versions installed and managed by zenv.
