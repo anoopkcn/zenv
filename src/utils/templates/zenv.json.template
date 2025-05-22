@@ -16,31 +16,5 @@
       "commands": [],
       "script": null
     }
-  },
-  "dev": {
-    "target_machines": ["@@HOSTNAME@@"],
-    "description": "Development environment with additional tools",
-    "fallback_python": "python3",
-    "modules": [
-        "Stages/2025",
-        "StdEnv",
-        "Python"
-    ],
-    "modules_file":null,
-    "dependencies": ["tqdm"],
-    "dependency_file": @@DEV_DEPENDENCY_FILE@@,
-    "setup": {
-      "commands": [
-        "echo 'Development environment setup complete!'"
-      ],
-      "script": null
-    },
-    "activate": {
-      "commands": [
-        "echo 'Running custom activation commands for development environment...'",
-        "echo 'Current Python: '$(which python)"
-      ],
-      "script": null
-    }
   }
 }
