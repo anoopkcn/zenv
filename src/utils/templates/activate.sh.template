@@ -60,26 +60,3 @@ export PYTHONDONTWRITEBYTECODE=1
 @@ACTIVATE_COMMANDS_BLOCK@@
 
 @@ACTIVATE_HOOK_BLOCK@@
-
-# Add deactivate_all function to completely deactivate
-deactivate_all() {
-  if command -v deactivate >/dev/null 2>&1; then
-    echo "Info: Running venv deactivate"
-    deactivate
-  fi
-
-  # Purge modules if module command exists
-  if command -v module >/dev/null 2>&1; then
-    echo "Info: Purging loaded modules..."
-    module purge || echo "Warning: Failed to purge modules" >&2
-  fi
-
-  # Unset PYTHONDONTWRITEBYTECODE
-  if [ -n "$PYTHONDONTWRITEBYTECODE" ]; then
-    unset PYTHONDONTWRITEBYTECODE
-  fi
-
-  # Unset this function
-  unset -f deactivate_all
-  echo "Info: Environment fully deactivated"
-}
