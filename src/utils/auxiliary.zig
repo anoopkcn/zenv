@@ -106,7 +106,6 @@ pub fn installDependencies(
     base_dir: []const u8,
     all_required_deps: *std.ArrayList([]const u8),
     force_deps: bool,
-    rebuild_env: bool,
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
@@ -128,7 +127,20 @@ pub fn installDependencies(
     }
 
     // Call the main environment setup function
-    try setupEnvironment(allocator, env_config, env_name, base_dir, deps_slice, force_deps, rebuild_env, modules_verified, use_default_python, dev_mode, use_uv, no_cache, command_str);
+    try setupEnvironment(
+        allocator,
+        env_config,
+        env_name,
+        base_dir,
+        deps_slice,
+        force_deps,
+        modules_verified,
+        use_default_python,
+        dev_mode,
+        use_uv,
+        no_cache,
+        command_str,
+    );
 }
 
 // Sets up the full environment: creates files, generates and runs setup script.
@@ -139,7 +151,6 @@ pub fn setupEnvironment(
     base_dir: []const u8,
     deps: []const []const u8,
     force_deps: bool,
-    rebuild_env: bool,
     modules_verified: bool,
     use_default_python: bool,
     dev_mode: bool,
@@ -247,7 +258,6 @@ pub fn setupEnvironment(
         req_abs_path,
         valid_deps_list.items.len,
         force_deps,
-        rebuild_env,
         modules_verified,
         use_default_python,
         dev_mode,

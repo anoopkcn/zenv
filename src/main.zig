@@ -144,11 +144,6 @@ fn printUsage() void {
         \\  --no-cache               Disables the package cache when installing dependencies.
         \\                           Ensures fresh package downloads for each installation.
         \\
-        \\  --rebuild                Attempts to upgrade Python in an existing virtual environment.
-        \\                           Recreates the environment if it's corrupted or doesn't exist.
-        \\                           Use with caution. If you have changes then running the 
-        \\                           setup command again is enough to update the environment.
-        \\
         \\Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
