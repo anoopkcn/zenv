@@ -49,31 +49,66 @@ fn logMessage(message: []const u8) !void {
 
 /// Prints a formatted message to stdout with a newline appended
 /// Use this instead of std.log.info for user-visible output
-pub fn print(comptime fmt: []const u8, args: anytype) !void {
-    const stdout = std.io.getStdOut().writer();
-    const message = try std.fmt.allocPrint(std.heap.page_allocator, "Info: " ++ fmt ++ "\n", args);
-    defer std.heap.page_allocator.free(message);
+// pub fn print(comptime fmt: []const u8, args: anytype) !void {
+//     const stdout = std.io.getStdOut().writer();
+//     const message = try std.fmt.allocPrint(std.heap.page_allocator, "Info: " ++ fmt ++ "\n", args);
+//     defer std.heap.page_allocator.free(message);
+//
+//     try stdout.writeAll(message);
+//     try logMessage(message);
+// }
 
+pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [1024]u8 = undefined;
+    const message = if (fmt.len + 50 < buf.len) {
+        // Use stack buffer for small messages
+        try std.fmt.bufPrint(&buf, "Info: " ++ fmt ++ "\n", args);
+    } else {
+        // Use allocator for larger messages
+        try std.fmt.allocPrint(allocator, "Info: " ++ fmt ++ "\n", args);
+    };
+    defer if (message.ptr != &buf) allocator.free(message);
+
+    const stdout = std.io.getStdOut().writer();
     try stdout.writeAll(message);
     try logMessage(message);
 }
 
 /// Prints a formatted error message to stderr with a newline appended
-pub fn printError(comptime fmt: []const u8, args: anytype) !void {
-    const stderr = std.io.getStdErr().writer();
-    const message = try std.fmt.allocPrint(std.heap.page_allocator, "Error: " ++ fmt ++ "\n", args);
-    defer std.heap.page_allocator.free(message);
+pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    // const stderr = std.io.getStdErr().writer();
+    // const message = try std.fmt.allocPrint(std.heap.page_allocator, "Error: " ++ fmt ++ "\n", args);
+    // defer std.heap.page_allocator.free(message);
+    var buf: [1024]u8 = undefined;
+    const message = if (fmt.len + 50 < buf.len) {
+        // Use stack buffer for small messages
+        try std.fmt.bufPrint(&buf, "Error: " ++ fmt ++ "\n", args);
+    } else {
+        // Use allocator for larger messages
+        try std.fmt.allocPrint(allocator, "Error: " ++ fmt ++ "\n", args);
+    };
+    defer if (message.ptr != &buf) allocator.free(message);
 
+    const stderr = std.io.getStdErr().writer();
     try stderr.writeAll(message);
     try logMessage(message);
 }
 
 /// Prints a formatted message to stdout, and doesn't append a newline
-pub fn printNoNewline(comptime fmt: []const u8, args: anytype) !void {
-    const stdout = std.io.getStdOut().writer();
-    const message = try std.fmt.allocPrint(std.heap.page_allocator, fmt, args);
-    defer std.heap.page_allocator.free(message);
+pub fn printNoNewline(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    // const message = try std.fmt.allocPrint(std.heap.page_allocator, fmt, args);
+    // defer std.heap.page_allocator.free(message);
+    var buf: [1024]u8 = undefined;
+    const message = if (fmt.len + 50 < buf.len) {
+        // Use stack buffer for small messages
+        try std.fmt.bufPrint(&buf, fmt, args);
+    } else {
+        // Use allocator for larger messages
+        try std.fmt.allocPrint(allocator, fmt, args);
+    };
+    defer if (message.ptr != &buf) allocator.free(message);
 
+    const stdout = std.io.getStdOut().writer();
     try stdout.writeAll(message);
     try logMessage(message);
 }
