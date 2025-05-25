@@ -75,7 +75,7 @@ fn printUsage() void {
         \\Commands:
         \\  init [name] [desc]       Initializes a new 'zenv.json' in the current directory.
         \\                           Creates a 'test' environment if 'name' is not provided.
-        \\                           Use to start defining your environments.
+        \\                           Use to start defining your environments[z].
         \\
         \\  setup <name>             Creates and configures the virtual environment for '<name>'.
         \\                           Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
@@ -94,8 +94,8 @@ fn printUsage() void {
         \\
         \\  list --all               Lists all registered environments.
         \\
-        \\  register <name>          Adds the environment '<name>' (from current 'zenv.json')
-        \\                           to the global registry, making it accessible from any location.
+        \\  register <name>          Adds the environment '<name>' (from current 'zenv.json') to the
+        \\                           global registry[a], making it accessible from any location.
         \\
         \\  deregister <name|id>     Removes an environment from the global registry.
         \\                           The virtual environment files are NOT deleted.
@@ -130,11 +130,11 @@ fn printUsage() void {
         \\                           Ensure 'uv' is installed and accessible.
         \\
         \\  --no-host                Bypasses hostname validation during setup.
-        \\                           (Equivalent to "target_machines": ["*"] in zenv.json).
+        \\                           Equivalent to "target_machines": ["*"] in zenv.json.
         \\                           Use if an environment should be set up regardless of the machine.
         \\
         \\  --python                 Use the zenv-pinned Python for creating environment.
-        \\                           Ignores the default Python priority list (see below).
+        \\                           Ignores the default Python priority[b] list.
         \\
         \\  --force                  Forces reinstallation of all dependencies.
         \\                           Useful if dependencies from loaded modules cause conflicts.
@@ -142,19 +142,19 @@ fn printUsage() void {
         \\  --no-cache               Disables the package cache when installing dependencies.
         \\                           Ensures fresh package downloads for each installation.
         \\
-        \\Configuration (zenv.json):
+        \\[z] Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
         \\  top-level key specifying the storage location for virtual environments.
         \\  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
         \\
-        \\Registry (ZENV_DIR/registry.json):
+        \\[a] Registry (ZENV_DIR/registry.json):
         \\  A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
         \\  that tracks registered environments. This allows 'zenv' commands to manage
         \\  these environments from any directory. Environments are added via 'zenv setup'
         \\  or 'zenv register'.
         \\
-        \\Python Priority List (for 'zenv setup' without '--python' flag):
+        \\[b] Python Priority List (for 'zenv setup' without '--python' flag):
         \\  zenv attempts to find a Python interpreter in the following order:
         \\  1. HPC module-provided Python (if HPC environment modules are loaded).
         \\  2. Path explicitly specified by the 'fallback_python' key in zenv.json.
