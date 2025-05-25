@@ -345,11 +345,11 @@ pub fn main() anyerror!void {
                         , .{}) catch {};
                     },
                     error.ProcessError => {
-                        // For process errors, don't show additional output (already handled by the process itself)
+                        // For process errors, already handled by the process itself
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     error.ModuleLoadError => {
-                        // Module load errors are handled specially with no stack trace (already handled by module loader)
+                        // Module load errors are already handled by module loader
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     else => {
@@ -358,7 +358,6 @@ pub fn main() anyerror!void {
                     },
                 }
             } else {
-                // This case should ideally not be reached if all errors are ZenvError or std.os.windows.ANOERROR
                 // However, if it is, it means an error occurred without a return trace.
                 output.printError(alloc, "Error: {s} (no trace available)", .{@errorName(err)}) catch {};
             }
