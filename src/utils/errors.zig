@@ -38,8 +38,8 @@ pub const ZenvError = error{
 ///   - args: Arguments for the format string
 ///
 /// Returns: The original error for propagation
-pub fn logAndReturn(err: anyerror, comptime message: []const u8, args: anytype) anyerror {
-    output.printError(message, args) catch {};
+pub fn logAndReturn(allocator: Allocator, err: anyerror, comptime message: []const u8, args: anytype) anyerror {
+    output.printError(allocator, message, args) catch {};
     return err;
 }
 
@@ -52,8 +52,8 @@ pub fn logAndReturn(err: anyerror, comptime message: []const u8, args: anytype) 
 ///   - operation: Description of what operation was being performed
 ///
 /// Returns: A mapped error or the original error
-pub fn handleFileError(err: anyerror, path: []const u8, operation: []const u8) anyerror {
-    output.printError("File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) }) catch {};
+pub fn handleFileError(allocator: Allocator, err: anyerror, path: []const u8, operation: []const u8) anyerror {
+    output.printError(allocator, "File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) }) catch {};
 
     // Map common file errors to our error set
     return switch (err) {

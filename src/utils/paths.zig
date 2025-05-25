@@ -12,7 +12,7 @@ pub fn getZenvDir(allocator: Allocator) ![]const u8 {
         if (err == error.EnvironmentVariableNotFound) {
             // Fallback to home directory
             const home_dir = process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
-                output.printError(
+                output.printError(allocator,
                     \\Failed to get HOME environment variable: {s}
                 , .{@errorName(home_err)}) catch {};
                 return error.HomeDirectoryNotFound;
@@ -21,7 +21,7 @@ pub fn getZenvDir(allocator: Allocator) ![]const u8 {
 
             return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
         }
-        output.printError("Failed to get ZENV_DIR environment variable: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to get ZENV_DIR environment variable: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 
@@ -35,7 +35,7 @@ pub fn ensureZenvDir(allocator: Allocator) ![]const u8 {
 
     fs.makeDirAbsolute(zenv_dir_path) catch |err| {
         if (err != error.PathAlreadyExists) {
-            output.printError("Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
             return err;
         }
     };

@@ -8,7 +8,7 @@ var log_enabled: bool = false;
 
 /// Starts logging to the specified file path
 /// If the file exists, it will be appended to
-pub fn startLogging(path: []const u8) !void {
+pub fn startLogging(allocator: Allocator, path: []const u8) !void {
     if (log_enabled) {
         stopLogging();
     }
@@ -23,7 +23,7 @@ pub fn startLogging(path: []const u8) !void {
     log_file = try fs.cwd().createFile(path, .{ .truncate = false, .read = true });
     log_enabled = true;
 
-    try print("Logging started: output will be saved to {s}", .{path});
+    try print(allocator, "Logging started: output will be saved to {s}", .{path});
 }
 
 /// Stops logging and closes the log file if open
@@ -47,22 +47,11 @@ fn logMessage(message: []const u8) !void {
     }
 }
 
-/// Prints a formatted message to stdout with a newline appended
-/// Use this instead of std.log.info for user-visible output
-// pub fn print(comptime fmt: []const u8, args: anytype) !void {
-//     const stdout = std.io.getStdOut().writer();
-//     const message = try std.fmt.allocPrint(std.heap.page_allocator, "Info: " ++ fmt ++ "\n", args);
-//     defer std.heap.page_allocator.free(message);
-//
-//     try stdout.writeAll(message);
-//     try logMessage(message);
-// }
-
 pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
     var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) {
+    const message = if (fmt.len + 50 < buf.len) blk: {
         // Use stack buffer for small messages
-        try std.fmt.bufPrint(&buf, "Info: " ++ fmt ++ "\n", args);
+        break :blk try std.fmt.bufPrint(&buf, "Info: " ++ fmt ++ "\n", args);
     } else {
         // Use allocator for larger messages
         try std.fmt.allocPrint(allocator, "Info: " ++ fmt ++ "\n", args);
@@ -76,13 +65,10 @@ pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !voi
 
 /// Prints a formatted error message to stderr with a newline appended
 pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    // const stderr = std.io.getStdErr().writer();
-    // const message = try std.fmt.allocPrint(std.heap.page_allocator, "Error: " ++ fmt ++ "\n", args);
-    // defer std.heap.page_allocator.free(message);
     var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) {
+    const message = if (fmt.len + 50 < buf.len) blk: {
         // Use stack buffer for small messages
-        try std.fmt.bufPrint(&buf, "Error: " ++ fmt ++ "\n", args);
+        break :blk try std.fmt.bufPrint(&buf, "Error: " ++ fmt ++ "\n", args);
     } else {
         // Use allocator for larger messages
         try std.fmt.allocPrint(allocator, "Error: " ++ fmt ++ "\n", args);
@@ -96,12 +82,10 @@ pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype)
 
 /// Prints a formatted message to stdout, and doesn't append a newline
 pub fn printNoNewline(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    // const message = try std.fmt.allocPrint(std.heap.page_allocator, fmt, args);
-    // defer std.heap.page_allocator.free(message);
     var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) {
+    const message = if (fmt.len + 50 < buf.len) blk: {
         // Use stack buffer for small messages
-        try std.fmt.bufPrint(&buf, fmt, args);
+        break :blk try std.fmt.bufPrint(&buf, fmt, args);
     } else {
         // Use allocator for larger messages
         try std.fmt.allocPrint(allocator, fmt, args);

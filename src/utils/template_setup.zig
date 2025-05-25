@@ -81,18 +81,18 @@ fn copyHookScript(
                 path_allocd = false;
             } else {
                 // No path worked, report error
-                output.printError("Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
+                output.printError(allocator, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
                 return error.FileNotFound;
             }
         }
     }
     defer if (path_allocd) allocator.free(source_path);
 
-    output.print("Found hook script at: {s}", .{source_path}) catch {};
+    output.print(allocator, "Found hook script at: {s}", .{source_path}) catch {};
 
     // Ensure the source file really exists and is readable before proceeding
     if (!accessFile(source_path)) {
-        output.printError("Hook script found but cannot be read: {s}", .{source_path}) catch {};
+        output.printError(allocator, "Hook script found but cannot be read: {s}", .{source_path}) catch {};
         return error.FileNotFound;
     }
 
@@ -108,22 +108,22 @@ fn copyHookScript(
     errdefer allocator.free(dest_path);
 
     // Copy the script file - add extra debug info
-    output.print("Attempting to open source file: {s}", .{source_path}) catch {};
+    output.print(allocator, "Attempting to open source file: {s}", .{source_path}) catch {};
     var source_file = fs.cwd().openFile(source_path, .{}) catch |err| {
-        output.printError("Failed to open source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Failed to open source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
         return error.FileNotFound;
     };
     defer source_file.close();
 
-    output.print("Attempting to create destination file: {s}", .{dest_path}) catch {};
+    output.print(allocator, "Attempting to create destination file: {s}", .{dest_path}) catch {};
     var dest_file = if (is_absolute_base_dir)
         std.fs.createFileAbsolute(dest_path, .{}) catch |err| {
-            output.printError("Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
             return error.FileNotFound;
         }
     else
         fs.cwd().createFile(dest_path, .{}) catch |err| {
-            output.printError("Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
             return error.FileNotFound;
         };
     defer dest_file.close();
@@ -133,23 +133,23 @@ fn copyHookScript(
     var bytes_read: usize = 0;
     while (true) {
         bytes_read = source_file.read(&buffer) catch |err| {
-            output.printError("Error reading from source file '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Error reading from source file '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
             return error.FileNotFound;
         };
         if (bytes_read == 0) break;
         dest_file.writeAll(buffer[0..bytes_read]) catch |err| {
-            output.printError("Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
             return error.FileNotFound;
         };
     }
 
     // Make the destination file executable
     dest_file.chmod(0o755) catch |err| {
-        output.printError("Failed to set permissions on '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Failed to set permissions on '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
         // Continue anyway, this is not critical
     };
 
-    output.print("Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
+    output.print(allocator, "Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
     return dest_path;
 }
 
@@ -175,12 +175,12 @@ fn createSetupScript(
     no_cache: bool,
     command_str: ?[]const u8,
 ) ![]const u8 {
-    try output.print("Creating setup script for '{s}'...", .{env_name});
+    try output.print(allocator, "Creating setup script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory (where zenv.json is)
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
-    output.print("Current working directory: {s}", .{cwd_path}) catch {};
+    output.print(allocator, "Current working directory: {s}", .{cwd_path}) catch {};
 
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
@@ -216,18 +216,18 @@ fn createSetupScript(
     defer allocator.free(scripts_rel_path);
 
     // Create the scripts directory
-    output.print("Creating scripts directory: {s}", .{scripts_rel_path}) catch {};
+    output.print(allocator, "Creating scripts directory: {s}", .{scripts_rel_path}) catch {};
     if (is_absolute_base_dir) {
         std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
             if (err != error.PathAlreadyExists) {
-                output.printError("Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
+                output.printError(allocator, "Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
                 // Continue anyway, as this is not a critical error
             }
         };
     } else {
         fs.cwd().makePath(scripts_rel_path) catch |err| {
             if (err != error.PathAlreadyExists) {
-                output.printError("Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
+                output.printError(allocator, "Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
                 // Continue anyway, as this is not a critical error
             }
         };
@@ -241,11 +241,11 @@ fn createSetupScript(
 
     if (env_config.setup != null and env_config.setup.?.script != null) {
         const hook_path = env_config.setup.?.script.?;
-        output.print("Processing setup script: '{s}'", .{hook_path}) catch {};
+        output.print(allocator, "Processing setup script: '{s}'", .{hook_path}) catch {};
 
         // Copy the script to the environment's scripts directory
         const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
-            output.printError("Failed to copy setup script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to copy setup script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
             // Continue anyway, but add a warning in the script
             try setup_hook_block.writer().print(
                 \\
@@ -299,7 +299,7 @@ fn createSetupScript(
     if (use_default_python) {
         // Try to get the default Python path
         const default_python = @import("python.zig").getDefaultPythonPath(allocator) catch |err| {
-            output.printError("Failed to read default Python path with --python flag: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to read default Python path with --python flag: {s}", .{@errorName(err)}) catch {};
             return error.MissingPythonExecutable;
         };
 
@@ -308,10 +308,10 @@ fn createSetupScript(
             const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
             defer allocator.free(python_bin);
             fallback_python = try allocator.dupe(u8, python_bin);
-            try output.print("Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
+            try output.print(allocator, "Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
         } else {
-            output.printError("--python flag specified but no default Python configured", .{}) catch {};
-            output.printError("Set a default Python first: zenv python use <version>", .{}) catch {};
+            output.printError(allocator, "--python flag specified but no default Python configured", .{}) catch {};
+            output.printError(allocator, "Set a default Python first: zenv python use <version>", .{}) catch {};
             return error.MissingPythonExecutable;
         }
     } else {
@@ -331,7 +331,7 @@ fn createSetupScript(
                     fallback_python = "python3"; // No default Python path found
                 }
             } else |err| {
-                try output.print("Warning: Failed to get default Python path: {s}", .{@errorName(err)});
+                try output.print(allocator, "Warning: Failed to get default Python path: {s}", .{@errorName(err)});
                 fallback_python = "python3"; // Default to python3 if no default is configured
             }
         }

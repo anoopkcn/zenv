@@ -94,7 +94,7 @@ pub fn processTemplateString(
         } else {
             // No replacement found, leave the placeholder as is
             try writer.writeAll(template_content[placeholder_start .. placeholder_end + 2]);
-            output.print("Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name}) catch {};
+            output.print(allocator, "Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name}) catch {};
         }
 
         // Move position to after the placeholder

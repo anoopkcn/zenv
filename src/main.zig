@@ -63,9 +63,7 @@ pub const Command = enum {
 };
 
 fn printVersion() !void {
-    std.io.getStdOut().writer().print("{s}", .{options.version}) catch |err| {
-        output.printError("Printing version: {s}", .{@errorName(err)}) catch {};
-    };
+    try std.io.getStdOut().writer().print("{s}", .{options.version});
 }
 
 fn printUsage() void {
@@ -214,130 +212,135 @@ pub fn main() anyerror!void {
     const config_path = "zenv.json";
 
     const handleError = struct {
-        pub fn func(err: anyerror) void {
+        var alloc: Allocator = undefined;
 
+        pub fn init(a: Allocator) void {
+            alloc = a;
+        }
+
+        pub fn func(err: anyerror) void {
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
-                output.printError("{s}", .{@errorName(err)}) catch {};
+                output.printError(alloc, "{s}", .{@errorName(err)}) catch {};
 
                 // Handle specific errors
                 switch (err) {
                     error.ConfigFileNotFound => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Configuration file '{s}' not found
                         , .{config_path}) catch {};
                     },
                     error.FileNotFound => {
-                        output.printError(
+                        output.printError(alloc,
                             \\zenv could not find a file required to complete this command
                         , .{}) catch {};
                     },
                     error.ClusterNotFound => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Target machine mismatch or environment not suitable for current machine
                         , .{}) catch {};
                     },
                     error.EnvironmentNotFound => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Environment name not found in configuration or argument missing
                         , .{}) catch {};
                     },
                     error.JsonParseError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Invalid JSON format in '{s}'. Check syntax
                         , .{config_path}) catch {};
                     },
                     error.InvalidFormat => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Invalid JSON format in '{s}'. Check syntax for details above
                         , .{config_path}) catch {};
                     },
                     error.ConfigInvalid => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Invalid configuration structure in '{s}'. Check keys/types/required fields
                         , .{config_path}) catch {};
                     },
                     error.MissingHostname => {
-                        output.printError(
+                        output.printError(alloc,
                             \\HOSTNAME is not set or inaccessible which is required for validation
                         , .{}) catch {};
                     },
                     error.PathResolutionFailed => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Failed to resolve a required file path (e.g., requirements file)
                             \\
                         , .{}) catch {};
                     },
                     error.TargetMachineMismatch => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Current machine does not match the target specified for this environment
                         , .{}) catch {};
                     },
                     error.AmbiguousIdentifier => {
-                        output.printError(
+                        output.printError(alloc,
                             \\The provided ID prefix matches multiple environments. Use more characters
                         , .{}) catch {};
                     },
                     error.RegistryError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Failed to access the environment registry. Check permissions for ZENV_DIR
                         , .{}) catch {};
                     },
                     error.ArgsError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Invalid command-line arguments provided. Check usage with 'zenv help'
                         , .{}) catch {};
                     },
                     error.EnvironmentNotRegistered => {
-                        output.printError(
+                        output.printError(alloc,
                             \\The specified environment is not registered. Use 'zenv list --all' and 'zenv register <name>'
                         , .{}) catch {};
                     },
                     error.MissingPythonExecutable => {
-                        output.printError(
+                        output.printError(alloc,
                             \\A required Python executable was not found or is not configured
                         , .{}) catch {};
-                        output.printError(
+                        output.printError(alloc,
                             \\Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json
                         , .{}) catch {};
                     },
                     error.InvalidRegistryFormat => {
-                        output.printError(
+                        output.printError(alloc,
                             \\The environment registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
                         , .{}) catch {};
                     },
                     error.ConfigFileReadError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Error reading the configuration file '{s}'. Check permissions and file integrity
                         , .{config_path}) catch {};
                     },
                     error.HostnameParseError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\Failed to parse the system hostname
                         , .{}) catch {};
                     },
                     error.IoError => {
-                        output.printError(
+                        output.printError(alloc,
                             \\An I/O error occurred. Check file system permissions and disk space
                         , .{}) catch {};
                     },
                     error.OutOfMemory => {
-                        output.printError(
+                        output.printError(alloc,
                             \\The application ran out of memory. Try freeing up system resources
                         , .{}) catch {};
                     },
                     error.PathTraversalAttempt => {
-                        output.printError(
+                        output.printError(alloc,
                             \\A path traversal attempt was detected and blocked for security reasons
                         , .{}) catch {};
                     },
                     error.EnvironmentVariableNotFound => {
-                        output.printError(
+                        output.printError(alloc,
                             \\A required environment variable was not found. Please ensure it is set
                         , .{}) catch {};
                     },
                     error.InvalidWtf8 => {
-                        output.printError(
+                        output.printError(alloc,
                             \\An environment variable contained invalid UTF-8 (WTF-8) characters
                         , .{}) catch {};
                     },
@@ -350,23 +353,26 @@ pub fn main() anyerror!void {
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
                     else => {
-                        output.printError("An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
+                        output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
                         std.debug.dumpStackTrace(trace.*);
                     },
                 }
             } else {
                 // This case should ideally not be reached if all errors are ZenvError or std.os.windows.ANOERROR
                 // However, if it is, it means an error occurred without a return trace.
-                output.printError("Error: {s} (no trace available)", .{@errorName(err)}) catch {};
+                output.printError(alloc, "Error: {s} (no trace available)", .{@errorName(err)}) catch {};
             }
             process.exit(1);
         }
-    }.func;
+    };
+
+    // Initialize the error handler with the allocator
+    handleError.init(allocator);
 
     // Load the environment registry first, as we'll need it for all commands
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
-        output.printError("Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
-        handleError(error.RegistryError);
+        output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
+        handleError.func(error.RegistryError);
         return;
     };
     defer registry.deinit();
@@ -387,8 +393,8 @@ pub fn main() anyerror!void {
             const config_exists = blk: {
                 std.fs.cwd().access(config_path, .{}) catch |err| {
                     if (err != error.FileNotFound) {
-                        output.printError("Accessing current directory: {s}", .{@errorName(err)}) catch {};
-                        handleError(err);
+                        output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
+                        handleError.func(err);
                         break :blk false;
                     }
                     // File doesn't exist
@@ -412,20 +418,20 @@ pub fn main() anyerror!void {
                 }
 
                 // Run init to create config
-                output.print("--init flag detected. Creating config file first...", .{}) catch {};
+                output.print(allocator, "--init flag detected. Creating config file first...", .{}) catch {};
                 commands.handleInitCommand(allocator, init_args.items);
-                output.print("Proceeding with setup...", .{}) catch {};
+                output.print(allocator, "Proceeding with setup...", .{}) catch {};
             }
         }
 
         // Now load the config with validation
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError(err);
+            handleError.func(err);
             return; // Exit after handling error
         };
     } else if (command == .register) {
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError(err);
+            handleError.func(err);
             return; // Exit after handling error
         };
     }
@@ -434,24 +440,24 @@ pub fn main() anyerror!void {
 
     // Dispatch to command handlers
     switch (command) {
-        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args, handleError),
-        .activate => commands.handleActivateCommand(&registry, args, handleError),
+        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args, handleError.func),
+        .activate => commands.handleActivateCommand(allocator, &registry, args, handleError.func),
         .list => commands.handleListCommand(allocator, &registry, args),
-        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError),
-        .deregister => commands.handleDeregisterCommand(&registry, args, handleError),
-        .rm => commands.handleRmCommand(&registry, args, handleError),
-        .cd => commands.handleCdCommand(&registry, args, handleError),
-        .python => try commands.handlePythonCommand(allocator, args, handleError),
-        .log => commands.handleLogCommand(allocator, &registry, args, handleError),
-        .run => commands.handleRunCommand(allocator, &registry, args, handleError),
-        .validate => commands.handleValidateCommand(allocator, config_path, args, handleError),
+        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError.func),
+        .deregister => commands.handleDeregisterCommand(allocator, &registry, args, handleError.func),
+        .rm => commands.handleRmCommand(allocator, &registry, args, handleError.func),
+        .cd => commands.handleCdCommand(allocator, &registry, args, handleError.func),
+        .python => try commands.handlePythonCommand(allocator, args, handleError.func),
+        .log => commands.handleLogCommand(allocator, &registry, args, handleError.func),
+        .run => commands.handleRunCommand(allocator, &registry, args, handleError.func),
+        .validate => commands.handleValidateCommand(allocator, config_path, args, handleError.func),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
 
         .unknown => {
-            output.printError("Unknown command '{s}'", .{args[1]}) catch {};
-            output.print("run 'zenv help' to see the usage", .{}) catch {};
+            output.printError(allocator, "Unknown command '{s}'", .{args[1]}) catch {};
+            output.print(allocator, "run 'zenv help' to see the usage", .{}) catch {};
             // printUsage();
             process.exit(1);
         },

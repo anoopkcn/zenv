@@ -68,7 +68,7 @@ pub fn downloadFile(
     options: DownloadOptions,
 ) !void {
     if (options.show_progress) {
-        try output.print("Downloading {s}", .{url});
+        try output.print(allocator, "Downloading {s}", .{url});
     }
 
     // Create HTTP client
@@ -101,7 +101,7 @@ pub fn downloadFile(
     try req.wait();
 
     if (req.response.status != .ok) {
-        try output.printError("Failed to download: HTTP status {d}", .{@intFromEnum(req.response.status)});
+        try output.printError(allocator, "Failed to download: HTTP status {d}", .{@intFromEnum(req.response.status)});
         return error.StatusError;
     }
 
@@ -110,7 +110,7 @@ pub fn downloadFile(
     if (req.response.content_length) |length| {
         total_size = length;
         if (options.show_progress) {
-            try output.print("Download size: {d} bytes", .{length});
+            try output.print(allocator, "Download size: {d} bytes", .{length});
         }
     }
 
@@ -181,7 +181,7 @@ pub fn downloadFile(
     }
 
     if (options.show_progress) {
-        try output.print("Download complete: {s} ({d} bytes)", .{ output_path, total_bytes });
+        try output.print(allocator, "Download complete: {s} ({d} bytes)", .{ output_path, total_bytes });
     }
 }
 

@@ -36,7 +36,7 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
             });
 
             // Print the error and return it
-            printValidationErrors(errors);
+            printValidationErrors(allocator, errors);
             return errors;
         }
         return err;
@@ -52,7 +52,7 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
 
     // If there are validation errors, print them
     if (validation_result != null) {
-        printValidationErrors(validation_result.?);
+        printValidationErrors(allocator, validation_result.?);
         return validation_result;
     }
 
@@ -785,26 +785,26 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
 }
 
 /// Prints validation errors to stderr
-pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
+pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(ValidationError)) void {
     for (errors.items, 0..) |err, i| {
         if (i > 0) {
-            output.printError("", .{}) catch {};
+            output.printError(allocator, "", .{}) catch {};
         }
 
         if (err.line > 0) {
-            output.printError("Error approximately at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
+            output.printError(allocator, "Error approximately at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
         } else {
-            output.printError("Error: {s}", .{err.message}) catch {};
+            output.printError(allocator, "Error: {s}", .{err.message}) catch {};
         }
 
         if (err.field_path) |path| {
             if (path.len > 0) {
-                output.printError("In field: {s}", .{path}) catch {};
+                output.printError(allocator, "In field: {s}", .{path}) catch {};
             }
         }
 
         if (err.context) |ctx| {
-            output.printError("Context: {s}", .{ctx}) catch {};
+            output.printError(allocator, "Context: {s}", .{ctx}) catch {};
 
             // Print a marker pointing to the column
             if (err.column > 0) {
@@ -820,7 +820,7 @@ pub fn printValidationErrors(errors: std.ArrayList(ValidationError)) void {
                 // Add the marker
                 marker.append('^') catch {};
 
-                output.printError("         {s}", .{marker.items}) catch {};
+                output.printError(allocator, "         {s}", .{marker.items}) catch {};
             }
         }
     }

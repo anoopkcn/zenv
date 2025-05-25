@@ -256,7 +256,7 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
         catch |err| {
-            output.printError("Failed to read stdout from `hostname` command: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to read stdout from `hostname` command: {s}", .{@errorName(err)}) catch {};
             _ = child.wait() catch {}; // Ensure child process is waited on
             return error.ProcessError;
         };
@@ -264,7 +264,7 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 
     const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
         catch |err| {
-            output.printError("Failed to read stderr from `hostname` command: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to read stderr from `hostname` command: {s}", .{@errorName(err)}) catch {};
             _ = child.wait() catch {};
             return error.ProcessError;
         };
@@ -280,13 +280,13 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     };
 
     if (!success) {
-        output.printError("`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr }) catch {};
+        output.printError(allocator, "`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr }) catch {};
         return error.ProcessError;
     }
 
     const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
     if (trimmed_hostname.len == 0) {
-        output.printError("`hostname` command returned empty output.", .{}) catch {};
+        output.printError(allocator, "`hostname` command returned empty output.", .{}) catch {};
         return error.MissingHostname;
     }
     errors.debugLog(allocator, "Got hostname from command: '{s}'", .{trimmed_hostname});
@@ -310,7 +310,7 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
                     return getHostnameFromCommand(allocator);
                 } else {
                     // Use our new error helper for consistent logging
-                    return errors.logAndReturn(err2, "Failed to get HOST environment variable: {s}", .{@errorName(err2)});
+                    return errors.logAndReturn(allocator, err2, "Failed to get HOST environment variable: {s}", .{@errorName(err2)});
                 }
             };
             // Check if HOST was empty
@@ -323,7 +323,7 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
             return host_env; // Return hostname from HOST
         } else {
             // Use our new error helper for consistent logging
-            return errors.logAndReturn(err, "Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
+            return errors.logAndReturn(allocator, err, "Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
         }
     };
 
@@ -418,37 +418,37 @@ pub fn getAndValidateEnvironment(
     handleErrorFn: fn (anyerror) void,
 ) ?*const EnvironmentConfig {
     if (args.len < 3) {
-        output.printError("Missing environment name argument for command '{s}'", .{args[1]}) catch {};
+        output.printError(allocator, "Missing environment name argument for command '{s}'", .{args[1]}) catch {};
         handleErrorFn(error.ArgsError); // Use a more specific error
         return null;
     }
     const env_name = args[2];
 
     const env_config = config.getEnvironment(env_name) orelse {
-        output.printError("Environment '{s}' not found in configuration.", .{env_name}) catch {};
+        output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return null;
     };
 
     // Use validation function from config module (already validates required fields)
     if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        output.printError("Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
+        output.printError(allocator, "Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
         handleErrorFn(err);
         return null;
     }
 
     // If modules_file is specified, read modules from the file
     if (env_config.modules_file) |modules_file_path| {
-        output.print("Modules file specified: {s}", .{modules_file_path}) catch {};
+        output.print(allocator, "Modules file specified: {s}", .{modules_file_path}) catch {};
 
         // Check if the file exists
         std.fs.cwd().access(modules_file_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                output.printError("Modules file '{s}' not found.", .{modules_file_path}) catch {};
+                output.printError(allocator, "Modules file '{s}' not found.", .{modules_file_path}) catch {};
                 handleErrorFn(err);
                 return null;
             } else {
-                output.printError("Error accessing modules file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
+                output.printError(allocator, "Error accessing modules file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
                 handleErrorFn(err);
                 return null;
             }
@@ -456,7 +456,7 @@ pub fn getAndValidateEnvironment(
 
         // Read modules from the file
         var modules_from_file = readModulesFromFile(allocator, modules_file_path) catch |err| {
-            output.printError("Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
             handleErrorFn(err);
             return null;
         };
@@ -466,7 +466,7 @@ pub fn getAndValidateEnvironment(
 
         // Clear existing modules (ignoring them as specified)
         if (mutable_env_config.modules.items.len > 0) {
-            output.print("Ignoring {d} modules defined in zenv.json in favor of modules_file", .{mutable_env_config.modules.items.len}) catch {};
+            output.print(allocator, "Ignoring {d} modules defined in zenv.json in favor of modules_file", .{mutable_env_config.modules.items.len}) catch {};
             for (mutable_env_config.modules.items) |module| {
                 mutable_env_config.modules.allocator.free(module);
             }
@@ -487,11 +487,11 @@ pub fn getAndValidateEnvironment(
         // Just deinit the ArrayList, but the items have been freed above
         modules_from_file.deinit();
 
-        output.print("Loaded {d} modules from file for environment '{s}'", .{ mutable_env_config.modules.items.len, env_name }) catch {};
+        output.print(allocator, "Loaded {d} modules from file for environment '{s}'", .{ mutable_env_config.modules.items.len, env_name }) catch {};
 
         // Debug: Print actual loaded modules to verify content
         for (mutable_env_config.modules.items, 0..) |module, i| {
-            output.print("Module #{d} loaded: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
+            output.print(allocator, "Module #{d} loaded: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
         }
     }
 
@@ -504,7 +504,7 @@ pub fn getAndValidateEnvironment(
     // Get current hostname
     var hostname: []const u8 = undefined;
     hostname = getSystemHostname(allocator) catch |err| { // Call the local function
-        output.printError("Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return null;
     };
@@ -525,33 +525,33 @@ pub fn getAndValidateEnvironment(
 
             // Attempt to format the string
             targets_buffer.appendSlice("[") catch |err| {
-                output.printError("Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                 handleErrorFn(err); // Report the underlying error
                 break :format_block; // Use placeholder
             };
             for (env_config.target_machines.items, 0..) |target, i| {
                 if (i > 0) {
                     targets_buffer.appendSlice(", ") catch |err| {
-                        output.printError("Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
+                        output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                         handleErrorFn(err);
                         break :format_block;
                     };
                 }
                 targets_buffer.writer().print("\"{s}\"", .{target}) catch |err| {
-                    output.printError("Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
+                    output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                     handleErrorFn(err);
                     break :format_block;
                 };
             }
             targets_buffer.appendSlice("]") catch |err| {
-                output.printError("Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                 handleErrorFn(err);
                 break :format_block;
             };
 
             // If formatting succeeded, duplicate the result
             formatted_targets = allocator.dupe(u8, targets_buffer.items) catch |err| {
-                output.printError("Failed to allocate memory for formatted target machines: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Failed to allocate memory for formatted target machines: {s}", .{@errorName(err)}) catch {};
                 handleErrorFn(err); // Report the underlying error
                 break :format_block; // Use placeholder
             };
@@ -563,8 +563,8 @@ pub fn getAndValidateEnvironment(
             formatted_targets = "<...>";
         }
 
-        output.printError("Current machine ('{s}') does not match target machines ('{s}') specified for environment '{s}'.", .{ hostname, formatted_targets, env_name }) catch {};
-        output.printError("Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
+        output.printError(allocator, "Current machine ('{s}') does not match target machines ('{s}') specified for environment '{s}'.", .{ hostname, formatted_targets, env_name }) catch {};
+        output.printError(allocator, "Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
 
         // Free the allocated string if it exists
         if (formatted_targets_allocated) {
@@ -589,6 +589,7 @@ pub fn getAndValidateEnvironment(
 ///
 /// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
 pub fn lookupRegistryEntry(
+    allocator: Allocator,
     registry: *const config_module.EnvironmentRegistry,
     identifier: []const u8,
     handleErrorFn: fn (anyerror) void,
@@ -609,7 +610,7 @@ pub fn lookupRegistryEntry(
                     // Collect names only if we find more than one match
                     if (match_count > 1) {
                         matching_envs.append(reg_entry.env_name) catch |err| {
-                            output.printError("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
+                            output.printError(allocator, "Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
                             handleErrorFn(error.OutOfMemory);
                             return null;
                         };
@@ -617,7 +618,7 @@ pub fn lookupRegistryEntry(
                     // If it's the first match, store its name in case it's the only one
                     else if (match_count == 1) {
                         matching_envs.append(reg_entry.env_name) catch |err| {
-                            output.printError("Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
+                            output.printError(allocator, "Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
                             handleErrorFn(error.OutOfMemory);
                             return null;
                         };
@@ -670,7 +671,7 @@ pub fn lookupRegistryEntry(
 //     };
 
 //     if (!module_exists) {
-//         try output.print("Warning: "'module' command not found, skipping module availability check.", .{});
+//         try output.print(allocator,"Warning: "'module' command not found, skipping module availability check.", .{});
 //         return .{ .available = false, .missing = null };
 //     }
 
@@ -720,7 +721,7 @@ pub fn lookupRegistryEntry(
 //     // If no modules are loaded, we need to try loading the first module
 //     if (!modules_loaded and modules.len > 0) {
 //         const first_module = modules[0];
-//         try output.print("No modules currently loaded. Attempting to load first module '{s}' to verify dependencies...", .{first_module});
+//         try output.print(allocator,"No modules currently loaded. Attempting to load first module '{s}' to verify dependencies...", .{first_module});
 
 //         // Try to load the first module
 //         const load_cmd = try std.fmt.allocPrint(allocator, "module load {s} 2>&1", .{first_module});
@@ -751,7 +752,7 @@ pub fn lookupRegistryEntry(
 //         errors.debugLog(allocator, "First module '{s}' load status: {}", .{ first_module, first_module_loaded });
 
 //         if (!first_module_loaded) {
-//             output.printError("Failed to load first module '{s}'. This is required to check dependent modules.", .{first_module}) catch {};
+//             output.printError(allocator,"Failed to load first module '{s}'. This is required to check dependent modules.", .{first_module}) catch {};
 //             try missing_modules.append(first_module);
 //             const missing = try missing_modules.toOwnedSlice();
 //             return .{ .available = false, .missing = missing };
@@ -830,7 +831,7 @@ pub fn readModulesFromFile(
     const file_content = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
     defer allocator.free(file_content);
 
-    output.print("Reading modules from file: {s}", .{file_path}) catch {};
+    output.print(allocator, "Reading modules from file: {s}", .{file_path}) catch {};
 
     // Debug the file content with hex representation for all bytes
     if (file_content.len > 0) {
@@ -841,14 +842,14 @@ pub fn readModulesFromFile(
         for (file_content[0..debug_len]) |byte| {
             hex_buf.writer().print("{X:0>2} ", .{byte}) catch {};
         }
-        output.print("File content (up to 100 bytes): {s}", .{hex_buf.items}) catch {};
+        output.print(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items}) catch {};
     }
 
     // Skip BOM if present
     var content_to_process = file_content;
     if (file_content.len >= 3 and file_content[0] == 0xEF and file_content[1] == 0xBB and file_content[2] == 0xBF) {
         content_to_process = file_content[3..];
-        output.print("UTF-8 BOM detected and skipped", .{}) catch {};
+        output.print(allocator, "UTF-8 BOM detected and skipped", .{}) catch {};
     }
 
     // Create a hashmap to ensure uniqueness and avoid duplicates
@@ -891,7 +892,7 @@ pub fn readModulesFromFile(
         // Process this line as a single module name without tokenizing
         if (trimmed.len > 0) {
             // Debug output for every line
-            output.print("Line {d}: '{s}' (len={d})", .{ line_number, trimmed, trimmed.len }) catch {};
+            output.print(allocator, "Line {d}: '{s}' (len={d})", .{ line_number, trimmed, trimmed.len }) catch {};
 
             // Create a fresh copy of the module name
             const module_name = try allocator.dupe(u8, trimmed);
@@ -907,7 +908,7 @@ pub fn readModulesFromFile(
 
             if (!is_valid) {
                 // Only log the issue but still use the name
-                output.print("Warning: Module name contains non-printable characters: '{s}'", .{module_name}) catch {};
+                output.print(allocator, "Warning: Module name contains non-printable characters: '{s}'", .{module_name}) catch {};
             }
 
             // Check if we've already seen this module
@@ -917,7 +918,7 @@ pub fn readModulesFromFile(
 
                 // Add module to the list
                 try modules_list.append(module_name);
-                output.print("  - Found module: '{s}'", .{module_name}) catch {};
+                output.print(allocator, "  - Found module: '{s}'", .{module_name}) catch {};
             } else {
                 // Free the duplicate since we already have this module
                 allocator.free(module_name);
@@ -929,13 +930,13 @@ pub fn readModulesFromFile(
     }
 
     if (modules_list.items.len == 0) {
-        output.print("Warning: No valid modules found in file. Ensure it contains valid module names.", .{}) catch {};
+        output.print(allocator, "Warning: No valid modules found in file. Ensure it contains valid module names.", .{}) catch {};
     } else {
-        output.print("Found {d} unique modules in file.", .{modules_list.items.len}) catch {};
+        output.print(allocator, "Found {d} unique modules in file.", .{modules_list.items.len}) catch {};
 
         // Additional debug: print the module list again to confirm what we're returning
         for (modules_list.items, 0..) |module, i| {
-            output.print("Module #{d}: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
+            output.print(allocator, "Module #{d}: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
         }
     }
     return modules_list;
@@ -968,26 +969,26 @@ fn skipNewline(content: []const u8, pos: usize) usize {
 //         return true;
 //     }
 
-//     try output.print("Step 0: Checking availability of {} required modules...", .{modules.len});
+//     try output.print(allocator,"Step 0: Checking availability of {} required modules...", .{modules.len});
 //     const result = try checkModulesAvailability(allocator, modules);
 
 //     if (!result.available) {
 //         // If force_deps is true, we can continue even with missing modules
 //         if (force_deps) {
-//             try output.print("Warning: "The following modules are not available but will be skipped due to --force:", .{});
+//             try output.print(allocator,"Warning: "The following modules are not available but will be skipped due to --force:", .{});
 //             for (result.missing.?) |module| {
-//                 try output.print("Warning: "  - {s}", .{module});
+//                 try output.print(allocator,"Warning: "  - {s}", .{module});
 //             }
 //             return true;
 //         }
 
 //         // Otherwise, error out
-//         output.printError("The following modules are not available:", .{}) catch {};
+//         output.printError(allocator,"The following modules are not available:", .{}) catch {};
 //         for (result.missing.?) |module| {
-//             output.printError("  - {s}", .{module}) catch {};
+//             output.printError(allocator,"  - {s}", .{module}) catch {};
 //         }
-//         output.printError("Aborting setup because required modules are not available.", .{}) catch {};
-//         output.printError("Please ensure the specified modules are installed on this system.", .{}) catch {};
+//         output.printError(allocator,"Aborting setup because required modules are not available.", .{}) catch {};
+//         output.printError(allocator,"Please ensure the specified modules are installed on this system.", .{}) catch {};
 //         return error.ModuleLoadError;
 //     }
 
@@ -1000,22 +1001,21 @@ pub fn validateModules(
     force_deps: bool,
 ) !bool {
     // Skip all module validation and always return true
-    _ = allocator;
     _ = force_deps;
 
     const modules = env_config.modules.items;
     if (modules.len == 0) {
-        output.print("No modules to validate.", .{}) catch {};
+        output.print(allocator, "No modules to validate.", .{}) catch {};
         return true;
     }
 
-    output.print("Module validation has been disabled. Assuming all {d} modules are available.", .{modules.len}) catch {};
+    output.print(allocator, "Module validation has been disabled. Assuming all {d} modules are available.", .{modules.len}) catch {};
 
     // Log the modules being loaded from file for debugging purposes
     if (env_config.modules_file != null) {
-        output.print("Modules loaded from file: {s}", .{env_config.modules_file.?}) catch {};
+        output.print(allocator, "Modules loaded from file: {s}", .{env_config.modules_file.?}) catch {};
         for (modules) |module| {
-            output.print("  - {s}", .{module}) catch {};
+            output.print(allocator, "  - {s}", .{module}) catch {};
         }
     }
 

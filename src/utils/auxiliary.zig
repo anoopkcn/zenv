@@ -28,7 +28,7 @@ pub fn executeShellScript(
     allocator: std.mem.Allocator,
     script_abs_path: []const u8,
 ) !void {
-    output.print("Running script: {s}", .{script_abs_path}) catch {};
+    output.print(allocator, "Running script: {s}", .{script_abs_path}) catch {};
     var argv = [_][]const u8{ "/bin/bash", script_abs_path };
     var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Inherit;
@@ -49,7 +49,7 @@ pub fn executeShellScript(
         return error.ProcessError;
     }
 
-    // output.print("Setup script completed successfully", .{}) catch {};
+    // output.print(allocator,"Setup script completed successfully", .{}) catch {};
 }
 
 pub fn setupEnvironmentDirectory(
@@ -60,7 +60,7 @@ pub fn setupEnvironmentDirectory(
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
     if (is_absolute_base_dir) {
-        output.print("Ensuring absolute virtual environment base directory '{s}' exists...", .{base_dir}) catch {};
+        output.print(allocator, "Ensuring absolute virtual environment base directory '{s}' exists...", .{base_dir}) catch {};
 
         // For absolute paths, create the directory directly
         std.fs.makeDirAbsolute(base_dir) catch |err| {
@@ -75,7 +75,7 @@ pub fn setupEnvironmentDirectory(
         const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
         defer allocator.free(joined);
 
-        output.print("Creating environment directory '{s}'...", .{joined}) catch {};
+        output.print(allocator, "Creating environment directory '{s}'...", .{joined}) catch {};
         std.fs.makeDirAbsolute(joined) catch |err| {
             if (err == error.PathAlreadyExists) {
                 // Ignore this error, directory already exists
@@ -84,7 +84,7 @@ pub fn setupEnvironmentDirectory(
             }
         };
     } else {
-        output.print("Ensuring relative virtual environment base directory '{s}' exists...", .{base_dir}) catch {};
+        output.print(allocator, "Ensuring relative virtual environment base directory '{s}' exists...", .{base_dir}) catch {};
 
         // For relative paths, create the directory relative to cwd
         // First make sure base dir exists
@@ -94,7 +94,7 @@ pub fn setupEnvironmentDirectory(
         const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
         defer allocator.free(joined);
 
-        output.print("Creating environment directory '{s}'...", .{joined}) catch {};
+        output.print(allocator, "Creating environment directory '{s}'...", .{joined}) catch {};
         try fs.cwd().makePath(joined);
     }
 }
@@ -158,7 +158,7 @@ pub fn setupEnvironment(
     no_cache: bool,
     command_str: ?[]const u8,
 ) !void {
-    output.print("Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir }) catch {};
+    output.print(allocator, "Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir }) catch {};
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -177,7 +177,7 @@ pub fn setupEnvironment(
 
     // Handle paths differently based on whether base_dir is absolute or relative
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
-    output.print("Base directory is {s}: '{s}'", .{ if (is_absolute_base_dir) "absolute" else "relative", base_dir }) catch {};
+    output.print(allocator, "Base directory is {s}: '{s}'", .{ if (is_absolute_base_dir) "absolute" else "relative", base_dir }) catch {};
 
     // Create requirements file path using base_dir
     var req_rel_path: []const u8 = undefined;
@@ -192,13 +192,13 @@ pub fn setupEnvironment(
         req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
         req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
     }
-    output.print("Requirements file paths: relative='{s}', absolute='{s}'", .{ req_rel_path, req_abs_path }) catch {};
+    output.print(allocator, "Requirements file paths: relative='{s}', absolute='{s}'", .{ req_rel_path, req_abs_path }) catch {};
 
     defer allocator.free(req_rel_path);
     defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
-    output.print("Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_rel_path }) catch {};
+    output.print(allocator, "Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_rel_path }) catch {};
     {
         var req_file = if (is_absolute_base_dir)
             try std.fs.createFileAbsolute(req_rel_path, .{})
@@ -208,7 +208,7 @@ pub fn setupEnvironment(
         defer {
             // Explicitly sync file content to disk before closing
             req_file.sync() catch |err| {
-                output.printError("Warning: Failed to sync requirements file: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Warning: Failed to sync requirements file: {s}", .{@errorName(err)}) catch {};
             };
             req_file.close();
         }
@@ -217,7 +217,7 @@ pub fn setupEnvironment(
         const writer = bw.writer();
 
         if (valid_deps_list.items.len == 0) {
-            output.print("Warning: No valid dependencies found! Writing only a comment to requirements file.", .{}) catch {};
+            output.print(allocator, "Warning: No valid dependencies found! Writing only a comment to requirements file.", .{}) catch {};
             try writer.writeAll("# No valid dependencies found\n");
         } else {
             for (valid_deps_list.items) |dep| {
@@ -228,9 +228,9 @@ pub fn setupEnvironment(
 
         // Make sure to flush the buffered writer and check for errors
         try bw.flush();
-        output.print("Requirements file successfully written and flushed", .{}) catch {};
+        output.print(allocator, "Requirements file successfully written and flushed", .{}) catch {};
     }
-    output.print("Created requirements file: {s}", .{req_abs_path}) catch {};
+    output.print(allocator, "Created requirements file: {s}", .{req_abs_path}) catch {};
 
     // Generate setup script path using base_dir
     var script_rel_path: []const u8 = undefined;
@@ -268,7 +268,7 @@ pub fn setupEnvironment(
     defer allocator.free(script_content);
 
     // Write setup script to file
-    output.print("Writing setup script to {s}", .{script_rel_path}) catch {};
+    output.print(allocator, "Writing setup script to {s}", .{script_rel_path}) catch {};
     {
         var script_file = if (is_absolute_base_dir)
             try std.fs.createFileAbsolute(script_rel_path, .{})
@@ -279,7 +279,7 @@ pub fn setupEnvironment(
         try script_file.writeAll(script_content);
         try script_file.chmod(0o755);
     }
-    output.print("Created setup script: {s}", .{script_abs_path}) catch {};
+    output.print(allocator, "Created setup script: {s}", .{script_abs_path}) catch {};
 
     // Execute setup script
     executeShellScript(allocator, script_abs_path) catch |err| {
@@ -288,9 +288,9 @@ pub fn setupEnvironment(
             return err;
         }
         // For other errors, propagate as ProcessError
-        output.printError("Setup script execution failed.", .{}) catch {};
+        output.printError(allocator, "Setup script execution failed.", .{}) catch {};
         return error.ProcessError;
     };
 
-    output.print("Environment '{s}' setup completed successfully.", .{env_name}) catch {};
+    output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
 }

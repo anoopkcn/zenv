@@ -420,7 +420,7 @@ pub const EnvironmentRegistry = struct {
                 try registry.save(); // Create an empty registry
                 return registry;
             }
-            output.printError("Failed to open registry file: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to open registry file: {s}", .{@errorName(err)}) catch {};
             return err;
         };
         defer file.close();

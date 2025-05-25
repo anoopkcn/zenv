@@ -28,13 +28,13 @@ fn createActivationScript(
     env_name: []const u8,
     base_dir: []const u8,
 ) !void {
-    output.print("Creating activation script for '{s}'...", .{env_name}) catch {};
+    output.print(allocator, "Creating activation script for '{s}'...", .{env_name}) catch {};
 
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
     errdefer {
-        _ = output.printError("Failed to get CWD realpath in createActivationScript", .{}) catch {};
+        _ = output.printError(allocator, "Failed to get CWD realpath in createActivationScript", .{}) catch {};
     } // Add error context
 
     // Check if base_dir is absolute
@@ -53,13 +53,13 @@ fn createActivationScript(
     if (is_absolute_base_dir) {
         std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
             if (err != error.PathAlreadyExists) {
-                output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
                 // Continue anyway, as this is not a critical error
             }
         };
     } else {
         fs.cwd().makePath(scripts_rel_path) catch |err| {
-            output.printError("Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, as this is not a critical error
         };
     }
@@ -87,7 +87,7 @@ fn createActivationScript(
                 \\
             , .{ dest_path, dest_path, dest_path });
         } else |err| {
-            output.printError("Failed to copy activation script: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to copy activation script: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, but add a warning in the script
             try activate_hook_block.writer().print(
                 \\
@@ -230,7 +230,7 @@ fn createActivationScript(
     // Make executable
     try file.chmod(0o755);
 
-    output.print("Activation script created at {s}", .{script_abs_path}) catch {};
+    output.print(allocator, "Activation script created at {s}", .{script_abs_path}) catch {};
 }
 
 // Helper function to copy hook scripts to the environment's scripts directory
@@ -250,16 +250,16 @@ fn copyHookScript(
 
     defer if (!std.fs.path.isAbsolute(hook_path)) allocator.free(resolved_hook_path);
 
-    output.print("Looking for hook script at: {s}", .{resolved_hook_path}) catch {};
+    output.print(allocator, "Looking for hook script at: {s}", .{resolved_hook_path}) catch {};
 
     // Check if hook script exists
     const source_exists = blk: {
         fs.cwd().access(resolved_hook_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                output.printError("Hook script not found: {s}", .{resolved_hook_path}) catch {};
+                output.printError(allocator, "Hook script not found: {s}", .{resolved_hook_path}) catch {};
                 return err;
             }
-            output.printError("Error accessing hook script {s}: {s}", .{ resolved_hook_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Error accessing hook script {s}: {s}", .{ resolved_hook_path, @errorName(err) }) catch {};
             return err;
         };
         break :blk true;
@@ -300,6 +300,6 @@ fn copyHookScript(
     // Make the destination file executable
     try dest_file.chmod(0o755);
 
-    output.print("Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
+    output.print(allocator, "Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
     return dest_path;
 }

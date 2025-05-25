@@ -24,7 +24,7 @@ pub fn handleInitCommand(
     const file_exists = blk: {
         cwd.access(config_path, .{}) catch |err| {
             if (err != error.FileNotFound) {
-                output.printError("Accessing current directory: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
             // File doesn't exist
@@ -34,7 +34,7 @@ pub fn handleInitCommand(
     };
 
     if (file_exists) {
-        output.printError("{s} already exists. Please remove or rename it first.", .{config_path}) catch {};
+        output.printError(allocator, "{s} already exists. Please remove or rename it first.", .{config_path}) catch {};
         std.process.exit(1);
     }
 
@@ -50,7 +50,7 @@ pub fn handleInitCommand(
 
     // Add common replacements for all templates
     replacements.put("HOSTNAME", hostname) catch |err| {
-        output.printError("Creating HOSTNAME replacement: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Creating HOSTNAME replacement: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
 
@@ -65,7 +65,7 @@ pub fn handleInitCommand(
                 requirements_txt_found = false;
             } else {
                 // For errors other than FileNotFound, print and exit
-                output.printError("Accessing requirements.txt: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Accessing requirements.txt: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
         }
@@ -82,7 +82,7 @@ pub fn handleInitCommand(
             if (err == error.FileNotFound) {
                 pyproject_toml_found = false;
             } else {
-                output.printError("Accessing pyproject.toml: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Accessing pyproject.toml: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             }
         }
@@ -96,7 +96,7 @@ pub fn handleInitCommand(
     };
 
     replacements.put("DEV_DEPENDENCY_FILE", dev_dep_file_value) catch |err| {
-        output.printError("Adding DEV_DEPENDENCY_FILE replacement: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Adding DEV_DEPENDENCY_FILE replacement: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
 
@@ -114,7 +114,7 @@ pub fn handleInitCommand(
         } else blk: {
             // Generate default description if not provided
             const generated_desc = std.fmt.allocPrint(allocator, "Description for {s}", .{custom_env_name}) catch |err| {
-                output.printError("Formatting custom env description: {s}", .{@errorName(err)}) catch {};
+                output.printError(allocator, "Formatting custom env description: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
             };
             desc_to_free = generated_desc; // Mark this for freeing later
@@ -126,23 +126,23 @@ pub fn handleInitCommand(
         }
 
         replacements.put("ENV_NAME", custom_env_name) catch |err| {
-            output.printError("Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
         replacements.put("ENV_DESCRIPTION", custom_env_desc) catch |err| {
-            output.printError("Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
 
         // Process the custom template
         processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
-            output.printError("Processing custom template: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
     } else {
         // Process the default template
         processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
-            output.printError("Processing default template: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Processing default template: {s}", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
     }
@@ -150,20 +150,20 @@ pub fn handleInitCommand(
 
     // Write template to file
     const file = cwd.createFile(config_path, .{}) catch |err| {
-        output.printError("Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
     defer file.close();
 
     file.writeAll(processed_content) catch |err| {
-        output.printError("Writing to {s}: {s}", .{ config_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Writing to {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
 
     if (args.len > 3 or args.len > 2) {
-        output.print("Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
+        output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
     } else {
-        output.print("Created zenv.json. Run 'zenv setup test", .{}) catch {};
+        output.print(allocator, "Created zenv.json. Run 'zenv setup test", .{}) catch {};
     }
 }
 
@@ -184,19 +184,19 @@ pub fn handleSetupCommand(
 
     // Log the detected flags
     if (flags.force_deps) {
-        output.print(
+        output.print(allocator,
             \\Force dependencies flag detected.
             \\User-specified dependencies will try to override module-provided packages.
         , .{}) catch {};
     }
     if (flags.skip_hostname_check) {
-        output.print("No-host flag detected. Bypassing hostname validation.", .{}) catch {};
+        output.print(allocator, "No-host flag detected. Bypassing hostname validation.", .{}) catch {};
     }
     if (flags.init_mode) {
-        output.print("Init flag detected. Using configuration created by --init.", .{}) catch {};
+        output.print(allocator, "Init flag detected. Using configuration created by --init.", .{}) catch {};
     }
     if (flags.no_cache) {
-        output.print("No-cache flag detected. Will disable package cache during dependency installation.", .{}) catch {};
+        output.print(allocator, "No-cache flag detected. Will disable package cache during dependency installation.", .{}) catch {};
     }
 
     // Get and validate the environment config
@@ -218,7 +218,7 @@ pub fn handleSetupCommand(
     const log_path = try std.fs.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
     defer allocator.free(log_path);
 
-    try output.startLogging(log_path);
+    try output.startLogging(allocator, log_path);
     defer output.stopLogging();
 
     // Log the command that was used to start the setup
@@ -235,15 +235,15 @@ pub fn handleSetupCommand(
             command_str.writer().print("{s}", .{arg}) catch {};
         }
     }
-    output.print("Command: {s}", .{command_str.items}) catch {};
-    output.print("Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
+    output.print(allocator, "Command: {s}", .{command_str.items}) catch {};
+    output.print(allocator, "Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
     // 0. Check the availability of modules
     var modules_verified = false;
     if (env_config.modules.items.len > 0) {
         // Use the improved validateModules function
         const modules_available = env.validateModules(allocator, env_config, flags.force_deps) catch |err| {
-            output.printError("Failed to validate modules: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to validate modules: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(error.ModuleLoadError);
             return error.ModuleLoadError;
         };
@@ -254,7 +254,7 @@ pub fn handleSetupCommand(
             return error.ModuleLoadError;
         }
 
-        output.print("All modules appear to be available.", .{}) catch {};
+        output.print(allocator, "All modules appear to be available.", .{}) catch {};
         modules_verified = true;
     }
 
@@ -281,14 +281,14 @@ pub fn handleSetupCommand(
 
     // Add dependencies from config
     if (env_config.dependencies.items.len > 0) {
-        output.print("Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len}) catch {};
+        output.print(allocator, "Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len}) catch {};
         for (env_config.dependencies.items) |dep| {
-            output.print("  - Config dependency: {s}", .{dep}) catch {};
+            output.print(allocator, "  - Config dependency: {s}", .{dep}) catch {};
             // Don't dupe here, assume config owns them or they are literals
             try all_required_deps.append(dep);
         }
     } else {
-        output.print("No dependencies specified in configuration.", .{}) catch {};
+        output.print(allocator, "No dependencies specified in configuration.", .{}) catch {};
     }
 
     // Add dependencies from requirements file if specified
@@ -296,12 +296,12 @@ pub fn handleSetupCommand(
         // Check if the specified requirements file actually exists
         std.fs.cwd().access(req_file, .{}) catch |err| {
             if (err == error.FileNotFound) {
-                output.printError("Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
+                output.printError(allocator, "Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
                 handleErrorFn(err); // Use the original file not found error
                 return err; // Exit setup command
             } else {
                 // Handle other potential access errors
-                output.printError("Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
+                output.printError(allocator, "Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
                 handleErrorFn(err);
                 return err;
             }
@@ -310,51 +310,51 @@ pub fn handleSetupCommand(
         // Log the absolute path for debugging
         var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
-            output.printError("Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             // handleErrorFn(err); // Or map to ZenvError
             return err; // Propagate error
         };
-        output.print("Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path }) catch {};
+        output.print(allocator, "Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path }) catch {};
 
         // Read the file content - use temp_allocator since we're done with it after parsing
         const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
-            output.printError("Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             handleErrorFn(error.PathResolutionFailed); // Use specific error
             return error.PathResolutionFailed; // Exit setup command
         };
         // No need to defer free because the arena will handle cleanup
 
-        output.print("Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len}) catch {};
+        output.print(allocator, "Successfully read file ({d} bytes). Parsing dependencies...", .{req_content.len}) catch {};
 
         // Determine file type and parse
         const is_toml = std.mem.endsWith(u8, req_file, ".toml");
         var req_file_dep_count: usize = 0;
 
         if (is_toml) {
-            output.print("Detected TOML file format, parsing as pyproject.toml", .{}) catch {};
+            output.print(allocator, "Detected TOML file format, parsing as pyproject.toml", .{}) catch {};
             req_file_dep_count = try deps.parsePyprojectToml(allocator, req_content, &all_required_deps);
         } else {
-            output.print("Parsing as requirements.txt format", .{}) catch {};
+            output.print(allocator, "Parsing as requirements.txt format", .{}) catch {};
             // Use the new utility function
             req_file_dep_count = try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
         }
 
         if (req_file_dep_count > 0) {
-            output.print("Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file }) catch {};
+            output.print(allocator, "Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file }) catch {};
         } else {
-            output.print("Warning: No valid dependencies found in file '{s}'", .{req_file}) catch {};
+            output.print(allocator, "Warning: No valid dependencies found in file '{s}'", .{req_file}) catch {};
         }
     } else {
-        output.print("No requirements file specified in configuration.", .{}) catch {};
+        output.print(allocator, "No requirements file specified in configuration.", .{}) catch {};
     }
 
     // Get base_dir from config
     const base_dir = config.base_dir;
 
     // Debug output - print the combined dependencies
-    output.print("Combined dependency list ({d} items):", .{all_required_deps.items.len}) catch {};
+    output.print(allocator, "Combined dependency list ({d} items):", .{all_required_deps.items.len}) catch {};
     for (all_required_deps.items) |dep| {
-        output.print("  - {s}", .{dep}) catch {};
+        output.print(allocator, "  - {s}", .{dep}) catch {};
     }
 
     // 2. Create venv base directory structure using base_dir
@@ -388,7 +388,7 @@ pub fn handleSetupCommand(
     // 5. Register the environment in the global registry
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-        output.printError("Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -402,30 +402,31 @@ pub fn handleSetupCommand(
     );
     try registry.save();
 
-    output.print(
+    output.print(allocator,
         \\Environment '{s}' setup complete and registered in global registry.
         \\Usage: source $(zenv activate {s})
     , .{ env_name, env_name }) catch {};
 }
 
 pub fn handleActivateCommand(
+    allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError("Missing environment name or ID argument. Usage: zenv activate <name|id>", .{}) catch {};
+        output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
 
     const identifier = args[2];
 
-    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
 
     std.io.getStdOut().writer().print("{s}/activate.sh\n", .{venv_path}) catch |e| {
-        output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
+        output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
 }
@@ -445,7 +446,7 @@ pub fn handleListCommand(
     if (use_hostname_filter) {
         // Get hostname directly using the utility function
         current_hostname = env.getSystemHostname(allocator) catch |err| {
-            output.print(
+            output.print(allocator,
                 \\Could not determine current hostname for filtering: {s}
             , .{@errorName(err)}) catch {};
             use_hostname_filter = false;
@@ -550,7 +551,7 @@ pub fn handleRegisterCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError("Missing environment name argument. Usage: zenv register <n>", .{}) catch {};
+        output.printError(allocator, "Missing environment name argument. Usage: zenv register <n>", .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     }
@@ -561,19 +562,19 @@ pub fn handleRegisterCommand(
 
     // Log flags if they're set
     if (flags.skip_hostname_check) {
-        output.print("'--no-host' flag detected. Skipping hostname validation.", .{}) catch {};
+        output.print(allocator, "'--no-host' flag detected. Skipping hostname validation.", .{}) catch {};
     }
 
     // Get the environment config directly without re-parsing validation
     const env_config = config.getEnvironment(env_name) orelse {
-        output.printError("Environment '{s}' not found in configuration.", .{env_name}) catch {};
+        output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
     };
 
     // Validate the environment config
     if (ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        output.printError("Invalid configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
+        output.printError(allocator, "Invalid configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
         handleErrorFn(err);
         return;
     }
@@ -581,7 +582,7 @@ pub fn handleRegisterCommand(
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
         const hostname = env.getSystemHostname(allocator) catch |err| {
-            output.printError("Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
@@ -591,7 +592,7 @@ pub fn handleRegisterCommand(
         const hostname_matches = env.validateEnvironmentForMachine(env_config, hostname);
 
         if (!hostname_matches) {
-            output.printError(
+            output.printError(allocator,
                 \\Current machine ('{s}') does not match target machines specified for environment '{s}'
                 \\Use '--no-host' flag to bypass this check if needed
             , .{ hostname, env_name }) catch {};
@@ -603,7 +604,7 @@ pub fn handleRegisterCommand(
     // Get absolute path of current working directory
     var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
-        output.printError("Could not get current working directory: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Could not get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -619,31 +620,32 @@ pub fn handleRegisterCommand(
         env_config.description,
         env_config.target_machines.items,
     ) catch |err| {
-        output.printError("Failed to register environment: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to register environment: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
 
     // Save the registry
     registry.save() catch |err| {
-        output.printError("Failed to save registry: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
 
-    output.print(
+    output.print(allocator,
         \\Environment '{s}' registered successfully.
         \\Usage: source $(zenv activate {s})
     , .{ env_name, env_name }) catch {};
 }
 
 pub fn handleDeregisterCommand(
+    allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError(
+        output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv deregister <name|id>
         , .{}) catch {};
@@ -655,11 +657,11 @@ pub fn handleDeregisterCommand(
 
     // Look up environment in registry first to check if it exists
     // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
-    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
 
     // Store name for the success message - make a copy to ensure it remains valid
     const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        output.printError("Failed to duplicate environment name: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to duplicate environment name: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -670,26 +672,27 @@ pub fn handleDeregisterCommand(
     if (registry.deregister(identifier)) {
         // Save the registry
         registry.save() catch |err| {
-            output.printError("Failed to save registry: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
 
-        output.print("Environment '{s}' unregistered successfully.", .{env_name}) catch {};
+        output.print(allocator, "Environment '{s}' unregistered successfully.", .{env_name}) catch {};
     } else {
-        output.printError("Failed to unregister environment '{s}'.", .{env_name}) catch {};
+        output.printError(allocator, "Failed to unregister environment '{s}'.", .{env_name}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     }
 }
 
 pub fn handleCdCommand(
+    allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError(
+        output.printError(allocator,
             \\Missing environment name or ID argument
             \\Usage: zenv cd <name|id>
         , .{}) catch {};
@@ -721,18 +724,18 @@ pub fn handleCdCommand(
             }
 
             if (match_found and matching_envs.items.len > 1) {
-                output.printError("ID prefix '{s}' matches multiple environments:", .{identifier}) catch {};
+                output.printError(allocator, "ID prefix '{s}' matches multiple environments:", .{identifier}) catch {};
                 for (matching_envs.items) |env_name| {
-                    output.printError("  - {s}", .{env_name}) catch {};
+                    output.printError(allocator, "  - {s}", .{env_name}) catch {};
                 }
-                output.printError("Please use more characters to make the ID unique.", .{}) catch {};
+                output.printError(allocator, "Please use more characters to make the ID unique.", .{}) catch {};
                 handleErrorFn(error.AmbiguousIdentifier);
                 return;
             }
         }
 
         // Default error for no matches
-        output.printError(
+        output.printError(allocator,
             \\Environment with name or ID '{s}' not found in registry
             \\use 'zenv list --all' to list all available environments
         , .{identifier}) catch {};
@@ -745,7 +748,7 @@ pub fn handleCdCommand(
 
     // Output just the project directory path
     std.io.getStdOut().writer().print("{s}\n", .{project_dir}) catch |e| {
-        output.printError("Error writing to stdout: {s}", .{@errorName(e)}) catch {};
+        output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
 }
@@ -757,8 +760,8 @@ pub fn handlePythonCommand(
 ) !void {
     // Check if we have a subcommand
     if (args.len < 3) {
-        output.printError("Missing subcommand for 'python' command", .{}) catch {};
-        output.print("Available subcommands: install, use, list", .{}) catch {};
+        output.printError(allocator, "Missing subcommand for 'python' command", .{}) catch {};
+        output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
         handleErrorFn(error.ArgsError);
         return error.ArgsError;
     }
@@ -770,27 +773,27 @@ pub fn handlePythonCommand(
         var version: ?[]const u8 = null;
         if (args.len >= 4) {
             version = args[3];
-            output.print("Installing Python version: {s}", .{version.?}) catch {};
+            output.print(allocator, "Installing Python version: {s}", .{version.?}) catch {};
         } else {
-            output.print("No version specified, will install default version", .{}) catch {};
+            output.print(allocator, "No version specified, will install default version", .{}) catch {};
         }
 
         // Install Python
         python.installPython(allocator, version) catch |err| {
-            output.printError("Python installation failed: {s}", .{@errorName(err)}) catch {};
+            output.printError(allocator, "Python installation failed: {s}", .{@errorName(err)}) catch {};
             handleErrorFn(err);
             return;
         };
 
         // DO NOT PINN PYTHON VERSION HERE
         // const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
-        // try output.print("Pinning newly installed Python {s}", .{installed_version});
+        // try output.print(allocator,"Pinning newly installed Python {s}", .{installed_version});
         // try python.setDefaultPythonPath(allocator, installed_version);
     } else if (std.mem.eql(u8, subcommand, "use")) {
         // Python use [version] command
         if (args.len < 4) {
-            output.printError("Missing version argument for 'python use' command", .{}) catch {};
-            output.print("Usage: zenv python use <version>", .{}) catch {};
+            output.printError(allocator, "Missing version argument for 'python use' command", .{}) catch {};
+            output.print(allocator, "Usage: zenv python use <version>", .{}) catch {};
             handleErrorFn(error.ArgsError);
             return error.ArgsError;
         }
@@ -801,20 +804,21 @@ pub fn handlePythonCommand(
         // Python list command - list all installed versions
         try python.listInstalledVersions(allocator);
     } else {
-        output.printError("Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
-        output.print("Available subcommands: install, use, list", .{}) catch {};
+        output.printError(allocator, "Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
+        output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
         handleErrorFn(error.ArgsError);
         return error.ArgsError;
     }
 }
 
 pub fn handleRmCommand(
+    allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError(
+        output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv rm <name|id>
         , .{}) catch {};
@@ -824,43 +828,43 @@ pub fn handleRmCommand(
 
     const identifier = args[2];
 
-    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
 
     const env_name_to_remove = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        output.printError("Failed to duplicate environment name for removal: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to duplicate environment name for removal: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
     defer registry.allocator.free(env_name_to_remove);
 
     const venv_path_to_remove = registry.allocator.dupe(u8, entry.venv_path) catch |err| {
-        output.printError("Failed to duplicate venv path for removal: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to duplicate venv path for removal: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
     defer registry.allocator.free(venv_path_to_remove);
 
     if (registry.deregister(identifier)) {
-        output.print("Environment '{s}' deregistered successfully.", .{env_name_to_remove}) catch {};
+        output.print(allocator, "Environment '{s}' deregistered successfully.", .{env_name_to_remove}) catch {};
         registry.save() catch |err| {
-            output.printError("Failed to save registry after deregistering '{s}': {s}", .{ env_name_to_remove, @errorName(err) }) catch {};
+            output.printError(allocator, "Failed to save registry after deregistering '{s}': {s}", .{ env_name_to_remove, @errorName(err) }) catch {};
         };
     } else {
-        output.printError("Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
+        output.printError(allocator, "Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return;
     }
 
-    output.print("Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
+    output.print(allocator, "Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
     std.fs.deleteTreeAbsolute(venv_path_to_remove) catch |err| {
-        output.printError("Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
-        output.printError("You may need to remove it manually.", .{}) catch {};
+        output.printError(allocator, "Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
+        output.printError(allocator, "You may need to remove it manually.", .{}) catch {};
         handleErrorFn(err);
         return;
     };
 
-    output.print("Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
-    output.print("Environment '{s}' removed.", .{env_name_to_remove}) catch {};
+    output.print(allocator, "Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
+    output.print(allocator, "Environment '{s}' removed.", .{env_name_to_remove}) catch {};
 }
 
 pub fn handleRunCommand(
@@ -871,7 +875,7 @@ pub fn handleRunCommand(
 ) void {
     // Need at least 4 args: zenv run <env> <command>
     if (args.len < 4) {
-        output.printError("Missing environment name or command. Usage: zenv run <name|id> <command> [args...]", .{}) catch {};
+        output.printError(allocator, "Missing environment name or command. Usage: zenv run <name|id> <command> [args...]", .{}) catch {};
         handleErrorFn(error.ArgsError);
         return;
     }
@@ -880,11 +884,11 @@ pub fn handleRunCommand(
     const command = args[3];
     const command_args = args[4..];
 
-    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
 
     const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
-        output.printError("Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -892,13 +896,13 @@ pub fn handleRunCommand(
 
     // Create temporary script
     const temp_script_path = createTempRunScript(allocator, activate_path, command, command_args) catch |err| {
-        output.printError("Failed to create temporary run script: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to create temporary run script: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
     defer {
         std.fs.cwd().deleteFile(temp_script_path) catch |err| {
-            output.print("Warning: Failed to delete temporary script: {s}", .{@errorName(err)}) catch {};
+            output.print(allocator, "Warning: Failed to delete temporary script: {s}", .{@errorName(err)}) catch {};
         };
         allocator.free(temp_script_path);
     }
@@ -911,13 +915,13 @@ pub fn handleRunCommand(
     child.stderr_behavior = .Inherit;
 
     child.spawn() catch |err| {
-        output.printError("Failed to spawn command: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to spawn command: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
 
     const term = child.wait() catch |err| {
-        output.printError("Failed to wait for command: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to wait for command: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -931,9 +935,9 @@ pub fn handleRunCommand(
 
     if (!success) {
         if (term == .Exited) {
-            output.printError("Command exited with status: {d}", .{term.Exited}) catch {};
+            output.printError(allocator, "Command exited with status: {d}", .{term.Exited}) catch {};
         } else {
-            output.printError("Command terminated abnormally", .{}) catch {};
+            output.printError(allocator, "Command terminated abnormally", .{}) catch {};
         }
         handleErrorFn(error.ProcessError);
         return;
@@ -991,7 +995,7 @@ pub fn handleLogCommand(
     handleErrorFn: fn (anyerror) void,
 ) void {
     if (args.len < 3) {
-        output.printError(
+        output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv log <name|id>
         , .{}) catch {};
@@ -1002,11 +1006,11 @@ pub fn handleLogCommand(
     const identifier = args[2];
 
     // Look up environment in registry
-    const entry = env.lookupRegistryEntry(registry, identifier, handleErrorFn) orelse return;
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
 
     // Construct the path to the log file
     const log_file_path = std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
-        output.printError("Failed to construct log file path: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Failed to construct log file path: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -1015,12 +1019,12 @@ pub fn handleLogCommand(
     // Check if the log file exists
     std.fs.cwd().access(log_file_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
-            output.printError("No setup log found for environment '{s}'", .{entry.env_name}) catch {};
-            output.printError("The log file should be at: {s}", .{log_file_path}) catch {};
+            output.printError(allocator, "No setup log found for environment '{s}'", .{entry.env_name}) catch {};
+            output.printError(allocator, "The log file should be at: {s}", .{log_file_path}) catch {};
             handleErrorFn(error.FileNotFound);
             return;
         } else {
-            output.printError("Error accessing log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
+            output.printError(allocator, "Error accessing log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
             handleErrorFn(err);
             return;
         }
@@ -1028,7 +1032,7 @@ pub fn handleLogCommand(
 
     // Read and print the log file
     const log_content = std.fs.cwd().readFileAlloc(allocator, log_file_path, 10 * 1024 * 1024) catch |err| {
-        output.printError("Failed to read log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Failed to read log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
         handleErrorFn(err);
         return;
     };
@@ -1036,7 +1040,7 @@ pub fn handleLogCommand(
 
     // Output the log content
     std.io.getStdOut().writer().print("{s}", .{log_content}) catch |err| {
-        output.printError("Error writing log to stdout: {s}", .{@errorName(err)}) catch {};
+        output.printError(allocator, "Error writing log to stdout: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
@@ -1054,17 +1058,17 @@ pub fn handleValidateCommand(
 
     if (args.len > 2) {
         validate_config_path = args[2];
-        output.print("Using provided file path: {s}", .{validate_config_path}) catch {};
+        output.print(allocator, "Using provided file path: {s}", .{validate_config_path}) catch {};
     } else {
-        output.print("Using default config path: {s}", .{validate_config_path}) catch {};
+        output.print(allocator, "Using default config path: {s}", .{validate_config_path}) catch {};
     }
 
     // Check if file exists before validating
     if (std.fs.cwd().openFile(validate_config_path, .{})) |file| {
         file.close();
-        output.print("File exists, proceeding with validation", .{}) catch {};
+        output.print(allocator, "File exists, proceeding with validation", .{}) catch {};
     } else |err| {
-        output.printError("Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
+        output.printError(allocator, "Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     }
 
@@ -1093,7 +1097,7 @@ pub fn handleValidateCommand(
             std.process.exit(1);
         } else {
             // No errors found
-            output.print("Configuration file is valid!", .{}) catch {};
+            output.print(allocator, "Configuration file is valid!", .{}) catch {};
         }
     } else |err| {
         validateSingleFile(err);
