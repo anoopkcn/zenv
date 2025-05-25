@@ -120,7 +120,7 @@ fn printUsage() void {
         \\  help, --help             Shows this help message.
         \\
         \\Options for 'zenv setup <name>':
-        \\  --init                   Automatically runs 'zenv init <name>' before 'zenv setup'.
+        \\  --init                   Creates and populates 'zenv.json' file before 'zenv setup'.
         \\                           Convenient for creating and setting up in one step.
         \\
         \\  --dev                    Installs the current directory's project in editable mode.
