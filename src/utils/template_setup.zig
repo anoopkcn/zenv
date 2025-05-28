@@ -8,7 +8,7 @@ const output = @import("output.zig");
 const template = @import("template.zig");
 
 // Embed the template file at compile time
-const SETUP_ENV_TEMPLATE = @embedFile("templates/setup_env.sh.template");
+const SETUP_ENV_TEMPLATE = @embedFile("templates/setup_env.template");
 
 // Public function to export
 pub fn createSetupScriptFromTemplate(

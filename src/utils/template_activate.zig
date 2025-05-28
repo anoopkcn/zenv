@@ -9,7 +9,7 @@ const output = @import("output.zig");
 const template = @import("template.zig");
 
 // Embed the template file at compile time
-const ACTIVATION_TEMPLATE = @embedFile("templates/activate.sh.template");
+const ACTIVATION_TEMPLATE = @embedFile("templates/activate.template");
 
 // Public function to export
 pub fn createScriptFromTemplate(
@@ -214,7 +214,6 @@ fn createActivationScript(
     defer allocator.free(desc_slice);
     try replacements.put("ENV_DESCRIPTION", desc_slice);
 
-    // Process the template directly using the embedded template content
     const processed_content = try template.processTemplateString(allocator, ACTIVATION_TEMPLATE, replacements);
     defer allocator.free(processed_content);
 
