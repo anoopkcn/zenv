@@ -141,8 +141,18 @@ pub fn handleInitCommand(
         };
     } else {
         // Process the default template
-        processed_content = template_json.createJsonConfigFromTemplate(allocator, replacements) catch |err| {
-            output.printError(allocator, "Processing default template: {s}", .{@errorName(err)}) catch {};
+        replacements.put("ENV_NAME", "test") catch |err| {
+            output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+        replacements.put("ENV_DESCRIPTION", "Test env created by zenv") catch |err| {
+            output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+
+        // Process the custom template
+        processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
+            output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
     }
@@ -163,7 +173,7 @@ pub fn handleInitCommand(
     if (args.len > 3 or args.len > 2) {
         output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
     } else {
-        output.print(allocator, "Created zenv.json. Run 'zenv setup test", .{}) catch {};
+        output.print(allocator, "Created zenv.json. Run 'zenv setup test'", .{}) catch {};
     }
 }
 
