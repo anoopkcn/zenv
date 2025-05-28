@@ -100,62 +100,30 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    var processed_content: []const u8 = undefined;
+    var custom_env_name: []const u8 = "test";
+    var custom_env_desc: []const u8 = "Env config created by zenv";
 
-    // Check if a custom environment name is provided
     if (args.len > 2) {
-        const custom_env_name = args[2];
-        var desc_to_free: ?[]const u8 = null; // To manage freeing memory only if we allocated it.
-
-        const custom_env_desc = if (args.len > 3) blk: {
-            // Use the user-provided description from args[3]
-            // This slice is valid for the lifetime of `args`, which is fine for `replacements`
-            break :blk args[3];
-        } else blk: {
-            // Generate default description if not provided
-            const generated_desc = std.fmt.allocPrint(allocator, "Description for {s}", .{custom_env_name}) catch |err| {
-                output.printError(allocator, "Formatting custom env description: {s}", .{@errorName(err)}) catch {};
-                std.process.exit(1);
-            };
-            desc_to_free = generated_desc; // Mark this for freeing later
-            break :blk generated_desc;
-        };
-
-        if (desc_to_free) |d_free| {
-            defer allocator.free(d_free);
+        custom_env_name = args[2];
+        if (args.len > 3) {
+            custom_env_desc = args[3];
         }
-
-        replacements.put("ENV_NAME", custom_env_name) catch |err| {
-            output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
-        replacements.put("ENV_DESCRIPTION", custom_env_desc) catch |err| {
-            output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
-
-        // Process the custom template
-        processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
-            output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
-    } else {
-        // Process the default template
-        replacements.put("ENV_NAME", "test") catch |err| {
-            output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
-        replacements.put("ENV_DESCRIPTION", "Test env created by zenv") catch |err| {
-            output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
-
-        // Process the custom template
-        processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
-            output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
-            std.process.exit(1);
-        };
     }
+
+    replacements.put("ENV_NAME", custom_env_name) catch |err| {
+        output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    replacements.put("ENV_DESCRIPTION", custom_env_desc) catch |err| {
+        output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+
+    // Process the custom template
+    const processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
+        output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
     defer allocator.free(processed_content);
 
     // Write template to file
@@ -170,11 +138,7 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    if (args.len > 3 or args.len > 2) {
-        output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{args[2]}) catch {};
-    } else {
-        output.print(allocator, "Created zenv.json. Run 'zenv setup test'", .{}) catch {};
-    }
+    output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{custom_env_name}) catch {};
 }
 
 pub fn handleSetupCommand(
