@@ -763,7 +763,7 @@ pub fn handlePythonCommand(
         // const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
         // try output.print(allocator,"Pinning newly installed Python {s}", .{installed_version});
         // try python.setDefaultPythonPath(allocator, installed_version);
-    } else if (std.mem.eql(u8, subcommand, "use")) {
+    } else if (std.mem.eql(u8, subcommand, "use") or std.mem.eql(u8, subcommand, "pin")) {
         // Python use [version] command
         if (args.len < 4) {
             output.printError(allocator, "Missing version argument for 'python use' command", .{}) catch {};
