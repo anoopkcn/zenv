@@ -112,7 +112,7 @@ fn printUsage() void {
         \\
         \\  python <subcommand>      (Experimantal feature) Manages Python installations:
         \\    install <version>      Downloads and installs a specific Python version for zenv.
-        \\    use <version>          Sets <version> as the pinned Python for zenv to prioritize.
+        \\    pin <version>          Sets <version> as the pinned Python for zenv to prioritize.
         \\    list                   Shows Python versions installed and managed by zenv.
         \\
         \\  version, -v, --version   Prints the installed zenv version.
