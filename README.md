@@ -200,9 +200,9 @@ If you would like to use zenv-managed default Python for the environment, run:
 zenv python install <version>
 
 # Pin a specic python version
-zenv python use <version>
+zenv python pin <version>
 
-# use the pinned version
+# usethe pinned version
 zenv setup <name> --python
 ```
 
