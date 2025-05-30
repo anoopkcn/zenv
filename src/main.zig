@@ -293,7 +293,7 @@ pub fn main() anyerror!void {
                     },
                     error.EnvironmentNotRegistered => {
                         output.printError(alloc,
-                            \\The specified environment is not registered. Use 'zenv list --all' and 'zenv register <name>'
+                            \\The specified environment is not registered. Use 'zenv register <name>'
                         , .{}) catch {};
                     },
                     error.MissingPythonExecutable => {
@@ -306,7 +306,7 @@ pub fn main() anyerror!void {
                     },
                     error.InvalidRegistryFormat => {
                         output.printError(alloc,
-                            \\The environment registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
+                            \\The registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
                         , .{}) catch {};
                     },
                     error.ConfigFileReadError => {
