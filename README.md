@@ -80,7 +80,7 @@ zenv setup <name>
 
 ```json
 {
-  "base_dir": "zenv"
+  "base_dir": "zenv",
   "test": {
     "target_machines": ["*"],
     "description": "Basic environment JURECA and any machine",
