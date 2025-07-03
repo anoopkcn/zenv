@@ -1039,3 +1039,189 @@ pub fn handleValidateCommand(
         std.process.exit(1);
     }
 }
+
+pub fn handleAliasCommand(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        output.printError(allocator,
+            \\Missing alias subcommand.
+            \\Usage: zenv alias <create|remove|list|show> [arguments]
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const subcommand = args[2];
+
+    if (std.mem.eql(u8, subcommand, "create")) {
+        handleAliasCreate(allocator, registry, args, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "remove")) {
+        handleAliasRemove(allocator, registry, args, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "list")) {
+        handleAliasList(allocator, registry, args, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "show")) {
+        handleAliasShow(allocator, registry, args, handleErrorFn);
+    } else {
+        output.printError(allocator,
+            \\Unknown alias subcommand '{s}'.
+            \\Usage: zenv alias <create|remove|list|show> [arguments]
+        , .{subcommand}) catch {};
+        handleErrorFn(error.ArgsError);
+    }
+}
+
+fn handleAliasCreate(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 5) {
+        output.printError(allocator,
+            \\Missing arguments for alias create.
+            \\Usage: zenv alias create <alias_name> <env_name|env_id>
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const alias_name = args[3];
+    const env_identifier = args[4];
+
+    // Check if alias name would conflict with existing commands
+    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "python", "log", "run", "validate", "alias", "help", "version" };
+    for (reserved_names) |reserved| {
+        if (std.mem.eql(u8, alias_name, reserved)) {
+            output.printError(allocator, "Alias name '{s}' conflicts with existing command.", .{alias_name}) catch {};
+            handleErrorFn(error.ArgsError);
+            return;
+        }
+    }
+
+    // Check if alias name is "." (reserved for current directory)
+    if (std.mem.eql(u8, alias_name, ".")) {
+        output.printError(allocator, "Alias name '.' is reserved for current directory notation.", .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    // Resolve environment identifier to get the actual environment name
+    const target_entry = env.lookupRegistryEntry(allocator, registry, env_identifier, handleErrorFn) orelse return;
+    const target_env_name = target_entry.env_name;
+
+    // Add alias to registry
+    registry.addAlias(alias_name, target_env_name) catch |err| {
+        switch (err) {
+            error.EnvironmentNotFound => {
+                output.printError(allocator, "Environment '{s}' not found.", .{env_identifier}) catch {};
+                handleErrorFn(err);
+                return;
+            },
+            error.AliasAlreadyExists => {
+                output.printError(allocator, "Alias '{s}' already exists.", .{alias_name}) catch {};
+                handleErrorFn(err);
+                return;
+            },
+            else => {
+                output.printError(allocator, "Failed to create alias: {s}", .{@errorName(err)}) catch {};
+                handleErrorFn(err);
+                return;
+            },
+        }
+    };
+
+    // Save registry
+    registry.save() catch |err| {
+        output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+
+    output.print(allocator, "Alias '{s}' created for environment '{s}'.", .{ alias_name, target_env_name }) catch {};
+}
+
+fn handleAliasRemove(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 4) {
+        output.printError(allocator,
+            \\Missing alias name.
+            \\Usage: zenv alias remove <alias_name>
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const alias_name = args[3];
+
+    if (registry.removeAlias(alias_name)) {
+        // Save registry
+        registry.save() catch |err| {
+            output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
+            handleErrorFn(err);
+            return;
+        };
+
+        output.print(allocator, "Alias '{s}' removed.", .{alias_name}) catch {};
+    } else {
+        output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
+        handleErrorFn(error.AliasNotFound);
+    }
+}
+
+fn handleAliasList(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    _ = args;
+    _ = handleErrorFn;
+
+    const aliases = registry.listAliases();
+
+    if (aliases.count() == 0) {
+        output.print(allocator, "No aliases defined.", .{}) catch {};
+        return;
+    }
+
+    output.print(allocator, "Defined aliases:", .{}) catch {};
+    var iterator = aliases.iterator();
+    while (iterator.next()) |alias_entry| {
+        const alias_name = alias_entry.key_ptr.*;
+        const env_name = alias_entry.value_ptr.*;
+        output.print(allocator, "  {s} -> {s}", .{ alias_name, env_name }) catch {};
+    }
+}
+
+fn handleAliasShow(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 4) {
+        output.printError(allocator,
+            \\Missing alias name.
+            \\Usage: zenv alias show <alias_name>
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const alias_name = args[3];
+
+    if (registry.resolveAlias(alias_name)) |target_env| {
+        output.print(allocator, "Alias '{s}' points to environment '{s}'.", .{ alias_name, target_env }) catch {};
+    } else {
+        output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
+        handleErrorFn(error.AliasNotFound);
+    }
+}

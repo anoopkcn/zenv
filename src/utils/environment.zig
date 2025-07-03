@@ -670,10 +670,16 @@ pub fn lookupRegistryEntry(
         return lookupCurrentDirectoryEnvironment(allocator, registry, handleErrorFn);
     }
 
-    const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
+    // Check if identifier is an alias and resolve it
+    const resolved_identifier = if (registry.resolveAlias(identifier)) |target_env|
+        target_env
+    else
+        identifier;
+
+    const is_potential_id_prefix = resolved_identifier.len >= 7 and resolved_identifier.len < 40;
 
     // Look up environment in registry (returns a copy)
-    const entry_copy = registry.lookup(identifier) orelse {
+    const entry_copy = registry.lookup(resolved_identifier) orelse {
         // Special handling for ambiguous ID prefixes
         if (is_potential_id_prefix) {
             var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
@@ -681,7 +687,7 @@ pub fn lookupRegistryEntry(
             var match_count: usize = 0;
 
             for (registry.entries.items) |reg_entry| {
-                if (reg_entry.id.len >= identifier.len and std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier)) {
+                if (reg_entry.id.len >= resolved_identifier.len and std.mem.eql(u8, reg_entry.id[0..resolved_identifier.len], resolved_identifier)) {
                     match_count += 1;
                     // Collect names only if we find more than one match
                     if (match_count > 1) {
@@ -703,7 +709,7 @@ pub fn lookupRegistryEntry(
             }
 
             if (match_count > 1) {
-                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{identifier}) catch {};
+                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{resolved_identifier}) catch {};
                 // Print the collected names
                 for (matching_envs.items) |env_name| {
                     std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
@@ -717,7 +723,11 @@ pub fn lookupRegistryEntry(
         }
 
         // Default error for no matches (exact or unique prefix)
-        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
+        const display_identifier = if (registry.resolveAlias(identifier) != null) 
+            identifier // Show original alias name in error
+        else 
+            resolved_identifier;
+        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
         std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return null;

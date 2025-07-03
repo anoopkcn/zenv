@@ -391,17 +391,27 @@ const RegistryJSON = struct {
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
     entries: std.ArrayList(RegistryEntry),
+    aliases: StringHashMap([]const u8), // Maps alias -> environment_name
 
     pub fn init(allocator: Allocator) EnvironmentRegistry {
         return .{
             .allocator = allocator,
             .entries = std.ArrayList(RegistryEntry).init(allocator),
+            .aliases = StringHashMap([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *EnvironmentRegistry) void {
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.deinit();
+        
+        // Free aliases
+        var iterator = self.aliases.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.aliases.deinit();
     }
 
     pub fn load(allocator: Allocator) !EnvironmentRegistry {
@@ -519,6 +529,28 @@ pub const EnvironmentRegistry = struct {
             }
         }
 
+        // Load aliases if they exist
+        if (root.object.get("aliases")) |aliases_value| {
+            if (aliases_value == .object) {
+                const aliases_obj = aliases_value.object;
+                var alias_iter = aliases_obj.iterator();
+                while (alias_iter.next()) |alias_entry| {
+                    const alias_name = alias_entry.key_ptr.*;
+                    const alias_target = alias_entry.value_ptr.*;
+                    
+                    if (alias_target == .string) {
+                        const alias_name_owned = try allocator.dupe(u8, alias_name);
+                        errdefer allocator.free(alias_name_owned);
+                        
+                        const alias_target_owned = try allocator.dupe(u8, alias_target.string);
+                        errdefer allocator.free(alias_target_owned);
+                        
+                        try registry.aliases.put(alias_name_owned, alias_target_owned);
+                    }
+                }
+            }
+        }
+
         return registry;
     }
 
@@ -553,6 +585,14 @@ pub const EnvironmentRegistry = struct {
         }
 
         try root.put("environments", json.Value{ .array = entries_array });
+        
+        // Save aliases
+        var aliases_obj = json.ObjectMap.init(arena.allocator());
+        var alias_iter = self.aliases.iterator();
+        while (alias_iter.next()) |alias_entry| {
+            try aliases_obj.put(alias_entry.key_ptr.*, json.Value{ .string = alias_entry.value_ptr.* });
+        }
+        try root.put("aliases", json.Value{ .object = aliases_obj });
 
         // StringBuffer for creating the JSON string
         var string_buffer = std.ArrayList(u8).init(self.allocator);
@@ -681,5 +721,44 @@ pub const EnvironmentRegistry = struct {
         }
 
         return null;
+    }
+    
+    // Alias management methods
+    pub fn addAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !void {
+        // Check if environment exists
+        if (self.lookup(env_name) == null) {
+            return error.EnvironmentNotFound;
+        }
+        
+        // Check if alias already exists
+        if (self.aliases.get(alias_name) != null) {
+            return error.AliasAlreadyExists;
+        }
+        
+        // Create owned copies
+        const alias_name_owned = try self.allocator.dupe(u8, alias_name);
+        errdefer self.allocator.free(alias_name_owned);
+        
+        const env_name_owned = try self.allocator.dupe(u8, env_name);
+        errdefer self.allocator.free(env_name_owned);
+        
+        try self.aliases.put(alias_name_owned, env_name_owned);
+    }
+    
+    pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) bool {
+        if (self.aliases.fetchRemove(alias_name)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+            return true;
+        }
+        return false;
+    }
+    
+    pub fn resolveAlias(self: *const EnvironmentRegistry, identifier: []const u8) ?[]const u8 {
+        return self.aliases.get(identifier);
+    }
+    
+    pub fn listAliases(self: *const EnvironmentRegistry) StringHashMap([]const u8) {
+        return self.aliases;
     }
 };

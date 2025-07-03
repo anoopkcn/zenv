@@ -22,6 +22,7 @@ pub const Command = enum {
     log,
     run,
     validate,
+    alias,
     help,
     version,
     @"-v",
@@ -44,6 +45,7 @@ pub const Command = enum {
             .{ "log", .log },
             .{ "run", .run },
             .{ "validate", .validate },
+            .{ "alias", .alias },
             .{ "help", .help },
             .{ "version", .version },
             .{ "-v", .@"-v" },
@@ -67,7 +69,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages Python virtual environments based on zenv.json configuration.
@@ -108,6 +110,12 @@ fn printUsage() void {
         \\                           Reports errors with line numbers and field names if found.
         \\
         \\  log <name|id|.>          Displays the setup log file for the specified environment.
+        \\
+        \\  alias <subcommand>       Manages environment aliases for easier access:
+        \\    create <alias> <env>   Creates an alias for an environment.
+        \\    remove <alias>         Removes an existing alias.
+        \\    list                   Lists all defined aliases.
+        \\    show <alias>           Shows what environment an alias points to.
         \\
         \\  python <subcommand>      (Experimantal feature) Manages Python installations:
         \\    install <version>      Downloads and installs a specific Python version for zenv.
@@ -165,7 +173,6 @@ fn printUsage() void {
         \\  Use '.' as the environment identifier to automatically select an environment
         \\  from the current directory. This works when you're in a directory containing
         \\  a zenv.json file and have registered environments for that directory.
-        \\  Example: 'zenv run . python script.py' instead of 'zenv run myenv python script.py'
         \\
     ;
     std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
@@ -210,6 +217,7 @@ pub fn main() anyerror!void {
         .log,
         .run,
         .validate,
+        .alias,
         .unknown,
         => {},
     }
@@ -455,6 +463,7 @@ pub fn main() anyerror!void {
         .log => commands.handleLogCommand(allocator, &registry, args, handleError.func),
         .run => commands.handleRunCommand(allocator, &registry, args, handleError.func),
         .validate => commands.handleValidateCommand(allocator, config_path, args, handleError.func),
+        .alias => commands.handleAliasCommand(allocator, &registry, args, handleError.func),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

@@ -27,6 +27,8 @@ pub const ZenvError = error{
     AmbiguousIdentifier, // Added for ambiguous ID prefixes
     InvalidRegistryFormat, // Added when registry JSON structure is wrong
     PathTraversalAttempt, // Added to handle path traversal attack attempts
+    AliasAlreadyExists, // Added for alias creation conflicts
+    AliasNotFound, // Added for alias removal/lookup failures
 };
 
 /// Logs an error message and returns the provided error.
