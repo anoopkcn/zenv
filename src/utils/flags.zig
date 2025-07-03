@@ -8,6 +8,7 @@ pub const CommandFlags = struct {
     use_uv: bool = false, // Whether to use 'uv' instead of 'pip'
     init_mode: bool = false, // Whether to initialize the environment before setup
     no_cache: bool = false, // Whether to disable package cache when installing dependencies
+    create_jupyter_kernel: bool = false, // Whether to create a Jupyter kernel after setup
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
@@ -28,6 +29,8 @@ pub const CommandFlags = struct {
                 flags.init_mode = true;
             } else if (std.mem.eql(u8, arg, "--no-cache")) {
                 flags.no_cache = true;
+            } else if (std.mem.eql(u8, arg, "--jupyter")) {
+                flags.create_jupyter_kernel = true;
             }
         }
 

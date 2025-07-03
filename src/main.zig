@@ -23,6 +23,7 @@ pub const Command = enum {
     run,
     validate,
     alias,
+    jupyter,
     help,
     version,
     @"-v",
@@ -46,6 +47,7 @@ pub const Command = enum {
             .{ "run", .run },
             .{ "validate", .validate },
             .{ "alias", .alias },
+            .{ "jupyter", .jupyter },
             .{ "help", .help },
             .{ "version", .version },
             .{ "-v", .@"-v" },
@@ -117,6 +119,12 @@ fn printUsage() void {
         \\    list                   Lists all defined aliases.
         \\    show <alias>           Shows what environment an alias points to.
         \\
+        \\  jupyter <subcommand>     Manages Jupyter kernels for environments:
+        \\    create <env_name>      Creates a Jupyter kernel for the specified environment.
+        \\    remove <env_name>      Removes the Jupyter kernel for the specified environment.
+        \\    list                   Lists all zenv-managed Jupyter kernels.
+        \\    check                  Checks if Jupyter is installed and available.
+        \\
         \\  python <subcommand>      (Experimantal feature) Manages Python installations:
         \\    install <version>      Downloads and installs a specific Python version for zenv.
         \\    pin <version>          Sets <version> as the pinned Python for zenv to prioritize.
@@ -148,6 +156,9 @@ fn printUsage() void {
         \\
         \\  --no-cache               Disables the package cache when installing dependencies.
         \\                           Ensures fresh package downloads for each installation.
+        \\
+        \\  --jupyter                Creates a Jupyter kernel for the environment after setup.
+        \\                           Equivalent to running 'zenv jupyter create <name>' after setup.
         \\
         \\[z] Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
@@ -218,6 +229,7 @@ pub fn main() anyerror!void {
         .run,
         .validate,
         .alias,
+        .jupyter,
         .unknown,
         => {},
     }
@@ -464,6 +476,7 @@ pub fn main() anyerror!void {
         .run => commands.handleRunCommand(allocator, &registry, args, handleError.func),
         .validate => commands.handleValidateCommand(allocator, config_path, args, handleError.func),
         .alias => commands.handleAliasCommand(allocator, &registry, args, handleError.func),
+        .jupyter => commands.handleJupyterCommand(allocator, args, handleError.func),
 
         // These were handled above, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,

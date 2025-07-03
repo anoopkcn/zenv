@@ -6,6 +6,7 @@ const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
 const python = @import("utils/python.zig");
+const jupyter = @import("utils/jupyter.zig");
 const configurations = @import("utils/config.zig");
 const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
@@ -375,6 +376,13 @@ pub fn handleSetupCommand(
         env_config.target_machines.items,
     );
     try registry.save();
+
+    // Create Jupyter kernel if requested
+    if (flags.create_jupyter_kernel) {
+        jupyter.createKernel(allocator, env_name, null, null) catch |err| {
+            output.printError(allocator, "Failed to create Jupyter kernel: {s}", .{@errorName(err)}) catch {};
+        };
+    }
 
     output.print(allocator,
         \\Environment '{s}' setup complete and registered in global registry.
@@ -1093,7 +1101,7 @@ fn handleAliasCreate(
     const env_identifier = args[4];
 
     // Check if alias name would conflict with existing commands
-    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "python", "log", "run", "validate", "alias", "help", "version" };
+    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "python", "log", "run", "validate", "alias", "jupyter", "help", "version" };
     for (reserved_names) |reserved| {
         if (std.mem.eql(u8, alias_name, reserved)) {
             output.printError(allocator, "Alias name '{s}' conflicts with existing command.", .{alias_name}) catch {};
@@ -1224,4 +1232,114 @@ fn handleAliasShow(
         output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
         handleErrorFn(error.AliasNotFound);
     }
+}
+
+pub fn handleJupyterCommand(
+    allocator: Allocator,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 3) {
+        output.printError(allocator,
+            \\Missing jupyter subcommand.
+            \\Usage: zenv jupyter <create|remove|list|check> [arguments]
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const subcommand = args[2];
+
+    if (std.mem.eql(u8, subcommand, "create")) {
+        handleJupyterCreate(allocator, args, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "remove")) {
+        handleJupyterRemove(allocator, args, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "list")) {
+        handleJupyterList(allocator, handleErrorFn);
+    } else if (std.mem.eql(u8, subcommand, "check")) {
+        handleJupyterCheck(allocator, handleErrorFn);
+    } else {
+        output.printError(allocator,
+            \\Unknown jupyter subcommand '{s}'.
+            \\Usage: zenv jupyter <create|remove|list|check> [arguments]
+        , .{subcommand}) catch {};
+        handleErrorFn(error.ArgsError);
+    }
+}
+
+fn handleJupyterCreate(
+    allocator: Allocator,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 4) {
+        output.printError(allocator,
+            \\Missing environment name argument.
+            \\Usage: zenv jupyter create <env_name> [--name <kernel_name>] [--display-name <display_name>]
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const env_name = args[3];
+    var custom_name: ?[]const u8 = null;
+    var custom_display_name: ?[]const u8 = null;
+
+    // Parse optional flags
+    var i: usize = 4;
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
+            custom_name = args[i + 1];
+            i += 2;
+        } else if (std.mem.eql(u8, args[i], "--display-name") and i + 1 < args.len) {
+            custom_display_name = args[i + 1];
+            i += 2;
+        } else {
+            output.printError(allocator, "Unknown flag: {s}", .{args[i]}) catch {};
+            handleErrorFn(error.ArgsError);
+            return;
+        }
+    }
+
+    jupyter.createKernel(allocator, env_name, custom_name, custom_display_name) catch |err| {
+        handleErrorFn(err);
+    };
+}
+
+fn handleJupyterRemove(
+    allocator: Allocator,
+    args: []const []const u8,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    if (args.len < 4) {
+        output.printError(allocator,
+            \\Missing environment name argument.
+            \\Usage: zenv jupyter remove <env_name>
+        , .{}) catch {};
+        handleErrorFn(error.ArgsError);
+        return;
+    }
+
+    const env_name = args[3];
+    jupyter.removeKernel(allocator, env_name) catch |err| {
+        handleErrorFn(err);
+    };
+}
+
+fn handleJupyterList(
+    allocator: Allocator,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    jupyter.listKernels(allocator) catch |err| {
+        handleErrorFn(err);
+    };
+}
+
+fn handleJupyterCheck(
+    allocator: Allocator,
+    handleErrorFn: fn (anyerror) void,
+) void {
+    jupyter.checkJupyter(allocator) catch |err| {
+        handleErrorFn(err);
+    };
 }
