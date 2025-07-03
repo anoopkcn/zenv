@@ -621,7 +621,7 @@ pub fn handleDeregisterCommand(
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument.
-            \\Usage: zenv deregister <name|id>
+            \\Usage: zenv deregister <name|id|.>
         , .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
@@ -642,8 +642,8 @@ pub fn handleDeregisterCommand(
     defer registry.allocator.free(env_name);
 
     // Remove the environment from the registry using the name
-    // We pass the original identifier which could be a name or ID
-    if (registry.deregister(identifier)) {
+    // We pass the actual environment name from the resolved entry
+    if (registry.deregister(entry.env_name)) {
         // Save the registry
         registry.save() catch |err| {
             output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
@@ -668,7 +668,7 @@ pub fn handleCdCommand(
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument
-            \\Usage: zenv cd <name|id>
+            \\Usage: zenv cd <name|id|.>
         , .{}) catch {};
         handleErrorFn(error.EnvironmentNotFound);
         return;
@@ -676,46 +676,7 @@ pub fn handleCdCommand(
 
     const identifier = args[2];
 
-    // Check if this might be a partial ID (7+ characters)
-    const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
-
-    // Look up environment in registry
-    const entry = registry.lookup(identifier) orelse {
-        // Special handling for ambiguous ID prefixes
-        if (is_potential_id_prefix) {
-            // Count how many environments have this ID prefix
-            var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
-            defer matching_envs.deinit();
-            var match_found = false;
-            var isSameId = false;
-
-            for (registry.entries.items) |reg_entry| {
-                isSameId = std.mem.eql(u8, reg_entry.id[0..identifier.len], identifier);
-                if (reg_entry.id.len >= identifier.len and isSameId) {
-                    match_found = true;
-                    matching_envs.append(reg_entry.env_name) catch continue;
-                }
-            }
-
-            if (match_found and matching_envs.items.len > 1) {
-                output.printError(allocator, "ID prefix '{s}' matches multiple environments:", .{identifier}) catch {};
-                for (matching_envs.items) |env_name| {
-                    output.printError(allocator, "  - {s}", .{env_name}) catch {};
-                }
-                output.printError(allocator, "Please use more characters to make the ID unique.", .{}) catch {};
-                handleErrorFn(error.AmbiguousIdentifier);
-                return;
-            }
-        }
-
-        // Default error for no matches
-        output.printError(allocator,
-            \\Environment with name or ID '{s}' not found in registry
-            \\use 'zenv list --all' to list all available environments
-        , .{identifier}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return;
-    };
+    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
 
     // Get project directory from registry entry
     const project_dir = entry.project_dir;

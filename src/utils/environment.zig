@@ -579,12 +579,83 @@ pub fn getAndValidateEnvironment(
     return env_config;
 }
 
+/// Helper function to look up environment from current directory's zenv.json
+/// This function is used when identifier is "." to represent the current directory's environment
+///
+/// Params:
+///   - allocator: Memory allocator
+///   - registry: The environment registry to search in
+///   - handleErrorFn: Callback function to handle errors
+///
+/// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
+fn lookupCurrentDirectoryEnvironment(
+    allocator: Allocator,
+    registry: *const config_module.EnvironmentRegistry,
+    handleErrorFn: fn (anyerror) void,
+) ?RegistryEntry {
+    const config_path = "zenv.json";
+    
+    // Check if zenv.json exists in current directory
+    std.fs.cwd().access(config_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            output.printError(allocator, "No zenv.json found in current directory. Cannot use '.' as environment identifier.", .{}) catch {};
+            handleErrorFn(error.ConfigFileNotFound);
+            return null;
+        } else {
+            output.printError(allocator, "Failed to access zenv.json: {s}", .{@errorName(err)}) catch {};
+            handleErrorFn(err);
+            return null;
+        }
+    };
+    
+    // Get current directory path
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+        output.printError(allocator, "Failed to get current directory path: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return null;
+    };
+    
+    // Look for environments in the registry that match the current directory
+    var matching_entries = std.ArrayList(RegistryEntry).init(allocator);
+    defer matching_entries.deinit();
+    
+    for (registry.entries.items) |reg_entry| {
+        if (std.mem.eql(u8, reg_entry.project_dir, cwd_path)) {
+            matching_entries.append(reg_entry) catch |err| {
+                output.printError(allocator, "Failed to add matching entry: {s}", .{@errorName(err)}) catch {};
+                handleErrorFn(error.OutOfMemory);
+                return null;
+            };
+        }
+    }
+    
+    if (matching_entries.items.len == 0) {
+        output.printError(allocator, "No registered environments found for current directory.", .{}) catch {};
+        output.printError(allocator, "Use 'zenv setup <env_name>' to create and register an environment.", .{}) catch {};
+        handleErrorFn(error.EnvironmentNotRegistered);
+        return null;
+    } else if (matching_entries.items.len == 1) {
+        // Return the single matching environment
+        return matching_entries.items[0];
+    } else {
+        // Multiple environments found - show user which ones
+        output.printError(allocator, "Multiple environments found for current directory:", .{}) catch {};
+        for (matching_entries.items) |entry| {
+            output.printError(allocator, "  - {s} (ID: {s})", .{ entry.env_name, entry.id[0..7] }) catch {};
+        }
+        output.printError(allocator, "Please specify the environment name or ID explicitly.", .{}) catch {};
+        handleErrorFn(error.AmbiguousIdentifier);
+        return null;
+    }
+}
+
 /// Helper function to look up a registry entry by name or ID, handling ambiguity.
 /// This function provides user-friendly error messages for common lookup issues.
 ///
 /// Params:
 ///   - registry: The environment registry to search in
-///   - identifier: The name or ID to look up (can be a partial ID if 7+ characters)
+///   - identifier: The name or ID to look up (can be a partial ID if 7+ characters, or "." for current directory)
 ///   - handleErrorFn: Callback function to handle errors
 ///
 /// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
@@ -594,6 +665,11 @@ pub fn lookupRegistryEntry(
     identifier: []const u8,
     handleErrorFn: fn (anyerror) void,
 ) ?RegistryEntry {
+    // Handle "." as current directory environment
+    if (std.mem.eql(u8, identifier, ".")) {
+        return lookupCurrentDirectoryEnvironment(allocator, registry, handleErrorFn);
+    }
+
     const is_potential_id_prefix = identifier.len >= 7 and identifier.len < 40;
 
     // Look up environment in registry (returns a copy)

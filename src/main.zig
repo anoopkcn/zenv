@@ -81,14 +81,14 @@ fn printUsage() void {
         \\                           Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
         \\                           This is the primary command to build an environment.
         \\
-        \\  activate <name|id>       Outputs the activation script path for an environment.
-        \\                           To use: source $(zenv activate <name|id>)
+        \\  activate <name|id|.>     Outputs the activation script path for an environment.
+        \\                           To use: source $(zenv activate <name|id|.>)
         \\
-        \\  run <name|id> <command>  Executes a <command> within the specified isolated environment.
-        \\                           Does NOT require manual activation of the environment.
+        \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
+        \\                             Does NOT require manual activation of the environment.
         \\
-        \\  cd <name|id>             Outputs the project directory path for an environment.
-        \\                           To use: cd $(zenv cd <name|id>)
+        \\  cd <name|id|.>           Outputs the project directory path for an environment.
+        \\                           To use: cd $(zenv cd <name|id|.>)
         \\
         \\  list                     Lists registered environments accessible on this machine.
         \\
@@ -97,7 +97,7 @@ fn printUsage() void {
         \\  register <name>          Adds the environment '<name>' (from current 'zenv.json') to the
         \\                           global registry[a], making it accessible from any location.
         \\
-        \\  deregister <name|id>     Removes an environment from the global registry.
+        \\  deregister <name|id|.>   Removes an environment from the global registry.
         \\                           The virtual environment files are NOT deleted.
         \\
         // \\  rm <name|id>             De-registers the environment AND permanently deletes its
@@ -107,7 +107,7 @@ fn printUsage() void {
         \\                           will validate the 'zenv.json' file in the current directory.
         \\                           Reports errors with line numbers and field names if found.
         \\
-        \\  log <name|id>            Displays the setup log file for the specified environment.
+        \\  log <name|id|.>          Displays the setup log file for the specified environment.
         \\
         \\  python <subcommand>      (Experimantal feature) Manages Python installations:
         \\    install <version>      Downloads and installs a specific Python version for zenv.
@@ -160,6 +160,12 @@ fn printUsage() void {
         \\  3. zenv-pinned Python (set via 'zenv python use <version>').
         \\  4. System Python.
         \\  Use 'zenv setup <name> --python' to use only the pinned version.
+        \\
+        \\[.] Dot Notation:
+        \\  Use '.' as the environment identifier to automatically select an environment
+        \\  from the current directory. This works when you're in a directory containing
+        \\  a zenv.json file and have registered environments for that directory.
+        \\  Example: 'zenv run . python script.py' instead of 'zenv run myenv python script.py'
         \\
     ;
     std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
