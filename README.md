@@ -297,6 +297,12 @@ Commands:
     list                   Lists all defined aliases.
     show <alias>           Shows what environment an alias points to.
 
+  jupyter <subcommand>     Manages Jupyter kernels for environments:
+    create <env_name>      Creates a Jupyter kernel for the specified environment.
+    remove <env_name>      Removes the Jupyter kernel for the specified environment.
+    list                   Lists all zenv-managed Jupyter kernels.
+    check                  Checks if Jupyter is installed and available.
+
   python <subcommand>      (Experimantal feature) Manages Python installations:
     install <version>      Downloads and installs a specific Python version for zenv.
     pin <version>          Sets <version> as the pinned Python for zenv to prioritize.
@@ -310,8 +316,7 @@ Options for 'zenv setup <name>':
   --init                   Creates and populates 'zenv.json' file before 'zenv setup'.
                            Convenient for creating and setting up in one step.
 
-  --dev                    Installs the current directory's project in editable mode.
-                           Equivalent to 'pip install --editable .' command.
+  --dev                    Installs the current directory's project in editable mode.                                                            Equivalent to 'pip install --editable .' command.
 
   --uv                     Uses 'uv' instead of 'pip' for package operations.
                            Ensure 'uv' is installed and accessible.
@@ -328,6 +333,9 @@ Options for 'zenv setup <name>':
 
   --no-cache               Disables the package cache when installing dependencies.
                            Ensures fresh package downloads for each installation.
+
+  --jupyter                Creates a Jupyter kernel for the environment after setup.
+                           Equivalent to running 'zenv jupyter create <name>' after setup.
 
 [z] Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
