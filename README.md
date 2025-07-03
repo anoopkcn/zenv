@@ -291,6 +291,12 @@ Commands:
 
   log <name|id|.>          Displays the setup log file for the specified environment.
 
+  alias <subcommand>       Manages environment aliases for easier access:
+    create <alias> <env>   Creates an alias for an environment.
+    remove <alias>         Removes an existing alias.
+    list                   Lists all defined aliases.
+    show <alias>           Shows what environment an alias points to.
+
   python <subcommand>      (Experimantal feature) Manages Python installations:
     install <version>      Downloads and installs a specific Python version for zenv.
     pin <version>          Sets <version> as the pinned Python for zenv to prioritize.
@@ -347,7 +353,6 @@ Options for 'zenv setup <name>':
   Use '.' as the environment identifier to automatically select an environment
   from the current directory. This works when you're in a directory containing
   a zenv.json file and have registered environments for that directory.
-  Example: 'zenv run . python script.py' instead of 'zenv run myenv python script.py'
 ```
 
 ## Issues
