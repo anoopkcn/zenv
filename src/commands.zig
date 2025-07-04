@@ -482,9 +482,22 @@ pub fn handleListCommand(
         stdout.print("\n  project : {s}", .{entry.project_dir}) catch {};
         stdout.print("\n  venv    : {s}", .{entry.venv_path}) catch {};
 
+        // Print aliases if any exist
+        if (entry.aliases.items.len > 0) {
+            stdout.print("\n  aliases : ", .{}) catch {};
+            for (entry.aliases.items, 0..) |alias, i| {
+                if (i > 0) {
+                    stdout.print(", ", .{}) catch {};
+                }
+                stdout.print("{s}", .{alias}) catch {};
+            }
+        }
+
         // Optionally print description
         if (entry.description) |desc| {
             stdout.print("\n  desc    : {s}\n\n", .{desc}) catch {};
+        } else {
+            stdout.print("\n\n", .{}) catch {};
         }
 
         count += 1;
@@ -1191,21 +1204,22 @@ fn handleAliasList(
     handleErrorFn: fn (anyerror) void,
 ) void {
     _ = args;
-    _ = handleErrorFn;
 
-    const aliases = registry.listAliases();
+    const aliases = registry.listAliases(allocator) catch |err| {
+        output.printError(allocator, "Failed to list aliases: {s}", .{@errorName(err)}) catch {};
+        handleErrorFn(err);
+        return;
+    };
+    defer aliases.deinit();
 
-    if (aliases.count() == 0) {
+    if (aliases.items.len == 0) {
         output.print(allocator, "No aliases defined.", .{}) catch {};
         return;
     }
 
     output.print(allocator, "Defined aliases:", .{}) catch {};
-    var iterator = aliases.iterator();
-    while (iterator.next()) |alias_entry| {
-        const alias_name = alias_entry.key_ptr.*;
-        const env_name = alias_entry.value_ptr.*;
-        output.print(allocator, "  {s} -> {s}", .{ alias_name, env_name }) catch {};
+    for (aliases.items) |alias_entry| {
+        output.print(allocator, "  {s} -> {s}", .{ alias_entry.alias, alias_entry.env_name }) catch {};
     }
 }
 
