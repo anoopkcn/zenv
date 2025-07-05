@@ -594,7 +594,7 @@ fn lookupCurrentDirectoryEnvironment(
     handleErrorFn: fn (anyerror) void,
 ) ?RegistryEntry {
     const config_path = "zenv.json";
-    
+
     // Check if zenv.json exists in current directory
     std.fs.cwd().access(config_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
@@ -607,7 +607,7 @@ fn lookupCurrentDirectoryEnvironment(
             return null;
         }
     };
-    
+
     // Get current directory path
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
@@ -615,11 +615,11 @@ fn lookupCurrentDirectoryEnvironment(
         handleErrorFn(err);
         return null;
     };
-    
+
     // Look for environments in the registry that match the current directory
     var matching_entries = std.ArrayList(RegistryEntry).init(allocator);
     defer matching_entries.deinit();
-    
+
     for (registry.entries.items) |reg_entry| {
         if (std.mem.eql(u8, reg_entry.project_dir, cwd_path)) {
             matching_entries.append(reg_entry) catch |err| {
@@ -629,7 +629,7 @@ fn lookupCurrentDirectoryEnvironment(
             };
         }
     }
-    
+
     if (matching_entries.items.len == 0) {
         output.printError(allocator, "No registered environments found for current directory.", .{}) catch {};
         output.printError(allocator, "Use 'zenv setup <env_name>' to create and register an environment.", .{}) catch {};
@@ -723,9 +723,9 @@ pub fn lookupRegistryEntry(
         }
 
         // Default error for no matches (exact or unique prefix)
-        const display_identifier = if (registry.resolveAlias(identifier) != null) 
+        const display_identifier = if (registry.resolveAlias(identifier) != null)
             identifier // Show original alias name in error
-        else 
+        else
             resolved_identifier;
         std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
         std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};

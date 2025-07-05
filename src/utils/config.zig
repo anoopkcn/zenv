@@ -520,7 +520,7 @@ pub const EnvironmentRegistry = struct {
 
                 // Initialize aliases list for this entry
                 var aliases = ArrayList([]const u8).init(allocator);
-                
+
                 // Load aliases if they exist for this entry
                 if (entry_obj.get("aliases")) |aliases_value| {
                     if (aliases_value == .array) {
@@ -546,8 +546,6 @@ pub const EnvironmentRegistry = struct {
                 });
             }
         }
-
-
 
         return registry;
     }
@@ -729,7 +727,7 @@ pub const EnvironmentRegistry = struct {
 
         return null;
     }
-    
+
     // Alias management methods
     pub fn addAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !void {
         // Check if alias already exists across all entries
@@ -740,22 +738,22 @@ pub const EnvironmentRegistry = struct {
                 }
             }
         }
-        
+
         // Find the environment entry and add alias to it
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
                 const alias_name_owned = try self.allocator.dupe(u8, alias_name);
                 errdefer self.allocator.free(alias_name_owned);
-                
+
                 try entry.aliases.append(alias_name_owned);
                 return;
             }
         }
-        
+
         // Environment not found
         return error.EnvironmentNotFound;
     }
-    
+
     pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) bool {
         for (self.entries.items) |*entry| {
             for (entry.aliases.items, 0..) |alias, i| {
@@ -767,7 +765,7 @@ pub const EnvironmentRegistry = struct {
         }
         return false;
     }
-    
+
     pub fn resolveAlias(self: *const EnvironmentRegistry, identifier: []const u8) ?[]const u8 {
         for (self.entries.items) |entry| {
             for (entry.aliases.items) |alias| {
@@ -778,16 +776,55 @@ pub const EnvironmentRegistry = struct {
         }
         return null;
     }
-    
+
     pub fn listAliases(self: *const EnvironmentRegistry, allocator: Allocator) !ArrayList(AliasEntry) {
         var aliases = ArrayList(AliasEntry).init(allocator);
-        
+
         for (self.entries.items) |entry| {
             for (entry.aliases.items) |alias| {
                 try aliases.append(.{ .alias = alias, .env_name = entry.env_name });
             }
         }
-        
+
         return aliases;
+    }
+
+    pub fn renameEnvironment(self: *EnvironmentRegistry, old_identifier: []const u8, new_name: []const u8) !void {
+        const old_entry = self.lookup(old_identifier) orelse return error.EnvironmentNotFound;
+
+        if (self.lookup(new_name) != null) {
+            return error.EnvironmentAlreadyExists;
+        }
+
+        if (new_name.len == 0 or new_name.len > 255) {
+            return error.InvalidEnvironmentName;
+        }
+
+        for (new_name) |char| {
+            if (!std.ascii.isAlphanumeric(char) and char != '_' and char != '-' and char != '.') {
+                return error.InvalidEnvironmentName;
+            }
+        }
+
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.env_name, old_entry.env_name)) {
+                self.allocator.free(entry.env_name);
+                entry.env_name = try self.allocator.dupe(u8, new_name);
+
+                const old_venv_path = entry.venv_path;
+                const parent_dir = std.fs.path.dirname(old_venv_path) orelse return error.InvalidPath;
+
+                self.allocator.free(entry.venv_path);
+                entry.venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ parent_dir, new_name });
+
+                const new_id = try generateSHA1ID(self.allocator, new_name, entry.project_dir, entry.target_machines_str);
+                self.allocator.free(entry.id);
+                entry.id = new_id;
+
+                return;
+            }
+        }
+
+        return error.EnvironmentNotFound;
     }
 };

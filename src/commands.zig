@@ -1357,3 +1357,285 @@ fn handleJupyterCheck(
         handleErrorFn(err);
     };
 }
+
+pub fn handleRenameCommand(
+    allocator: Allocator,
+    registry: *EnvironmentRegistry,
+    args: []const []const u8,
+    handleError: fn (anyerror) void,
+) !void {
+    if (args.len < 4) {
+        output.printError(allocator, "Usage: zenv rename <old_name|id> <new_name>", .{}) catch {};
+        handleError(error.ArgsError);
+        return;
+    }
+
+    const old_identifier = args[2];
+    const new_name = args[3];
+
+    const old_entry = registry.lookup(old_identifier) orelse {
+        output.printError(allocator, "Environment '{s}' not found", .{old_identifier}) catch {};
+        handleError(error.EnvironmentNotFound);
+        return;
+    };
+
+    const old_name = try allocator.dupe(u8, old_entry.env_name);
+    defer allocator.free(old_name);
+
+    const old_venv_path = try allocator.dupe(u8, old_entry.venv_path);
+    defer allocator.free(old_venv_path);
+    const parent_dir = std.fs.path.dirname(old_venv_path) orelse {
+        output.printError(allocator, "Invalid virtual environment path", .{}) catch {};
+        handleError(error.InvalidPath);
+        return;
+    };
+
+    const new_venv_path = std.fs.path.join(allocator, &[_][]const u8{ parent_dir, new_name }) catch {
+        output.printError(allocator, "Failed to construct new environment path", .{}) catch {};
+        handleError(error.OutOfMemory);
+        return;
+    };
+    defer allocator.free(new_venv_path);
+
+    std.fs.cwd().access(new_venv_path, .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            output.printError(allocator, "New environment directory already exists: {s}", .{new_venv_path}) catch {};
+            handleError(error.PathAlreadyExists);
+            return;
+        }
+    };
+
+    const has_jupyter_kernel = jupyter.hasKernel(allocator, old_name);
+
+    output.print(allocator, "Renaming environment '{s}' to '{s}'...", .{ old_name, new_name }) catch {};
+
+    // === ATOMIC OPERATIONS START ===
+
+    std.fs.cwd().rename(old_venv_path, new_venv_path) catch |err| {
+        output.printError(allocator, "Failed to rename environment directory: {s}", .{@errorName(err)}) catch {};
+        handleError(error.IoError);
+        return;
+    };
+
+    updateGeneratedScripts(allocator, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+
+        output.printError(allocator, "Failed to update generated scripts: {s}", .{@errorName(err)}) catch {};
+        handleError(err);
+        return;
+    };
+
+    registry.renameEnvironment(old_identifier, new_name) catch |err| {
+        _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
+        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+
+        switch (err) {
+            error.EnvironmentAlreadyExists => {
+                output.printError(allocator, "Environment name '{s}' already exists", .{new_name}) catch {};
+            },
+            error.InvalidEnvironmentName => {
+                output.printError(allocator, "Invalid environment name '{s}'. Use only alphanumeric characters, hyphens, and underscores", .{new_name}) catch {};
+            },
+            else => {
+                output.printError(allocator, "Failed to update registry: {s}", .{@errorName(err)}) catch {};
+            },
+        }
+        handleError(err);
+        return;
+    };
+
+    if (has_jupyter_kernel) {
+        jupyter.renameKernel(allocator, old_name, new_name, new_venv_path) catch |err| {
+            _ = registry.renameEnvironment(new_name, old_name) catch {};
+            _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
+            std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+
+            switch (err) {
+                error.KernelExists => {
+                    output.printError(allocator, "Jupyter kernel '{s}' already exists", .{new_name}) catch {};
+                },
+                else => {
+                    output.printError(allocator, "Failed to rename Jupyter kernel: {s}", .{@errorName(err)}) catch {};
+                },
+            }
+            handleError(err);
+            return;
+        };
+    }
+
+    registry.save() catch |err| {
+        if (has_jupyter_kernel) {
+            _ = jupyter.renameKernel(allocator, new_name, old_name, old_venv_path) catch {};
+        }
+        _ = registry.renameEnvironment(new_name, old_name) catch {};
+        _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
+        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+
+        output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
+        handleError(error.RegistryError);
+        return;
+    };
+
+    // === ATOMIC OPERATIONS END ===
+
+    output.print(allocator, "Environment renamed successfully!", .{}) catch {};
+    output.print(allocator, "  Name: {s} → {s}", .{ old_name, new_name }) catch {};
+    output.print(allocator, "  Directory: {s} → {s}", .{ old_venv_path, new_venv_path }) catch {};
+
+    if (has_jupyter_kernel) {
+        output.print(allocator, "  Jupyter kernel: zenv-{s} → zenv-{s}", .{ old_name, new_name }) catch {};
+    }
+
+    output.print(allocator, "  Generated scripts updated", .{}) catch {};
+
+    updateLocalConfigs(allocator, old_name, new_name, old_entry.project_dir) catch |err| {
+        output.printError(allocator, "Environment renamed successfully, but failed to update local config files: {s}", .{@errorName(err)}) catch {};
+    };
+}
+
+fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
+    const activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, "activate.sh" });
+    defer allocator.free(activate_script_path);
+
+    updateScriptFile(allocator, activate_script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+        output.printError(allocator, "Failed to update activate.sh: {s}", .{@errorName(err)}) catch {};
+        return err;
+    };
+
+    const setup_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, "setup.sh" });
+    defer allocator.free(setup_script_path);
+
+    updateScriptFile(allocator, setup_script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+        if (err != error.FileNotFound) {
+            output.printError(allocator, "Failed to update setup.sh: {s}", .{@errorName(err)}) catch {};
+            return err;
+        }
+    };
+
+    updateScriptsDirectory(allocator, new_venv_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+        output.printError(allocator, "Failed to update scripts directory: {s}", .{@errorName(err)}) catch {};
+        return err;
+    };
+}
+
+fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
+    const file = std.fs.openFileAbsolute(script_path, .{ .mode = .read_write }) catch |err| {
+        return err;
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB max
+    defer allocator.free(content);
+
+    var updated_content = std.ArrayList(u8).init(allocator);
+    defer updated_content.deinit();
+
+    var i: usize = 0;
+    while (i < content.len) {
+        if (i + old_name.len <= content.len and std.mem.eql(u8, content[i .. i + old_name.len], old_name)) {
+            // Check if this is a standalone reference to the old environment name
+            const before_ok = i == 0 or !std.ascii.isAlphanumeric(content[i - 1]);
+            const after_ok = i + old_name.len == content.len or !std.ascii.isAlphanumeric(content[i + old_name.len]);
+
+            if (before_ok and after_ok) {
+                // Replace with new name
+                try updated_content.appendSlice(new_name);
+                i += old_name.len;
+                continue;
+            }
+        }
+
+        if (i + old_venv_path.len <= content.len and std.mem.eql(u8, content[i .. i + old_venv_path.len], old_venv_path)) {
+            try updated_content.appendSlice(new_venv_path);
+            i += old_venv_path.len;
+            continue;
+        }
+
+        try updated_content.append(content[i]);
+        i += 1;
+    }
+
+    try file.seekTo(0);
+    try file.setEndPos(0);
+    try file.writeAll(updated_content.items);
+}
+
+fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
+    const scripts_dir = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
+    defer allocator.free(scripts_dir);
+
+    var dir = std.fs.openDirAbsolute(scripts_dir, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) return; // Scripts directory doesn't exist, that's fine
+        return err;
+    };
+    defer dir.close();
+
+    var iterator = dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file) continue;
+
+        if (std.mem.endsWith(u8, entry.name, ".sh") or
+            std.mem.endsWith(u8, entry.name, ".py") or
+            std.mem.endsWith(u8, entry.name, ".bash"))
+        {
+            const script_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, entry.name });
+            defer allocator.free(script_path);
+
+            updateScriptFile(allocator, script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+                output.printError(allocator, "Failed to update script {s}: {s}", .{ entry.name, @errorName(err) }) catch {};
+                return err;
+            };
+        }
+    }
+}
+
+fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []const u8, project_dir: []const u8) !void {
+    const config_path = try std.fs.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
+    defer allocator.free(config_path);
+
+    output.print(allocator, "Updating local config: {s}", .{config_path}) catch {};
+
+    const config_file = std.fs.openFileAbsolute(config_path, .{ .mode = .read_write }) catch |err| {
+        if (err == error.FileNotFound) {
+            output.print(allocator, "No local config file found, skipping update", .{}) catch {};
+            return; // No config file, that's fine
+        }
+        output.printError(allocator, "Failed to open config file: {s}", .{@errorName(err)}) catch {};
+        return err;
+    };
+    defer config_file.close();
+
+    const config_contents = try config_file.readToEndAlloc(allocator, 1024 * 1024); // 1MB max
+    defer allocator.free(config_contents);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, config_contents, .{}) catch |err| {
+        output.printError(allocator, "Failed to parse local config JSON: {s}", .{@errorName(err)}) catch {};
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value.object.get(old_name)) |_| {
+        output.print(allocator, "Found environment '{s}' in local config, updating to '{s}'", .{ old_name, new_name }) catch {};
+
+        const old_key_pattern = try std.fmt.allocPrint(allocator, "\"{s}\":", .{old_name});
+        defer allocator.free(old_key_pattern);
+
+        const new_key_pattern = try std.fmt.allocPrint(allocator, "\"{s}\":", .{new_name});
+        defer allocator.free(new_key_pattern);
+
+        if (std.mem.indexOf(u8, config_contents, old_key_pattern)) |_| {
+            const updated_contents = try std.mem.replaceOwned(u8, allocator, config_contents, old_key_pattern, new_key_pattern);
+            defer allocator.free(updated_contents);
+
+            try config_file.seekTo(0);
+            try config_file.setEndPos(0);
+            try config_file.writeAll(updated_contents);
+
+            output.print(allocator, "Successfully updated local config file", .{}) catch {};
+        } else {
+            output.printError(allocator, "Could not find key pattern in config file", .{}) catch {};
+        }
+    } else {
+        output.print(allocator, "Environment '{s}' not found in local config, skipping update", .{old_name}) catch {};
+    }
+}

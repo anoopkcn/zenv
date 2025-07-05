@@ -18,6 +18,7 @@ pub const Command = enum {
     cd,
     init,
     rm,
+    rename,
     python,
     log,
     run,
@@ -42,6 +43,7 @@ pub const Command = enum {
             .{ "cd", .cd },
             .{ "init", .init },
             .{ "rm", .rm },
+            .{ "rename", .rename },
             .{ "python", .python },
             .{ "log", .log },
             .{ "run", .run },
@@ -71,7 +73,7 @@ fn printVersion() !void {
 }
 
 fn printUsage() void {
-    const usage = comptime
+    const usage = comptime 
         \\Usage: zenv <command> [environment_name|id] [options]
         \\
         \\Manages Python virtual environments based on zenv.json configuration.
@@ -103,6 +105,11 @@ fn printUsage() void {
         \\
         \\  deregister <name|id|.>   Removes an environment from the global registry.
         \\                           The virtual environment files are NOT deleted.
+        \\
+        \\  rename <old|id> <new>    Renames an environment from 'old' to 'new'.
+        \\                           Updates the registry, renames the virtual environment directory,
+        \\                           updates generated scripts, and updates any associated Jupyter kernels.
+        \\                           Preserves all configuration and metadata.
         \\
         // \\  rm <name|id>             De-registers the environment AND permanently deletes its
         // \\                           virtual environment directory from the filesystem.
@@ -224,6 +231,7 @@ pub fn main() anyerror!void {
         .deregister,
         .cd,
         .rm,
+        .rename,
         .python,
         .log,
         .run,
@@ -377,6 +385,26 @@ pub fn main() anyerror!void {
                         // Module load errors are already handled by module loader
                         process.exit(1); // Exit immediately to prevent stack trace
                     },
+                    error.EnvironmentAlreadyExists => {
+                        output.printError(alloc,
+                            \\An environment with that name already exists
+                        , .{}) catch {};
+                    },
+                    error.InvalidEnvironmentName => {
+                        output.printError(alloc,
+                            \\Invalid environment name. Use only alphanumeric characters, hyphens, underscores, and dots
+                        , .{}) catch {};
+                    },
+                    error.PathAlreadyExists => {
+                        output.printError(alloc,
+                            \\The target path already exists
+                        , .{}) catch {};
+                    },
+                    error.InvalidPath => {
+                        output.printError(alloc,
+                            \\Invalid file or directory path
+                        , .{}) catch {};
+                    },
                     else => {
                         output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
                         std.debug.dumpStackTrace(trace.*);
@@ -470,6 +498,7 @@ pub fn main() anyerror!void {
         .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError.func),
         .deregister => commands.handleDeregisterCommand(allocator, &registry, args, handleError.func),
         .rm => commands.handleRmCommand(allocator, &registry, args, handleError.func),
+        .rename => try commands.handleRenameCommand(allocator, &registry, args, handleError.func),
         .cd => commands.handleCdCommand(allocator, &registry, args, handleError.func),
         .python => try commands.handlePythonCommand(allocator, args, handleError.func),
         .log => commands.handleLogCommand(allocator, &registry, args, handleError.func),

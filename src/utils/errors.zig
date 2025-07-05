@@ -29,6 +29,10 @@ pub const ZenvError = error{
     PathTraversalAttempt, // Added to handle path traversal attack attempts
     AliasAlreadyExists, // Added for alias creation conflicts
     AliasNotFound, // Added for alias removal/lookup failures
+    EnvironmentAlreadyExists, // Added for rename conflicts
+    InvalidEnvironmentName, // Added for invalid environment names
+    PathAlreadyExists, // Added for path conflicts
+    InvalidPath, // Added for invalid paths
 };
 
 /// Logs an error message and returns the provided error.
