@@ -285,6 +285,11 @@ Commands:
   deregister <name|id|.>   Removes an environment from the global registry.
                            The virtual environment files are NOT deleted.
 
+  rename <old|id> <new>    Renames an environment from 'old' to 'new'.
+                           Updates the registry, renames the virtual environment directory,
+                           updates generated scripts, and updates any associated Jupyter kernels.
+                           Preserves all configuration and metadata.
+
   validate [config]        Validates the configuration file. If no arguent provided it
                            will validate the 'zenv.json' file in the current directory.
                            Reports errors with line numbers and field names if found.
@@ -316,7 +321,8 @@ Options for 'zenv setup <name>':
   --init                   Creates and populates 'zenv.json' file before 'zenv setup'.
                            Convenient for creating and setting up in one step.
 
-  --dev                    Installs the current directory's project in editable mode.                                                            Equivalent to 'pip install --editable .' command.
+  --dev                    Installs the current directory's project in editable mode.
+                           Equivalent to 'pip install --editable .' command.
 
   --uv                     Uses 'uv' instead of 'pip' for package operations.
                            Ensure 'uv' is installed and accessible.
