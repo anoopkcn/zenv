@@ -253,95 +253,95 @@ zenv help
 Output:
 
 ```
-Usage: zenv <command> [environment_name|id] [options]
+Usage: zenv <command> [name|id] [options]
 
 Manages Python virtual environments based on zenv.json configuration.
 
 Commands:
-  init [name] [desc]       Initializes a new 'zenv.json' in the current directory.
-                           Creates a 'test' environment if 'name' is not provided.
-                           Use to start defining your environments[z].
+  init [name] [desc]         Initializes a new 'zenv.json' in the current directory.
+                             Creates a 'test' environment if 'name' is not provided.
+                             Use to start defining your environments[z].
 
-  setup <name>             Creates and configures the virtual environment for '<name>'.
-                           Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
-                           This is the primary command to build an environment.
+  setup <name>               Creates and configures the virtual environment for '<name>'.
+                             Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
+                             This is the primary command to build an environment.
 
-  activate <name|id|.>     Outputs the activation script path for an environment.
-                           To use: source $(zenv activate <name|id|.>)
+  activate <name|id|.>       Outputs the activation script path for an environment.
+                             To use: source $(zenv activate <name|id|.>)
 
   run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
                              Does NOT require manual activation of the environment.
 
-  cd <name|id|.>           Outputs the project directory path for an environment.
-                           To use: cd $(zenv cd <name|id|.>)
+  cd <name|id|.>             Outputs the project directory path for an environment.
+                             To use: cd $(zenv cd <name|id|.>)
 
-  list                     Lists registered environments accessible on this machine.
+  list                       Lists registered environments accessible on this machine.
 
-  list --all               Lists all registered environments.
+  list --all                 Lists all registered environments.
 
-  register <name>          Adds the environment '<name>' (from current 'zenv.json') to the
-                           global registry[a], making it accessible from any location.
+  register <name>            Adds the environment '<name>' (from current 'zenv.json') to the
+                             global registry[a], making it accessible from any location.
 
-  deregister <name|id|.>   Removes an environment from the global registry.
-                           The virtual environment files are NOT deleted.
+  deregister <name|id|.>     Removes an environment from the global registry.
+                             The virtual environment files are NOT deleted.
 
-  rename <old|id> <new>    Renames an environment from 'old' to 'new'.
-                           Updates the registry, renames the virtual environment directory,
-                           updates generated scripts, and updates any associated Jupyter kernels.
-                           Preserves all configuration and metadata.
+  rename <old|id> <new>      Renames an environment from 'old' to 'new'.
+                             Updates the registry, renames the virtual environment directory,
+                             updates generated scripts, and updates any associated Jupyter kernels.
+                             Preserves all configuration and metadata.
 
-  validate [config]        Validates the configuration file. If no arguent provided it
-                           will validate the 'zenv.json' file in the current directory.
-                           Reports errors with line numbers and field names if found.
+  validate [config]          Validates the configuration file. If no arguent provided it
+                             will validate the 'zenv.json' file in the current directory.
+                             Reports errors with line numbers and field names if found.
 
-  log <name|id|.>          Displays the setup log file for the specified environment.
+  log <name|id|.>            Displays the setup log file for the specified environment.
 
-  alias <subcommand>       Manages environment aliases for easier access:
-    create <alias> <env>   Creates an alias for an environment.
-    remove <alias>         Removes an existing alias.
-    list                   Lists all defined aliases.
-    show <alias>           Shows what environment an alias points to.
+  alias <subcommand>         Manages environment aliases for easier access:
+    create <alias> <env>     Creates an alias for an environment.
+    remove <alias>           Removes an existing alias.
+    list                     Lists all defined aliases.
+    show <alias>             Shows what environment an alias points to.
 
-  jupyter <subcommand>     Manages Jupyter kernels for environments:
-    create <env_name>      Creates a Jupyter kernel for the specified environment.
-    remove <env_name>      Removes the Jupyter kernel for the specified environment.
-    list                   Lists all zenv-managed Jupyter kernels.
-    check                  Checks if Jupyter is installed and available.
+  jupyter <subcommand>       Manages Jupyter kernels for environments:
+    create <env_name>        Creates a Jupyter kernel for the specified environment.
+    remove <env_name>        Removes the Jupyter kernel for the specified environment.
+    list                     Lists all zenv-managed Jupyter kernels.
+    check                    Checks if Jupyter is installed and available.
 
-  python <subcommand>      (Experimantal feature) Manages Python installations:
-    install <version>      Downloads and installs a specific Python version for zenv.
-    pin <version>          Sets <version> as the pinned Python for zenv to prioritize.
-    list                   Shows Python versions installed and managed by zenv.
+  python <subcommand>        (Experimantal feature) Manages Python installations:
+    install <version>        Downloads and installs a specific Python version for zenv.
+    pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
+    list                     Shows Python versions installed and managed by zenv.
 
-  version, -v, --version   Prints the installed zenv version.
+  version, -v, --version     Prints the installed zenv version.
 
-  help, --help             Shows this help message.
+  help, --help               Shows this help message.
 
 Options for 'zenv setup <name>':
-  --init                   Creates and populates 'zenv.json' file before 'zenv setup'.
-                           Convenient for creating and setting up in one step.
+  --init                     Creates and populates 'zenv.json' file before 'zenv setup'.
+                             Convenient for creating and setting up in one step.
 
-  --dev                    Installs the current directory's project in editable mode.
-                           Equivalent to 'pip install --editable .' command.
+  --dev                      Installs the current directory's project in editable mode.
+                             Equivalent to 'pip install --editable .' command.
 
-  --uv                     Uses 'uv' instead of 'pip' for package operations.
-                           Ensure 'uv' is installed and accessible.
+  --uv                       Uses 'uv' instead of 'pip' for package operations.
+                             Ensure 'uv' is installed and accessible.
 
-  --no-host                Bypasses hostname validation during setup.
-                           Equivalent to "target_machines": ["*"] in zenv.json.
-                           Use if an environment should be set up regardless of the machine.
+  --no-host                  Bypasses hostname validation during setup.
+                             Equivalent to "target_machines": ["*"] in zenv.json.
+                             Use if an environment should be set up regardless of the machine.
 
-  --python                 Use the zenv-pinned Python for creating environment.
-                           Ignores the default Python priority[b] list.
+  --python                   Use the zenv-pinned Python for creating environment.
+                             Ignores the default Python priority[b] list.
 
-  --force                  Forces reinstallation of all dependencies.
-                           Useful if dependencies from loaded modules cause conflicts.
+  --force                    Forces reinstallation of all dependencies.
+                             Useful if dependencies from loaded modules cause conflicts.
 
-  --no-cache               Disables the package cache when installing dependencies.
-                           Ensures fresh package downloads for each installation.
+  --no-cache                 Disables the package cache when installing dependencies.
+                             Ensures fresh package downloads for each installation.
 
-  --jupyter                Creates a Jupyter kernel for the environment after setup.
-                           Equivalent to running 'zenv jupyter create <name>' after setup.
+  --jupyter                  Creates a Jupyter kernel for the environment after setup.
+                             Equivalent to running 'zenv jupyter create <name>' after setup.
 
 [z] Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
