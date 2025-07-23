@@ -26,9 +26,7 @@ safe_module_load() {
 if command -v module >/dev/null 2>&1; then
   module --force purge || echo "Warning: Failed to purge modules, continuing anyway" >&2
 
-  set +e  # Don't exit on module load errors
   @@MODULE_LOADING_BLOCK@@
-  set -e
 fi
 
 source @@VENV_PATH@@/bin/activate
