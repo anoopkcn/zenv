@@ -81,7 +81,8 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.arra
             .column = diag.getColumn(),
             .message = err_msg,
             .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
-            .field_path = "",
+            // field_path left null: a syntax error has no schema path, and a
+            // non-null empty string would be freed by deinit (it isn't owned).
         });
 
         return errors;
@@ -680,4 +681,71 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
 
     // If validation passed, parse the configuration
     return config_module.parse(allocator, config_path);
+}
+
+// ============================ Tests ============================
+
+const testing = std.testing;
+
+fn freeErrors(a: Allocator, errs: *std.array_list.Managed(ValidationError)) void {
+    for (errs.items) |*e| e.deinit(a);
+    errs.deinit();
+}
+
+test "validateJsonContent: valid config returns null" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "zenv", "e1": { "target_machines": ["*"] } }
+    ;
+    try testing.expect((try validateJsonContent(a, content)) == null);
+}
+
+test "validateJsonContent: syntax error is located past the early lines (not line 1)" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "zenv",
+        \\  "e1": {
+        \\    "target_machines": ["*"],
+        \\  }
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expect(errs.items.len >= 1);
+    // The old hand-rolled scanner mislocated this to line 1; the parser's
+    // Diagnostics points into the latter half of the document.
+    try testing.expect(errs.items[0].line >= 4);
+}
+
+test "validateJsonContent: wrong-typed field gives exact path and line (repeat-proof)" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "zenv",
+        \\  "good": { "target_machines": ["*"] },
+        \\  "bad": { "target_machines": "*" }
+        \\}
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expectEqual(@as(usize, 1), errs.items.len);
+    const e = errs.items[0];
+    try testing.expectEqualStrings("bad.target_machines", e.field_path.?);
+    // Must point at line 4 (the "bad" env), not the identical ["*"] on line 3
+    // that the old indexOf search would have matched.
+    try testing.expectEqual(@as(usize, 4), e.line);
+}
+
+test "validateJsonContent: missing required base_dir is reported" {
+    const a = testing.allocator;
+    const content =
+        \\{ "e1": { "target_machines": ["*"] } }
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    var found = false;
+    for (errs.items) |e| {
+        if (std.mem.indexOf(u8, e.message, "base_dir") != null) found = true;
+    }
+    try testing.expect(found);
 }

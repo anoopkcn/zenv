@@ -12,6 +12,7 @@ const environment = @import("environment.zig");
 const template_activate = @import("template_activate.zig");
 const template_setup = @import("template_setup.zig");
 const output = @import("output.zig");
+const CommandFlags = @import("flags.zig").CommandFlags;
 
 // Create activation script for the environment
 pub fn createActivationScript(
@@ -74,12 +75,8 @@ pub fn installDependencies(
     env_name: []const u8,
     base_dir: []const u8,
     all_required_deps: *std.array_list.Managed([]const u8),
-    force_deps: bool,
+    flags: CommandFlags,
     modules_verified: bool,
-    use_default_python: bool,
-    dev_mode: bool,
-    use_uv: bool,
-    no_cache: bool,
     command_str: ?[]const u8,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
@@ -102,12 +99,8 @@ pub fn installDependencies(
         env_name,
         base_dir,
         deps_slice,
-        force_deps,
+        flags,
         modules_verified,
-        use_default_python,
-        dev_mode,
-        use_uv,
-        no_cache,
         command_str,
     );
 }
@@ -119,12 +112,8 @@ pub fn setupEnvironment(
     env_name: []const u8,
     base_dir: []const u8,
     deps: []const []const u8,
-    force_deps: bool,
+    flags: CommandFlags,
     modules_verified: bool,
-    use_default_python: bool,
-    dev_mode: bool,
-    use_uv: bool,
-    no_cache: bool,
     command_str: ?[]const u8,
 ) !void {
     output.print(allocator, "Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir }) catch {};
@@ -153,9 +142,10 @@ pub fn setupEnvironment(
     var req_abs_path: []const u8 = undefined;
 
     if (is_absolute_base_dir) {
-        // For absolute base_dir, paths are already absolute
+        // base_dir is already absolute, so the relative and absolute paths are
+        // identical — share one allocation rather than duplicating it.
         req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
-        req_abs_path = try allocator.dupe(u8, req_rel_path); // Use same path for both
+        req_abs_path = req_rel_path;
     } else {
         // For relative base_dir, combine with cwd for absolute paths
         req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
@@ -164,7 +154,7 @@ pub fn setupEnvironment(
     output.print(allocator, "Requirements file paths: relative='{s}', absolute='{s}'", .{ req_rel_path, req_abs_path }) catch {};
 
     defer allocator.free(req_rel_path);
-    defer allocator.free(req_abs_path);
+    defer if (req_abs_path.ptr != req_rel_path.ptr) allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
     output.print(allocator, "Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_rel_path }) catch {};
@@ -204,9 +194,9 @@ pub fn setupEnvironment(
     var script_abs_path: []const u8 = undefined;
 
     if (is_absolute_base_dir) {
-        // For absolute base_dir, paths are already absolute
+        // base_dir is already absolute — share one allocation for both paths.
         script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
-        script_abs_path = try allocator.dupe(u8, script_rel_path); // Use same path for both
+        script_abs_path = script_rel_path;
     } else {
         // For relative base_dir, combine with cwd for absolute paths
         script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
@@ -214,7 +204,7 @@ pub fn setupEnvironment(
     }
 
     defer allocator.free(script_rel_path);
-    defer allocator.free(script_abs_path);
+    defer if (script_abs_path.ptr != script_rel_path.ptr) allocator.free(script_abs_path);
 
     // Generate setup script content using the template
     const script_content = try template_setup.createSetupScriptFromTemplate(
@@ -224,12 +214,8 @@ pub fn setupEnvironment(
         base_dir,
         req_abs_path,
         valid_deps_list.items.len,
-        force_deps,
+        flags,
         modules_verified,
-        use_default_python,
-        dev_mode,
-        use_uv,
-        no_cache,
         command_str,
     );
     defer allocator.free(script_content);

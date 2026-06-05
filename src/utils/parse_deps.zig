@@ -194,14 +194,14 @@ pub fn parsePyprojectToml(
                 }
 
                 // Exit current section if we reach a new section header
-                if (std.mem.indexOf(u8, trimmed, "[") == 0 and std.mem.indexOf(u8, trimmed, "]") != null) {
+                if (std.mem.startsWith(u8, trimmed, "[") and std.mem.indexOfScalar(u8, trimmed, ']') != null) {
                     continue;
                 }
             },
 
             .in_project_deps, .in_poetry_deps => {
                 // Exit section if new section starts
-                if (std.mem.indexOf(u8, trimmed, "[") == 0 and std.mem.indexOf(u8, trimmed, "]") != null) {
+                if (std.mem.startsWith(u8, trimmed, "[") and std.mem.indexOfScalar(u8, trimmed, ']') != null) {
                     state = ParseState.searching;
                     continue;
                 }
@@ -480,4 +480,61 @@ pub fn isConfigProvidedDependency(env_config: *const config.EnvironmentConfig, d
         }
     }
     return false;
+}
+
+// ============================ Tests ============================
+
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const content =
+        \\[project]
+        \\name = "x"
+        \\dependencies = [
+        \\    "requests",
+        \\    "flask>=2.0",
+        \\]
+    ;
+    var deps = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (deps.items) |d| a.free(d);
+        deps.deinit();
+    }
+    const count = try parsePyprojectToml(a, content, &deps);
+    try testing.expect(count >= 2);
+    var has_req = false;
+    var has_flask = false;
+    for (deps.items) |d| {
+        if (std.mem.indexOf(u8, d, "requests") != null) has_req = true;
+        if (std.mem.indexOf(u8, d, "flask") != null) has_flask = true;
+    }
+    try testing.expect(has_req and has_flask);
+}
+
+test "parseRequirementsTxt: skips comments and blank lines" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const content =
+        \\# a comment
+        \\
+        \\requests
+        \\flask>=2.0
+        \\   # indented comment
+    ;
+    var deps = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (deps.items) |d| a.free(d);
+        deps.deinit();
+    }
+    const count = try parseRequirementsTxt(a, content, &deps);
+    try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "isLikelyPythonPackageName filters TOML metadata fields" {
+    try testing.expect(isLikelyPythonPackageName("requests"));
+    try testing.expect(!isLikelyPythonPackageName("name"));
+    try testing.expect(!isLikelyPythonPackageName("version"));
 }

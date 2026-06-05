@@ -167,6 +167,18 @@ pub fn build(b: *std.Build) !void {
     const exe_step = b.step("exe", "Build the executable");
     exe_step.dependOn(b.getInstallStep());
 
+    // Add a `zig build test` step that runs the unit tests.
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
+
     // --- Individual Target Steps ---
     if (version == .tag or force_release) {
         // Add individual target-specific build steps

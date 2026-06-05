@@ -804,3 +804,46 @@ pub const EnvironmentRegistry = struct {
         return error.EnvironmentNotFound;
     }
 };
+
+// ============================ Tests ============================
+
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "generateSHA1ID returns 40-char lowercase hex" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const id = try generateSHA1ID(a, "env", "/proj", "*");
+    defer a.free(id);
+    try testing.expectEqual(@as(usize, 40), id.len);
+    for (id) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        try testing.expect(ok);
+    }
+}
+
+test "registry lookup by name, alias, and id prefix" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+
+    try reg.entries.append(.{
+        .id = try a.dupe(u8, "0123456789abcdef0123456789abcdef01234567"),
+        .env_name = try a.dupe(u8, "myenv"),
+        .project_dir = try a.dupe(u8, "/p"),
+        .description = null,
+        .target_machines_str = try a.dupe(u8, "*"),
+        .venv_path = try a.dupe(u8, "/p/zenv/myenv"),
+        .aliases = std.array_list.Managed([]const u8).init(a),
+    });
+
+    try testing.expect(reg.lookup("myenv") != null);
+    try testing.expect(reg.lookup("nope") == null);
+    try testing.expect(reg.lookup("0123456789abcdef") != null); // id prefix
+
+    try reg.addAlias("me", "myenv");
+    try testing.expect(reg.lookup("me") != null);
+    try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
+    try testing.expect(reg.removeAlias("me"));
+    try testing.expect(reg.resolveAlias("me") == null);
+}

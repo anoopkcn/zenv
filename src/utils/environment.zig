@@ -368,7 +368,6 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
 ///   - allocator: Memory allocator for temporary allocations
 ///   - config: ZenvConfig containing all available environments
 ///   - args: Command-line arguments including the environment name at args[2]
-///   - handleErrorFn: Callback function to handle errors
 ///
 /// Returns: Validated environment configuration or null if validation failed
 // Get and validate environment config
@@ -377,26 +376,22 @@ pub fn getAndValidateEnvironment(
     config: *const ZenvConfig,
     args: []const []const u8,
     flags: CommandFlags,
-    handleErrorFn: fn (anyerror) void,
-) ?*const EnvironmentConfig {
+) !*const EnvironmentConfig {
     if (args.len < 3) {
         output.printError(allocator, "Missing environment name argument for command '{s}'", .{args[1]}) catch {};
-        handleErrorFn(error.ArgsError); // Use a more specific error
-        return null;
+        return error.ArgsError;
     }
     const env_name = args[2];
 
     const env_config = config.getEnvironment(env_name) orelse {
         output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return null;
+        return error.EnvironmentNotFound;
     };
 
     // Use validation function from config module (already validates required fields)
     if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
         output.printError(allocator, "Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
-        handleErrorFn(err);
-        return null;
+        return err;
     }
 
     // If modules_file is specified, read modules from the file
@@ -407,20 +402,17 @@ pub fn getAndValidateEnvironment(
         runtime.access(modules_file_path) catch |err| {
             if (err == error.FileNotFound) {
                 output.printError(allocator, "Modules file '{s}' not found.", .{modules_file_path}) catch {};
-                handleErrorFn(err);
-                return null;
+                return err;
             } else {
                 output.printError(allocator, "Error accessing modules file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
-                handleErrorFn(err);
-                return null;
+                return err;
             }
         };
 
         // Read modules from the file
         var modules_from_file = readModulesFromFile(allocator, modules_file_path) catch |err| {
             output.printError(allocator, "Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
-            handleErrorFn(err);
-            return null;
+            return err;
         };
 
         // If env_config is a const pointer, we need to create a mutable version
@@ -467,8 +459,7 @@ pub fn getAndValidateEnvironment(
     var hostname: []const u8 = undefined;
     hostname = getSystemHostname(allocator) catch |err| { // Call the local function
         output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return null;
+        return err;
     };
     defer allocator.free(hostname);
 
@@ -488,33 +479,28 @@ pub fn getAndValidateEnvironment(
             // Attempt to format the string
             targets_buffer.appendSlice("[") catch |err| {
                 output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                handleErrorFn(err); // Report the underlying error
                 break :format_block; // Use placeholder
             };
             for (env_config.target_machines.items, 0..) |target, i| {
                 if (i > 0) {
                     targets_buffer.appendSlice(", ") catch |err| {
                         output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                        handleErrorFn(err);
                         break :format_block;
                     };
                 }
                 targets_buffer.print("\"{s}\"", .{target}) catch |err| {
                     output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                    handleErrorFn(err);
                     break :format_block;
                 };
             }
             targets_buffer.appendSlice("]") catch |err| {
                 output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                handleErrorFn(err);
                 break :format_block;
             };
 
             // If formatting succeeded, duplicate the result
             formatted_targets = allocator.dupe(u8, targets_buffer.items) catch |err| {
                 output.printError(allocator, "Failed to allocate memory for formatted target machines: {s}", .{@errorName(err)}) catch {};
-                handleErrorFn(err); // Report the underlying error
                 break :format_block; // Use placeholder
             };
             formatted_targets_allocated = true; // Mark that we need to free this later
@@ -533,8 +519,7 @@ pub fn getAndValidateEnvironment(
             allocator.free(formatted_targets);
         }
 
-        handleErrorFn(error.TargetMachineMismatch);
-        return null;
+        return error.TargetMachineMismatch;
     }
 
     errors.debugLog(allocator, "Hostname validation passed for env '{s}'.", .{env_name});
@@ -547,34 +532,29 @@ pub fn getAndValidateEnvironment(
 /// Params:
 ///   - allocator: Memory allocator
 ///   - registry: The environment registry to search in
-///   - handleErrorFn: Callback function to handle errors
 ///
-/// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
+/// Returns: The registry entry, or an error if not found/ambiguous.
 fn lookupCurrentDirectoryEnvironment(
     allocator: Allocator,
     registry: *const config_module.EnvironmentRegistry,
-    handleErrorFn: fn (anyerror) void,
-) ?RegistryEntry {
+) !RegistryEntry {
     const config_path = "zenv.json";
 
     // Check if zenv.json exists in current directory
     runtime.access(config_path) catch |err| {
         if (err == error.FileNotFound) {
             output.printError(allocator, "No zenv.json found in current directory. Cannot use '.' as environment identifier.", .{}) catch {};
-            handleErrorFn(error.ConfigFileNotFound);
-            return null;
+            return error.ConfigFileNotFound;
         } else {
             output.printError(allocator, "Failed to access zenv.json: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(err);
-            return null;
+            return err;
         }
     };
 
     // Get current directory path
     const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Failed to get current directory path: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return null;
+        return err;
     };
     defer allocator.free(cwd_path);
 
@@ -586,8 +566,7 @@ fn lookupCurrentDirectoryEnvironment(
         if (std.mem.eql(u8, reg_entry.project_dir, cwd_path)) {
             matching_entries.append(reg_entry) catch |err| {
                 output.printError(allocator, "Failed to add matching entry: {s}", .{@errorName(err)}) catch {};
-                handleErrorFn(error.OutOfMemory);
-                return null;
+                return error.OutOfMemory;
             };
         }
     }
@@ -595,8 +574,7 @@ fn lookupCurrentDirectoryEnvironment(
     if (matching_entries.items.len == 0) {
         output.printError(allocator, "No registered environments found for current directory.", .{}) catch {};
         output.printError(allocator, "Use 'zenv setup <env_name>' to create and register an environment.", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return null;
+        return error.EnvironmentNotRegistered;
     } else if (matching_entries.items.len == 1) {
         // Return the single matching environment
         return matching_entries.items[0];
@@ -607,8 +585,7 @@ fn lookupCurrentDirectoryEnvironment(
             output.printError(allocator, "  - {s} (ID: {s})", .{ entry.env_name, entry.id[0..7] }) catch {};
         }
         output.printError(allocator, "Please specify the environment name or ID explicitly.", .{}) catch {};
-        handleErrorFn(error.AmbiguousIdentifier);
-        return null;
+        return error.AmbiguousIdentifier;
     }
 }
 
@@ -618,18 +595,16 @@ fn lookupCurrentDirectoryEnvironment(
 /// Params:
 ///   - registry: The environment registry to search in
 ///   - identifier: The name or ID to look up (can be a partial ID if 7+ characters, or "." for current directory)
-///   - handleErrorFn: Callback function to handle errors
 ///
-/// Returns: The registry entry if found, null otherwise (after calling handleErrorFn)
+/// Returns: The registry entry, or an error if not found/ambiguous.
 pub fn lookupRegistryEntry(
     allocator: Allocator,
     registry: *const config_module.EnvironmentRegistry,
     identifier: []const u8,
-    handleErrorFn: fn (anyerror) void,
-) ?RegistryEntry {
+) !RegistryEntry {
     // Handle "." as current directory environment
     if (std.mem.eql(u8, identifier, ".")) {
-        return lookupCurrentDirectoryEnvironment(allocator, registry, handleErrorFn);
+        return lookupCurrentDirectoryEnvironment(allocator, registry);
     }
 
     // Check if identifier is an alias and resolve it
@@ -655,16 +630,14 @@ pub fn lookupRegistryEntry(
                     if (match_count > 1) {
                         matching_envs.append(reg_entry.env_name) catch |err| {
                             output.printError(allocator, "Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
-                            handleErrorFn(error.OutOfMemory);
-                            return null;
+                            return error.OutOfMemory;
                         };
                     }
                     // If it's the first match, store its name in case it's the only one
                     else if (match_count == 1) {
                         matching_envs.append(reg_entry.env_name) catch |err| {
                             output.printError(allocator, "Failed to allocate memory for ambiguous env list: {s}", .{@errorName(err)}) catch {};
-                            handleErrorFn(error.OutOfMemory);
-                            return null;
+                            return error.OutOfMemory;
                         };
                     }
                 }
@@ -677,8 +650,7 @@ pub fn lookupRegistryEntry(
                     output.rawErr(allocator, "  - {s}\n", .{env_name}) catch {};
                 }
                 output.rawErr(allocator, "Please use more characters to make the ID unique.\n", .{}) catch {};
-                handleErrorFn(error.AmbiguousIdentifier);
-                return null;
+                return error.AmbiguousIdentifier;
             }
             // If match_count is 1, the lookup call below will handle it.
             // If match_count is 0, the default error below is fine.
@@ -691,8 +663,7 @@ pub fn lookupRegistryEntry(
             resolved_identifier;
         output.rawErr(allocator, "Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
         output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return null;
+        return error.EnvironmentNotRegistered;
     };
 
     return entry_copy;

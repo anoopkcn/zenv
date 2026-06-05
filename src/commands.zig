@@ -147,7 +147,6 @@ pub fn handleSetupCommand(
     config: *const ZenvConfig,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
 ) anyerror!void {
     // Create an arena allocator for temporary allocations
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
@@ -175,7 +174,7 @@ pub fn handleSetupCommand(
     }
 
     // Get and validate the environment config
-    const env_config = env.getAndValidateEnvironment(allocator, config, args, flags, handleErrorFn) orelse return;
+    const env_config = try env.getAndValidateEnvironment(allocator, config, args, flags);
     const env_name = args[2];
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
@@ -219,13 +218,11 @@ pub fn handleSetupCommand(
         // Use the improved validateModules function
         const modules_available = env.validateModules(allocator, env_config, flags.force_deps) catch |err| {
             output.printError(allocator, "Failed to validate modules: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(error.ModuleLoadError);
             return error.ModuleLoadError;
         };
 
         if (!modules_available) {
             // Error messages already printed by validateModules
-            handleErrorFn(error.ModuleLoadError);
             return error.ModuleLoadError;
         }
 
@@ -272,12 +269,10 @@ pub fn handleSetupCommand(
         runtime.access(req_file) catch |err| {
             if (err == error.FileNotFound) {
                 output.printError(allocator, "Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
-                handleErrorFn(err); // Use the original file not found error
                 return err; // Exit setup command
             } else {
                 // Handle other potential access errors
                 output.printError(allocator, "Error accessing requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-                handleErrorFn(err);
                 return err;
             }
         };
@@ -287,7 +282,6 @@ pub fn handleSetupCommand(
         // Read the file content - use temp_allocator since we're done with it after parsing
         const req_content = runtime.readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
             output.printError(allocator, "Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-            handleErrorFn(error.PathResolutionFailed); // Use specific error
             return error.PathResolutionFailed; // Exit setup command
         };
         // No need to defer free because the arena will handle cleanup
@@ -335,15 +329,10 @@ pub fn handleSetupCommand(
         env_name,
         base_dir,
         &all_required_deps,
-        flags.force_deps,
+        flags,
         modules_verified,
-        flags.use_default_python,
-        flags.dev_mode,
-        flags.use_uv,
-        flags.no_cache,
         command_str.items,
     ) catch |err| {
-        handleErrorFn(err);
         command_str.deinit();
         return err;
     };
@@ -356,8 +345,7 @@ pub fn handleSetupCommand(
     // 5. Register the environment in the global registry
     const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer allocator.free(cwd_path);
 
@@ -387,17 +375,15 @@ pub fn handleActivateCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id>", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const identifier = args[2];
 
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
     const venv_path = entry.venv_path;
 
     output.rawOut(allocator, "{s}/activate.sh\n", .{venv_path}) catch |e| {
@@ -410,7 +396,7 @@ pub fn handleListCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
-) void {
+) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = std.Io.File.stdout().writerStreaming(runtime.io, &stdout_buf);
     const stdout = &stdout_fw.interface; // special case for using standard writer
@@ -539,12 +525,10 @@ pub fn handleRegisterCommand(
     config: *const ZenvConfig,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator, "Missing environment name argument. Usage: zenv register <n>", .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const env_name = args[2];
@@ -559,23 +543,20 @@ pub fn handleRegisterCommand(
     // Get the environment config directly without re-parsing validation
     const env_config = config.getEnvironment(env_name) orelse {
         output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     };
 
     // Validate the environment config
     if (ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
         output.printError(allocator, "Invalid configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     }
 
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
         const hostname = env.getSystemHostname(allocator) catch |err| {
             output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(err);
-            return;
+            return err;
         };
         defer allocator.free(hostname);
 
@@ -587,16 +568,14 @@ pub fn handleRegisterCommand(
                 \\Current machine ('{s}') does not match target machines specified for environment '{s}'
                 \\Use '--no-host' flag to bypass this check if needed
             , .{ hostname, env_name }) catch {};
-            handleErrorFn(error.TargetMachineMismatch);
-            return;
+            return error.TargetMachineMismatch;
         }
     }
 
     // Get absolute path of current working directory
     const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Could not get current working directory: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer allocator.free(cwd_path);
 
@@ -612,15 +591,13 @@ pub fn handleRegisterCommand(
         env_config.target_machines.items,
     ) catch |err| {
         output.printError(allocator, "Failed to register environment: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     // Save the registry
     registry.save() catch |err| {
         output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     output.print(allocator,
@@ -633,28 +610,25 @@ pub fn handleDeregisterCommand(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv deregister <name|id|.>
         , .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const identifier = args[2];
 
     // Look up environment in registry first to check if it exists
     // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
 
     // Store name for the success message - make a copy to ensure it remains valid
     const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
         output.printError(allocator, "Failed to duplicate environment name: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer registry.allocator.free(env_name);
 
@@ -664,15 +638,13 @@ pub fn handleDeregisterCommand(
         // Save the registry
         registry.save() catch |err| {
             output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(err);
-            return;
+            return err;
         };
 
         output.print(allocator, "Environment '{s}' unregistered successfully.", .{env_name}) catch {};
     } else {
         output.printError(allocator, "Failed to unregister environment '{s}'.", .{env_name}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return;
+        return error.EnvironmentNotRegistered;
     }
 }
 
@@ -680,20 +652,18 @@ pub fn handleCdCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument
             \\Usage: zenv cd <name|id|.>
         , .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const identifier = args[2];
 
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
 
     // Get project directory from registry entry
     const project_dir = entry.project_dir;
@@ -708,13 +678,11 @@ pub fn handleCdCommand(
 pub fn handlePythonCommand(
     allocator: Allocator,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
 ) !void {
     // Check if we have a subcommand
     if (args.len < 3) {
         output.printError(allocator, "Missing subcommand for 'python' command", .{}) catch {};
         output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
-        handleErrorFn(error.ArgsError);
         return error.ArgsError;
     }
 
@@ -733,8 +701,7 @@ pub fn handlePythonCommand(
         // Install Python
         python.installPython(allocator, version) catch |err| {
             output.printError(allocator, "Python installation failed: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(err);
-            return;
+            return err;
         };
 
         // DO NOT PINN PYTHON VERSION HERE
@@ -746,7 +713,6 @@ pub fn handlePythonCommand(
         if (args.len < 4) {
             output.printError(allocator, "Missing version argument for 'python use' command", .{}) catch {};
             output.print(allocator, "Usage: zenv python use <version>", .{}) catch {};
-            handleErrorFn(error.ArgsError);
             return error.ArgsError;
         }
 
@@ -758,7 +724,6 @@ pub fn handlePythonCommand(
     } else {
         output.printError(allocator, "Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
         output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
-        handleErrorFn(error.ArgsError);
         return error.ArgsError;
     }
 }
@@ -767,32 +732,28 @@ pub fn handleRmCommand(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv rm <name|id>
         , .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const identifier = args[2];
 
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
 
     const env_name_to_remove = registry.allocator.dupe(u8, entry.env_name) catch |err| {
         output.printError(allocator, "Failed to duplicate environment name for removal: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer registry.allocator.free(env_name_to_remove);
 
     const venv_path_to_remove = registry.allocator.dupe(u8, entry.venv_path) catch |err| {
         output.printError(allocator, "Failed to duplicate venv path for removal: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer registry.allocator.free(venv_path_to_remove);
 
@@ -803,16 +764,14 @@ pub fn handleRmCommand(
         };
     } else {
         output.printError(allocator, "Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
-        handleErrorFn(error.EnvironmentNotRegistered);
-        return;
+        return error.EnvironmentNotRegistered;
     }
 
     output.print(allocator, "Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
     runtime.deleteTree(venv_path_to_remove) catch |err| {
         output.printError(allocator, "Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
         output.printError(allocator, "You may need to remove it manually.", .{}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     output.print(allocator, "Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
@@ -823,34 +782,30 @@ pub fn handleRunCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     // Need at least 4 args: zenv run <env> <command>
     if (args.len < 4) {
         output.printError(allocator, "Missing environment name or command. Usage: zenv run <name|id> <command> [args...]", .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const identifier = args[2];
     const command = args[3];
     const command_args = args[4..];
 
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
     const venv_path = entry.venv_path;
 
     const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
         output.printError(allocator, "Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer allocator.free(activate_path);
 
     // Create temporary script
     const temp_script_path = createTempRunScript(allocator, activate_path, command, command_args) catch |err| {
         output.printError(allocator, "Failed to create temporary run script: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer {
         runtime.deleteFile(temp_script_path) catch |err| {
@@ -867,14 +822,12 @@ pub fn handleRunCommand(
         .stderr = .inherit,
     }) catch |err| {
         output.printError(allocator, "Failed to spawn command: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     const term = child.wait(runtime.io) catch |err| {
         output.printError(allocator, "Failed to wait for command: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     // Check if the command was successful
@@ -890,8 +843,7 @@ pub fn handleRunCommand(
         } else {
             output.printError(allocator, "Command terminated abnormally", .{}) catch {};
         }
-        handleErrorFn(error.ProcessError);
-        return;
+        return error.ProcessError;
     }
 }
 
@@ -945,27 +897,24 @@ pub fn handleLogCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing environment name or ID argument.
             \\Usage: zenv log <name|id>
         , .{}) catch {};
-        handleErrorFn(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     }
 
     const identifier = args[2];
 
     // Look up environment in registry
-    const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
+    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
 
     // Construct the path to the log file
     const log_file_path = std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
         output.printError(allocator, "Failed to construct log file path: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer allocator.free(log_file_path);
 
@@ -974,28 +923,24 @@ pub fn handleLogCommand(
         if (err == error.FileNotFound) {
             output.printError(allocator, "No setup log found for environment '{s}'", .{entry.env_name}) catch {};
             output.printError(allocator, "The log file should be at: {s}", .{log_file_path}) catch {};
-            handleErrorFn(error.FileNotFound);
-            return;
+            return error.FileNotFound;
         } else {
             output.printError(allocator, "Error accessing log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
-            handleErrorFn(err);
-            return;
+            return err;
         }
     };
 
     // Read and print the log file
     const log_content = runtime.readFileAlloc(allocator, log_file_path, 10 * 1024 * 1024) catch |err| {
         output.printError(allocator, "Failed to read log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer allocator.free(log_content);
 
     // Output the log content
     output.rawOut(allocator, "{s}", .{log_content}) catch |err| {
         output.printError(allocator, "Error writing log to stdout: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 }
 
@@ -1003,8 +948,7 @@ pub fn handleValidateCommand(
     allocator: Allocator,
     config_path: []const u8,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
 
     // Use custom config path if provided as an argument
     var validate_config_path: []const u8 = config_path;
@@ -1033,7 +977,7 @@ pub fn handleValidateCommand(
                     // Syntax check already printed details
                     std.process.exit(1);
                 },
-                else => handleErrorFn(err),
+                else => std.process.exit(1),
             }
         }
     }.handleValidationError;
@@ -1061,33 +1005,31 @@ pub fn handleAliasCommand(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing alias subcommand.
             \\Usage: zenv alias <create|remove|list|show> [arguments]
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const subcommand = args[2];
 
     if (std.mem.eql(u8, subcommand, "create")) {
-        handleAliasCreate(allocator, registry, args, handleErrorFn);
+        try handleAliasCreate(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "remove")) {
-        handleAliasRemove(allocator, registry, args, handleErrorFn);
+        try handleAliasRemove(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "list")) {
-        handleAliasList(allocator, registry, args, handleErrorFn);
+        try handleAliasList(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "show")) {
-        handleAliasShow(allocator, registry, args, handleErrorFn);
+        try handleAliasShow(allocator, registry, args);
     } else {
         output.printError(allocator,
             \\Unknown alias subcommand '{s}'.
             \\Usage: zenv alias <create|remove|list|show> [arguments]
         , .{subcommand}) catch {};
-        handleErrorFn(error.ArgsError);
+        return error.ArgsError;
     }
 }
 
@@ -1095,15 +1037,13 @@ fn handleAliasCreate(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 5) {
         output.printError(allocator,
             \\Missing arguments for alias create.
             \\Usage: zenv alias create <alias_name> <env_name|env_id>
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const alias_name = args[3];
@@ -1114,20 +1054,18 @@ fn handleAliasCreate(
     for (reserved_names) |reserved| {
         if (std.mem.eql(u8, alias_name, reserved)) {
             output.printError(allocator, "Alias name '{s}' conflicts with existing command.", .{alias_name}) catch {};
-            handleErrorFn(error.ArgsError);
-            return;
+            return error.ArgsError;
         }
     }
 
     // Check if alias name is "." (reserved for current directory)
     if (std.mem.eql(u8, alias_name, ".")) {
         output.printError(allocator, "Alias name '.' is reserved for current directory notation.", .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     // Resolve environment identifier to get the actual environment name
-    const target_entry = env.lookupRegistryEntry(allocator, registry, env_identifier, handleErrorFn) orelse return;
+    const target_entry = try env.lookupRegistryEntry(allocator, registry, env_identifier);
     const target_env_name = target_entry.env_name;
 
     // Add alias to registry
@@ -1135,18 +1073,15 @@ fn handleAliasCreate(
         switch (err) {
             error.EnvironmentNotFound => {
                 output.printError(allocator, "Environment '{s}' not found.", .{env_identifier}) catch {};
-                handleErrorFn(err);
-                return;
+                return err;
             },
             error.AliasAlreadyExists => {
                 output.printError(allocator, "Alias '{s}' already exists.", .{alias_name}) catch {};
-                handleErrorFn(err);
-                return;
+                return err;
             },
             else => {
                 output.printError(allocator, "Failed to create alias: {s}", .{@errorName(err)}) catch {};
-                handleErrorFn(err);
-                return;
+                return err;
             },
         }
     };
@@ -1154,8 +1089,7 @@ fn handleAliasCreate(
     // Save registry
     registry.save() catch |err| {
         output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
 
     output.print(allocator, "Alias '{s}' created for environment '{s}'.", .{ alias_name, target_env_name }) catch {};
@@ -1165,15 +1099,13 @@ fn handleAliasRemove(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 4) {
         output.printError(allocator,
             \\Missing alias name.
             \\Usage: zenv alias remove <alias_name>
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const alias_name = args[3];
@@ -1182,14 +1114,13 @@ fn handleAliasRemove(
         // Save registry
         registry.save() catch |err| {
             output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-            handleErrorFn(err);
-            return;
+            return err;
         };
 
         output.print(allocator, "Alias '{s}' removed.", .{alias_name}) catch {};
     } else {
         output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
-        handleErrorFn(error.AliasNotFound);
+        return error.AliasNotFound;
     }
 }
 
@@ -1197,14 +1128,12 @@ fn handleAliasList(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     _ = args;
 
     const aliases = registry.listAliases(allocator) catch |err| {
         output.printError(allocator, "Failed to list aliases: {s}", .{@errorName(err)}) catch {};
-        handleErrorFn(err);
-        return;
+        return err;
     };
     defer aliases.deinit();
 
@@ -1223,15 +1152,13 @@ fn handleAliasShow(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 4) {
         output.printError(allocator,
             \\Missing alias name.
             \\Usage: zenv alias show <alias_name>
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const alias_name = args[3];
@@ -1240,55 +1167,51 @@ fn handleAliasShow(
         output.print(allocator, "Alias '{s}' points to environment '{s}'.", .{ alias_name, target_env }) catch {};
     } else {
         output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
-        handleErrorFn(error.AliasNotFound);
+        return error.AliasNotFound;
     }
 }
 
 pub fn handleJupyterCommand(
     allocator: Allocator,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing jupyter subcommand.
             \\Usage: zenv jupyter <create|remove|list|check> [arguments]
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const subcommand = args[2];
 
     if (std.mem.eql(u8, subcommand, "create")) {
-        handleJupyterCreate(allocator, args, handleErrorFn);
+        try handleJupyterCreate(allocator, args);
     } else if (std.mem.eql(u8, subcommand, "remove")) {
-        handleJupyterRemove(allocator, args, handleErrorFn);
+        try handleJupyterRemove(allocator, args);
     } else if (std.mem.eql(u8, subcommand, "list")) {
-        handleJupyterList(allocator, handleErrorFn);
+        try handleJupyterList(allocator);
     } else if (std.mem.eql(u8, subcommand, "check")) {
-        handleJupyterCheck(allocator, handleErrorFn);
+        try handleJupyterCheck(allocator);
     } else {
         output.printError(allocator,
             \\Unknown jupyter subcommand '{s}'.
             \\Usage: zenv jupyter <create|remove|list|check> [arguments]
         , .{subcommand}) catch {};
-        handleErrorFn(error.ArgsError);
+        return error.ArgsError;
     }
 }
 
 fn handleJupyterCreate(
     allocator: Allocator,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 4) {
         output.printError(allocator,
             \\Missing environment name argument.
             \\Usage: zenv jupyter create <env_name> [--name <kernel_name>] [--display-name <display_name>]
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const env_name = args[3];
@@ -1306,64 +1229,49 @@ fn handleJupyterCreate(
             i += 2;
         } else {
             output.printError(allocator, "Unknown flag: {s}", .{args[i]}) catch {};
-            handleErrorFn(error.ArgsError);
-            return;
+            return error.ArgsError;
         }
     }
 
-    jupyter.createKernel(allocator, env_name, custom_name, custom_display_name) catch |err| {
-        handleErrorFn(err);
-    };
+    try jupyter.createKernel(allocator, env_name, custom_name, custom_display_name);
 }
 
 fn handleJupyterRemove(
     allocator: Allocator,
     args: []const []const u8,
-    handleErrorFn: fn (anyerror) void,
-) void {
+) !void {
     if (args.len < 4) {
         output.printError(allocator,
             \\Missing environment name argument.
             \\Usage: zenv jupyter remove <env_name>
         , .{}) catch {};
-        handleErrorFn(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const env_name = args[3];
-    jupyter.removeKernel(allocator, env_name) catch |err| {
-        handleErrorFn(err);
-    };
+    try jupyter.removeKernel(allocator, env_name);
 }
 
 fn handleJupyterList(
     allocator: Allocator,
-    handleErrorFn: fn (anyerror) void,
-) void {
-    jupyter.listKernels(allocator) catch |err| {
-        handleErrorFn(err);
-    };
+) !void {
+    try jupyter.listKernels(allocator);
 }
 
 fn handleJupyterCheck(
     allocator: Allocator,
-    handleErrorFn: fn (anyerror) void,
-) void {
-    jupyter.checkJupyter(allocator) catch |err| {
-        handleErrorFn(err);
-    };
+) !void {
+    try jupyter.checkJupyter(allocator);
 }
 
 pub fn handleRenameCommand(
     allocator: Allocator,
     registry: *EnvironmentRegistry,
     args: []const []const u8,
-    handleError: fn (anyerror) void,
 ) !void {
     if (args.len < 4) {
         output.printError(allocator, "Usage: zenv rename <old_name|id> <new_name>", .{}) catch {};
-        handleError(error.ArgsError);
-        return;
+        return error.ArgsError;
     }
 
     const old_identifier = args[2];
@@ -1371,8 +1279,7 @@ pub fn handleRenameCommand(
 
     const old_entry = registry.lookup(old_identifier) orelse {
         output.printError(allocator, "Environment '{s}' not found", .{old_identifier}) catch {};
-        handleError(error.EnvironmentNotFound);
-        return;
+        return error.EnvironmentNotFound;
     };
 
     const old_name = try allocator.dupe(u8, old_entry.env_name);
@@ -1382,22 +1289,19 @@ pub fn handleRenameCommand(
     defer allocator.free(old_venv_path);
     const parent_dir = std.fs.path.dirname(old_venv_path) orelse {
         output.printError(allocator, "Invalid virtual environment path", .{}) catch {};
-        handleError(error.InvalidPath);
-        return;
+        return error.InvalidPath;
     };
 
     const new_venv_path = std.fs.path.join(allocator, &[_][]const u8{ parent_dir, new_name }) catch {
         output.printError(allocator, "Failed to construct new environment path", .{}) catch {};
-        handleError(error.OutOfMemory);
-        return;
+        return error.OutOfMemory;
     };
     defer allocator.free(new_venv_path);
 
     runtime.access(new_venv_path) catch |err| {
         if (err != error.FileNotFound) {
             output.printError(allocator, "New environment directory already exists: {s}", .{new_venv_path}) catch {};
-            handleError(error.PathAlreadyExists);
-            return;
+            return error.PathAlreadyExists;
         }
     };
 
@@ -1409,16 +1313,14 @@ pub fn handleRenameCommand(
 
     runtime.rename(old_venv_path, new_venv_path) catch |err| {
         output.printError(allocator, "Failed to rename environment directory: {s}", .{@errorName(err)}) catch {};
-        handleError(error.IoError);
-        return;
+        return error.IoError;
     };
 
     updateGeneratedScripts(allocator, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
         runtime.rename(new_venv_path, old_venv_path) catch {};
 
         output.printError(allocator, "Failed to update generated scripts: {s}", .{@errorName(err)}) catch {};
-        handleError(err);
-        return;
+        return err;
     };
 
     registry.renameEnvironment(old_identifier, new_name) catch |err| {
@@ -1436,8 +1338,7 @@ pub fn handleRenameCommand(
                 output.printError(allocator, "Failed to update registry: {s}", .{@errorName(err)}) catch {};
             },
         }
-        handleError(err);
-        return;
+        return err;
     };
 
     if (has_jupyter_kernel) {
@@ -1454,8 +1355,7 @@ pub fn handleRenameCommand(
                     output.printError(allocator, "Failed to rename Jupyter kernel: {s}", .{@errorName(err)}) catch {};
                 },
             }
-            handleError(err);
-            return;
+            return err;
         };
     }
 
@@ -1468,8 +1368,7 @@ pub fn handleRenameCommand(
         runtime.rename(new_venv_path, old_venv_path) catch {};
 
         output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-        handleError(error.RegistryError);
-        return;
+        return error.RegistryError;
     };
 
     // === ATOMIC OPERATIONS END ===

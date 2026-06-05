@@ -262,13 +262,7 @@ pub fn main(app: std.process.Init) anyerror!void {
     const config_path = "zenv.json";
 
     const handleError = struct {
-        var alloc: Allocator = undefined;
-
-        pub fn init(a: Allocator) void {
-            alloc = a;
-        }
-
-        pub fn func(err: anyerror) void {
+        pub fn func(alloc: Allocator, err: anyerror) void {
             // Standard error handler
             if (@errorReturnTrace()) |trace| {
                 output.printError(alloc, "{s}", .{@errorName(err)}) catch {};
@@ -435,13 +429,10 @@ pub fn main(app: std.process.Init) anyerror!void {
         }
     };
 
-    // Initialize the error handler with the allocator
-    handleError.init(allocator);
-
     // Load the environment registry first, as we'll need it for all commands
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
         output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
-        handleError.func(error.RegistryError);
+        handleError.func(allocator, error.RegistryError);
         return;
     };
     defer registry.deinit();
@@ -463,7 +454,7 @@ pub fn main(app: std.process.Init) anyerror!void {
                 runtime.access(config_path) catch |err| {
                     if (err != error.FileNotFound) {
                         output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
-                        handleError.func(err);
+                        handleError.func(allocator, err);
                         break :blk false;
                     }
                     // File doesn't exist
@@ -495,41 +486,56 @@ pub fn main(app: std.process.Init) anyerror!void {
 
         // Now load the config with validation
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError.func(err);
+            handleError.func(allocator, err);
             return; // Exit after handling error
         };
     } else if (command == .register) {
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError.func(err);
+            handleError.func(allocator, err);
             return; // Exit after handling error
         };
     }
 
     // Dispatch to command handlers
-    switch (command) {
-        .setup => try commands.handleSetupCommand(allocator, &config.?, &registry, args, handleError.func),
-        .activate => commands.handleActivateCommand(allocator, &registry, args, handleError.func),
-        .list => commands.handleListCommand(allocator, &registry, args),
-        .register => commands.handleRegisterCommand(allocator, &config.?, &registry, args, handleError.func),
-        .deregister => commands.handleDeregisterCommand(allocator, &registry, args, handleError.func),
-        .rm => commands.handleRmCommand(allocator, &registry, args, handleError.func),
-        .rename => try commands.handleRenameCommand(allocator, &registry, args, handleError.func),
-        .cd => commands.handleCdCommand(allocator, &registry, args, handleError.func),
-        .python => try commands.handlePythonCommand(allocator, args, handleError.func),
-        .log => commands.handleLogCommand(allocator, &registry, args, handleError.func),
-        .run => commands.handleRunCommand(allocator, &registry, args, handleError.func),
-        .validate => commands.handleValidateCommand(allocator, config_path, args, handleError.func),
-        .alias => commands.handleAliasCommand(allocator, &registry, args, handleError.func),
-        .jupyter => commands.handleJupyterCommand(allocator, args, handleError.func),
+    // Dispatch the command; any error it returns is mapped to a user-facing
+    // message (and exits) by the single error handler.
+    const config_ptr: ?*const configurations.ZenvConfig = if (config) |*c| c else null;
+    dispatch(command, allocator, config_ptr, &registry, args, config_path) catch |err| handleError.func(allocator, err);
+}
 
-        // These were handled above, unreachable here
+/// Routes a parsed command to its handler. Handlers return errors rather than
+/// reporting them; `main` maps the error to a message in one place.
+fn dispatch(
+    command: Command,
+    allocator: Allocator,
+    config: ?*const configurations.ZenvConfig,
+    registry: *configurations.EnvironmentRegistry,
+    args: []const []const u8,
+    config_path: []const u8,
+) !void {
+    switch (command) {
+        .setup => try commands.handleSetupCommand(allocator, config.?, registry, args),
+        .activate => try commands.handleActivateCommand(allocator, registry, args),
+        .list => try commands.handleListCommand(allocator, registry, args),
+        .register => try commands.handleRegisterCommand(allocator, config.?, registry, args),
+        .deregister => try commands.handleDeregisterCommand(allocator, registry, args),
+        .rm => try commands.handleRmCommand(allocator, registry, args),
+        .rename => try commands.handleRenameCommand(allocator, registry, args),
+        .cd => try commands.handleCdCommand(allocator, registry, args),
+        .python => try commands.handlePythonCommand(allocator, args),
+        .log => try commands.handleLogCommand(allocator, registry, args),
+        .run => try commands.handleRunCommand(allocator, registry, args),
+        .validate => try commands.handleValidateCommand(allocator, config_path, args),
+        .alias => try commands.handleAliasCommand(allocator, registry, args),
+        .jupyter => try commands.handleJupyterCommand(allocator, args),
+
+        // These were handled before dispatch, unreachable here
         .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
 
         .unknown => {
             output.printError(allocator, "Unknown command '{s}'", .{args[1]}) catch {};
             output.print(allocator, "run 'zenv help' to see the usage", .{}) catch {};
-            // printUsage();
-            process.exit(1);
+            std.process.exit(1);
         },
     }
 }

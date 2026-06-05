@@ -102,3 +102,38 @@ pub fn processTemplateString(
 
     return result_buffer.toOwnedSlice();
 }
+
+// ============================ Tests ============================
+
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "processTemplateString replaces a known placeholder" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    var repl = std.StringHashMap([]const u8).init(a);
+    defer repl.deinit();
+    try repl.put("NAME", "world");
+    const out = try processTemplateString(a, "hello @@NAME@@!", repl);
+    defer a.free(out);
+    try testing.expectEqualStrings("hello world!", out);
+}
+
+test "processTemplateString leaves an unknown placeholder untouched" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    var repl = std.StringHashMap([]const u8).init(a);
+    defer repl.deinit();
+    const out = try processTemplateString(a, "x @@MISSING@@ y", repl);
+    defer a.free(out);
+    try testing.expectEqualStrings("x @@MISSING@@ y", out);
+}
+
+test "processTemplateString passes through text with no placeholders" {
+    const a = testing.allocator;
+    var repl = std.StringHashMap([]const u8).init(a);
+    defer repl.deinit();
+    const out = try processTemplateString(a, "no placeholders here", repl);
+    defer a.free(out);
+    try testing.expectEqualStrings("no placeholders here", out);
+}

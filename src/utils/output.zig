@@ -7,6 +7,11 @@ const runtime = @import("runtime.zig");
 var log_file: ?File = null;
 var log_enabled: bool = false;
 
+/// When true, all stdout/stderr writes are skipped. Tests set this so logging
+/// does not corrupt the `zig build test` runner's stdout protocol. Off (and
+/// zero-cost) in normal runs.
+pub var silent: bool = false;
+
 /// Starts logging to the specified file path
 /// If the file exists, it will be appended to
 pub fn startLogging(allocator: Allocator, path: []const u8) !void {
@@ -50,6 +55,7 @@ fn logMessage(message: []const u8) !void {
 
 /// Writes `message` to the given standard stream and flushes it.
 fn writeStd(file: File, message: []const u8) !void {
+    if (silent) return;
     var buf: [512]u8 = undefined;
     var fw = file.writerStreaming(runtime.io, &buf);
     const w = &fw.interface;
@@ -61,15 +67,17 @@ fn writeStd(file: File, message: []const u8) !void {
 /// no logging). For data output meant to be captured by a shell, e.g.
 /// `source $(zenv activate ...)`.
 pub fn rawOut(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    const msg = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(msg);
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch try std.fmt.allocPrint(allocator, fmt, args);
+    defer if (msg.ptr != &buf) allocator.free(msg);
     try writeStd(File.stdout(), msg);
 }
 
 /// Like `rawOut` but writes to stderr.
 pub fn rawErr(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    const msg = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(msg);
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch try std.fmt.allocPrint(allocator, fmt, args);
+    defer if (msg.ptr != &buf) allocator.free(msg);
     try writeStd(File.stderr(), msg);
 }
 

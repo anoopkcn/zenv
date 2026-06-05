@@ -6,6 +6,7 @@ const errors = @import("errors.zig");
 const output = @import("output.zig");
 const template = @import("template.zig");
 const runtime = @import("runtime.zig");
+const CommandFlags = @import("flags.zig").CommandFlags;
 
 // Embed the template file at compile time
 const SETUP_ENV_TEMPLATE = @embedFile("templates/setup.template");
@@ -18,12 +19,8 @@ pub fn createSetupScriptFromTemplate(
     base_dir: []const u8,
     req_abs_path: []const u8,
     valid_deps_list_len: usize,
-    force_deps: bool,
+    flags: CommandFlags,
     modules_verified: bool,
-    use_default_python: bool,
-    dev_mode: bool,
-    use_uv: bool,
-    no_cache: bool,
     command_str: ?[]const u8,
 ) ![]const u8 {
     return try createSetupScript(
@@ -33,12 +30,8 @@ pub fn createSetupScriptFromTemplate(
         base_dir,
         req_abs_path,
         valid_deps_list_len,
-        force_deps,
+        flags,
         modules_verified,
-        use_default_python,
-        dev_mode,
-        use_uv,
-        no_cache,
         command_str,
     );
 }
@@ -144,12 +137,8 @@ fn createSetupScript(
     base_dir: []const u8,
     req_abs_path: []const u8,
     valid_deps_list_len: usize,
-    force_deps: bool,
+    flags: CommandFlags,
     modules_verified: bool,
-    use_default_python: bool,
-    dev_mode: bool,
-    use_uv: bool,
-    no_cache: bool,
     command_str: ?[]const u8,
 ) ![]const u8 {
     try output.print(allocator, "Creating setup script for '{s}'...", .{env_name});
@@ -264,7 +253,7 @@ fn createSetupScript(
     var fallback_python: []const u8 = undefined;
 
     // When --python flag is used, try to get the default Python
-    if (use_default_python) {
+    if (flags.use_default_python) {
         // Try to get the default Python path
         const default_python = @import("python.zig").getDefaultPythonPath(allocator) catch |err| {
             output.printError(allocator, "Failed to read default Python path with --python flag: {s}", .{@errorName(err)}) catch {};
@@ -313,19 +302,19 @@ fn createSetupScript(
     try replacements.put("MODULES_VERIFIED_VALUE", if (modules_verified) "MODULES_VERIFIED=true" else "MODULES_VERIFIED=false");
 
     // Set force_deps flag for the template
-    try replacements.put("FORCE_DEPS_VALUE", if (force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
+    try replacements.put("FORCE_DEPS_VALUE", if (flags.force_deps) "FORCE_DEPS=true" else "FORCE_DEPS=false");
 
     // Set use_default_python flag for the template
-    try replacements.put("USE_DEFAULT_PYTHON_VALUE", if (use_default_python) "USE_DEFAULT_PYTHON=true" else "USE_DEFAULT_PYTHON=false");
+    try replacements.put("USE_DEFAULT_PYTHON_VALUE", if (flags.use_default_python) "USE_DEFAULT_PYTHON=true" else "USE_DEFAULT_PYTHON=false");
 
     // Set dev_mode flag for the template
-    try replacements.put("DEV_MODE_VALUE", if (dev_mode) "DEV_MODE=true" else "DEV_MODE=false");
+    try replacements.put("DEV_MODE_VALUE", if (flags.dev_mode) "DEV_MODE=true" else "DEV_MODE=false");
 
     // Set use_uv flag for the template
-    try replacements.put("USE_UV_VALUE", if (use_uv) "USE_UV=true" else "USE_UV=false");
+    try replacements.put("USE_UV_VALUE", if (flags.use_uv) "USE_UV=true" else "USE_UV=false");
 
     // Set no_cache flag for the template
-    try replacements.put("NO_CACHE_VALUE", if (no_cache) "NO_CACHE=true" else "NO_CACHE=false");
+    try replacements.put("NO_CACHE_VALUE", if (flags.no_cache) "NO_CACHE=true" else "NO_CACHE=false");
 
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)
