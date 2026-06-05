@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const fs = std.fs;
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
@@ -10,6 +9,7 @@ const mem = std.mem;
 const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 fn generateSHA1ID(
     allocator: Allocator,
@@ -26,14 +26,15 @@ fn generateSHA1ID(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const timestamp_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.time.milliTimestamp()});
+    const timestamp_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{runtime.nowMillis()});
     sha1.update(timestamp_str);
 
     var hash: [20]u8 = undefined;
     sha1.final(&hash);
 
-    // Efficient hex conversion
-    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&hash)});
+    // Efficient hex conversion (no intermediate format pass)
+    const hex = std.fmt.bytesToHex(hash, .lower);
+    return allocator.dupe(u8, &hex);
 }
 
 // =======================
@@ -231,12 +232,8 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    // Open the file only once and read it directly into the parser
-    const file = try fs.cwd().openFile(config_path, .{});
-    defer file.close();
-
-    // Parse JSON using the standard method
-    const json_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    // Read the whole config file
+    const json_content = try runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024);
     defer allocator.free(json_content);
 
     const value_tree = try json.parseFromSlice(json.Value, allocator, json_content, .{
@@ -401,12 +398,12 @@ const RegistryJSON = struct {
 
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
-    entries: std.ArrayList(RegistryEntry),
+    entries: std.array_list.Managed(RegistryEntry),
 
     pub fn init(allocator: Allocator) EnvironmentRegistry {
         return .{
             .allocator = allocator,
-            .entries = std.ArrayList(RegistryEntry).init(allocator),
+            .entries = std.array_list.Managed(RegistryEntry).init(allocator),
         };
     }
 
@@ -425,8 +422,8 @@ pub const EnvironmentRegistry = struct {
         const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
         defer allocator.free(registry_path);
 
-        // Try opening the registry file
-        const file = std.fs.openFileAbsolute(registry_path, .{}) catch |err| {
+        // Read the registry file (creating an empty one if it does not exist yet)
+        const file_content = runtime.readFileAlloc(allocator, registry_path, 10 * 1024 * 1024) catch |err| {
             if (err == error.FileNotFound) {
                 try registry.save(); // Create an empty registry
                 return registry;
@@ -434,10 +431,6 @@ pub const EnvironmentRegistry = struct {
             output.printError(allocator, "Failed to open registry file: {s}", .{@errorName(err)}) catch {};
             return err;
         };
-        defer file.close();
-
-        // Parse the JSON content from the file
-        const file_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
         defer allocator.free(file_content);
 
         // Use parsed value with proper error handling
@@ -557,52 +550,35 @@ pub const EnvironmentRegistry = struct {
         const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
         defer self.allocator.free(registry_path);
 
-        // Create registry JSON object using helpers for structure
+        // Build a plain serializable view of the registry and let std.json
+        // stringify it directly (no manual Value-tree construction).
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
+        const a = arena.allocator();
 
-        // More efficient JSON creation using StringArrayHashMap
-        var root = json.ObjectMap.init(arena.allocator());
-        var entries_array = json.Array.init(arena.allocator());
-
-        for (self.entries.items) |entry| {
-            var entry_obj = json.ObjectMap.init(arena.allocator());
-            try entry_obj.put("id", json.Value{ .string = entry.id });
-            try entry_obj.put("name", json.Value{ .string = entry.env_name });
-            try entry_obj.put("project_dir", json.Value{ .string = entry.project_dir });
-            try entry_obj.put("target_machine", json.Value{ .string = entry.target_machines_str });
-            try entry_obj.put("venv_path", json.Value{ .string = entry.venv_path });
-
-            if (entry.description) |desc| {
-                try entry_obj.put("description", json.Value{ .string = desc });
-            }
-
-            // Add aliases array for this entry
-            var aliases_array = json.Array.init(arena.allocator());
-            for (entry.aliases.items) |alias| {
-                try aliases_array.append(json.Value{ .string = alias });
-            }
-            try entry_obj.put("aliases", json.Value{ .array = aliases_array });
-
-            try entries_array.append(json.Value{ .object = entry_obj });
+        const entries = try a.alloc(RegistryJSON.RegistryEntryJSON, self.entries.items.len);
+        for (self.entries.items, 0..) |entry, i| {
+            entries[i] = .{
+                .id = entry.id,
+                .name = entry.env_name,
+                .project_dir = entry.project_dir,
+                .target_machine = entry.target_machines_str,
+                .venv_path = entry.venv_path,
+                .description = entry.description,
+                .aliases = entry.aliases.items,
+            };
         }
+        const registry_json = RegistryJSON{ .environments = entries };
 
-        try root.put("environments", json.Value{ .array = entries_array });
-
-        // StringBuffer for creating the JSON string
-        var string_buffer = std.ArrayList(u8).init(self.allocator);
-        defer string_buffer.deinit();
-
-        try json.stringify(
-            json.Value{ .object = root },
+        // Serialize to JSON text and write it out in one shot.
+        const json_text = try std.json.Stringify.valueAlloc(
+            self.allocator,
+            registry_json,
             .{ .whitespace = .indent_2 },
-            string_buffer.writer(),
         );
+        defer self.allocator.free(json_text);
 
-        // Write to file
-        const file = try std.fs.createFileAbsolute(registry_path, .{});
-        defer file.close();
-        try file.writeAll(string_buffer.items);
+        try runtime.writeFile(registry_path, json_text);
     }
 
     pub fn register(

@@ -18,7 +18,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.14.0
+          version: 0.16.0
 
       - name: Force-build for all targets
         run: zig build release-small -Dforce-release=true

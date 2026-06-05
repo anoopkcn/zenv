@@ -1,31 +1,23 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const process = std.process;
-const fs = std.fs;
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 // Gets the zenv directory path, respecting ZENV_DIR environment variable
 // if set, otherwise uses ~/.zenv
 pub fn getZenvDir(allocator: Allocator) ![]const u8 {
     // Try to get ZENV_DIR environment variable
-    const zenv_dir = process.getEnvVarOwned(allocator, "ZENV_DIR") catch |err| {
-        if (err == error.EnvironmentVariableNotFound) {
-            // Fallback to home directory
-            const home_dir = process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
-                output.printError(allocator,
-                    \\Failed to get HOME environment variable: {s}
-                , .{@errorName(home_err)}) catch {};
-                return error.HomeDirectoryNotFound;
-            };
-            defer allocator.free(home_dir);
+    if (runtime.env("ZENV_DIR")) |zenv_dir| {
+        return allocator.dupe(u8, zenv_dir);
+    }
 
-            return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
-        }
-        output.printError(allocator, "Failed to get ZENV_DIR environment variable: {s}", .{@errorName(err)}) catch {};
-        return err;
+    // Fallback to home directory
+    const home_dir = runtime.env("HOME") orelse {
+        output.printError(allocator, "Failed to get HOME environment variable", .{}) catch {};
+        return error.HomeDirectoryNotFound;
     };
 
-    return zenv_dir;
+    return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
 }
 
 // Creates the zenv directory if it doesn't exist
@@ -33,7 +25,7 @@ pub fn ensureZenvDir(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     errdefer allocator.free(zenv_dir_path);
 
-    fs.makeDirAbsolute(zenv_dir_path) catch |err| {
+    runtime.makePath(zenv_dir_path) catch |err| {
         if (err != error.PathAlreadyExists) {
             output.printError(allocator, "Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
             return err;

@@ -8,6 +8,7 @@ const configurations = @import("utils/config.zig");
 const output = @import("utils/output.zig");
 const flags_module = @import("utils/flags.zig");
 const validation = @import("utils/validation.zig");
+const runtime = @import("utils/runtime.zig");
 
 pub const Command = enum {
     setup,
@@ -68,8 +69,16 @@ pub const Command = enum {
     }
 };
 
-fn printVersion() !void {
-    try std.io.getStdOut().writer().print("{s}", .{options.version});
+fn stdoutWrite(bytes: []const u8) void {
+    var buf: [256]u8 = undefined;
+    var fw = std.Io.File.stdout().writerStreaming(runtime.io, &buf);
+    const w = &fw.interface;
+    w.writeAll(bytes) catch return;
+    w.flush() catch return;
+}
+
+fn printVersion() void {
+    stdoutWrite(options.version);
 }
 
 fn printUsage() void {
@@ -193,17 +202,25 @@ fn printUsage() void {
         \\  a zenv.json file and have registered environments for that directory.
         \\
     ;
-    std.io.getStdOut().writer().print("{s}", .{usage}) catch {};
+    stdoutWrite(usage);
 }
 
-pub fn main() anyerror!void {
+pub fn main(app: std.process.Init) anyerror!void {
+    // Establish the process-wide I/O context for the whole program (Zig 0.16).
+    runtime.io = app.io;
+    runtime.environ_map = app.environ_map;
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Get args with ownership - we'll use these directly and cast as needed
-    const args = try process.argsAlloc(allocator);
-    // Defer freeing is moved lower to ensure args remain valid throughout execution
+    // Collect args into an owned slice from the std bootstrap. The argv strings
+    // are static (owned by the OS), so we only copy the pointers; the arena owns
+    // the slice itself.
+    var args_builder = std.array_list.Managed([]const u8).init(allocator);
+    var arg_it = app.minimal.args.iterate();
+    while (arg_it.next()) |a| try args_builder.append(a);
+    const args = try args_builder.toOwnedSlice();
 
     // Command parsing logic - Use args directly for command parsing
     const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
@@ -215,7 +232,7 @@ pub fn main() anyerror!void {
             process.exit(0);
         },
         .version, .@"-v", .@"-V", .@"--version" => {
-            try printVersion();
+            printVersion();
             process.exit(0);
         },
         .init => {
@@ -407,7 +424,7 @@ pub fn main() anyerror!void {
                     },
                     else => {
                         output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
-                        std.debug.dumpStackTrace(trace.*);
+                        _ = trace; // error return trace is dumped by the std bootstrap on error
                     },
                 }
             } else {
@@ -443,7 +460,7 @@ pub fn main() anyerror!void {
         if (init_flag) {
             // Check if config file already exists
             const config_exists = blk: {
-                std.fs.cwd().access(config_path, .{}) catch |err| {
+                runtime.access(config_path) catch |err| {
                     if (err != error.FileNotFound) {
                         output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
                         handleError.func(err);
@@ -457,7 +474,7 @@ pub fn main() anyerror!void {
 
             if (!config_exists) {
                 // Create init args
-                var init_args = std.ArrayList([]const u8).init(allocator);
+                var init_args = std.array_list.Managed([]const u8).init(allocator);
                 defer init_args.deinit();
 
                 try init_args.append("zenv"); // Args[0] is the program name
@@ -487,8 +504,6 @@ pub fn main() anyerror!void {
             return; // Exit after handling error
         };
     }
-
-    defer process.argsFree(allocator, args); // Defer freeing the original args
 
     // Dispatch to command handlers
     switch (command) {

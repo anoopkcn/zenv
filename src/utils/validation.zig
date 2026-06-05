@@ -1,14 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const json = std.json;
-const fs = std.fs;
 const output = @import("output.zig");
 const config_module = @import("config.zig");
+const runtime = @import("runtime.zig");
 
 /// Represents an error found during validation
 pub const ValidationError = struct {
-    line: usize,
-    column: usize,
+    line: usize = 0,
+    column: usize = 0,
     message: []const u8,
     context: ?[]const u8 = null,
     field_path: ?[]const u8 = null,
@@ -23,11 +23,11 @@ pub const ValidationError = struct {
 /// Validates a JSON configuration file and returns a list of validation errors
 /// or null if no errors are found. If validation errors are found, they will
 /// be printed to stderr.
-pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.ArrayList(ValidationError) {
-    // Try to open the file
-    const file = fs.cwd().openFile(file_path, .{}) catch |err| {
+pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.array_list.Managed(ValidationError) {
+    // Read the file content
+    const file_content = runtime.readFileAlloc(allocator, file_path, 10 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
-            var errors = std.ArrayList(ValidationError).init(allocator);
+            var errors = std.array_list.Managed(ValidationError).init(allocator);
             try errors.append(ValidationError{
                 .line = 0,
                 .column = 0,
@@ -41,10 +41,6 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
         }
         return err;
     };
-    defer file.close();
-
-    // Read the file content
-    const file_content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
     defer allocator.free(file_content);
 
     // Validate the JSON content
@@ -60,8 +56,8 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.Arr
 }
 
 /// Validates JSON content and returns a list of validation errors
-pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.ArrayList(ValidationError) {
-    var errors = std.ArrayList(ValidationError).init(allocator);
+pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.array_list.Managed(ValidationError) {
+    var errors = std.array_list.Managed(ValidationError).init(allocator);
     errdefer {
         for (errors.items) |*err| {
             err.deinit(allocator);
@@ -69,23 +65,22 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.Arra
         errors.deinit();
     }
 
-    // First, check if the JSON is valid
-    var parsed = json.parseFromSlice(json.Value, allocator, content, .{}) catch |err| {
-        // Create a descriptive error message based on the error name
-        const err_name = @errorName(err);
-        const err_msg = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{err_name});
+    // Parse with a Scanner whose Diagnostics tracks exact line/column during
+    // the parse itself, so a syntax error reports the precise position from the
+    // parser (no second hand-rolled scan).
+    var scanner = json.Scanner.initCompleteInput(allocator, content);
+    defer scanner.deinit();
+    var diag: json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diag);
 
-        // Find position information
-        const position = findErrorPosition(content, err_name) catch Position{ .line = 0, .column = 0 };
-
-        // Get context around the error
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
+    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{}) catch |err| {
+        const err_msg = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{@errorName(err)});
 
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
+            .line = diag.getLine(),
+            .column = diag.getColumn(),
             .message = err_msg,
-            .context = context,
+            .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
             .field_path = "",
         });
 
@@ -93,8 +88,9 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.Arra
     };
     defer parsed.deinit();
 
-    // Now validate the structure of the JSON
-    try validateZenvConfig(allocator, &errors, parsed.value, content, "");
+    // Validate the structure of the JSON. Each semantic error is recorded with
+    // its dotted field path; exact line/column/context are backfilled below.
+    try validateZenvConfig(allocator, &errors, parsed.value, "");
 
     // If there are no errors, return null
     if (errors.items.len == 0) {
@@ -102,27 +98,24 @@ pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.Arra
         return null;
     }
 
+    // Backfill accurate positions for every semantic error from a single pass
+    // over the token stream (keyed by field path).
+    try fillPositions(allocator, content, errors.items);
+
     return errors;
 }
 
 /// Validates the structure of a zenv.json configuration
 fn validateZenvConfig(
     allocator: Allocator,
-    errors: *std.ArrayList(ValidationError),
+    errors: *std.array_list.Managed(ValidationError),
     value: json.Value,
-    content: []const u8,
     path: []const u8,
 ) !void {
     // The root must be an object
     if (value != .object) {
-        const position = try findValuePosition(content, value);
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
             .message = try allocator.dupe(u8, "Root configuration must be a JSON object"),
-            .context = context,
             .field_path = try allocator.dupe(u8, path),
         });
         return;
@@ -130,28 +123,16 @@ fn validateZenvConfig(
 
     // Check for required base_dir field
     if (!value.object.contains("base_dir")) {
-        const position = try findObjectPosition(content, value.object);
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
             .message = try allocator.dupe(u8, "Missing required 'base_dir' field"),
-            .context = context,
             .field_path = try allocator.dupe(u8, path),
         });
     } else {
         const base_dir = value.object.get("base_dir") orelse unreachable;
         if (base_dir != .string) {
-            const position = try findValuePosition(content, base_dir);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try allocator.dupe(u8, "'base_dir' must be a string"),
-                .context = context,
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.base_dir", .{path}),
+                .field_path = try allocator.dupe(u8, "base_dir"),
             });
         }
     }
@@ -170,20 +151,13 @@ fn validateZenvConfig(
             errors,
             entry.value_ptr.*,
             key,
-            content,
             if (path.len > 0) try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, key }) else key,
         );
     }
 
     if (!has_envs) {
-        const position = try findObjectPosition(content, value.object);
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
             .message = try allocator.dupe(u8, "At least one environment must be defined"),
-            .context = context,
             .field_path = try allocator.dupe(u8, path),
         });
     }
@@ -192,21 +166,14 @@ fn validateZenvConfig(
 /// Validates an environment configuration
 fn validateEnvironment(
     allocator: Allocator,
-    errors: *std.ArrayList(ValidationError),
+    errors: *std.array_list.Managed(ValidationError),
     value: json.Value,
     env_name: []const u8,
-    content: []const u8,
     path: []const u8,
 ) !void {
     if (value != .object) {
-        const position = try findValuePosition(content, value);
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
             .message = try std.fmt.allocPrint(allocator, "Environment '{s}' must be an object", .{env_name}),
-            .context = context,
             .field_path = try allocator.dupe(u8, path),
         });
         return;
@@ -214,53 +181,35 @@ fn validateEnvironment(
 
     // Check for required 'target_machines' field
     if (!value.object.contains("target_machines")) {
-        const position = try findObjectPosition(content, value.object);
-        const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
         try errors.append(ValidationError{
-            .line = position.line,
-            .column = position.column,
             .message = try std.fmt.allocPrint(
                 allocator,
                 "Environment '{s}' is missing required 'target_machines' field",
                 .{env_name},
             ),
-            .context = context,
             .field_path = try allocator.dupe(u8, path),
         });
     } else {
         const target_machines = value.object.get("target_machines") orelse unreachable;
         if (target_machines != .array) {
-            const position = try findValuePosition(content, target_machines);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'target_machines' must be an array",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{path}),
             });
         } else {
             // Validate all items in target_machines are strings
             for (target_machines.array.items, 0..) |machine, i| {
                 if (machine != .string) {
-                    const position = try findValuePosition(content, machine);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'target_machines[{d}]' must be a string",
                             .{ env_name, i },
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines[{d}]", .{ path, i }),
                     });
                 }
@@ -272,18 +221,12 @@ fn validateEnvironment(
     // description: optional string
     if (value.object.get("description")) |desc| {
         if (desc != .string and desc != .null) {
-            const position = try findValuePosition(content, desc);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'description' must be a string or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.description", .{path}),
             });
         }
@@ -292,18 +235,12 @@ fn validateEnvironment(
     // fallback_python: optional string
     if (value.object.get("fallback_python")) |python| {
         if (python != .string and python != .null) {
-            const position = try findValuePosition(content, python);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'fallback_python' must be a string or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.fallback_python", .{path}),
             });
         }
@@ -312,35 +249,23 @@ fn validateEnvironment(
     // modules: array of strings
     if (value.object.get("modules")) |modules| {
         if (modules != .array) {
-            const position = try findValuePosition(content, modules);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'modules' must be an array",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.modules", .{path}),
             });
         } else {
             for (modules.array.items, 0..) |module, i| {
                 if (module != .string) {
-                    const position = try findValuePosition(content, module);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'modules[{d}]' must be a string",
                             .{ env_name, i },
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.modules[{d}]", .{ path, i }),
                     });
                 }
@@ -351,18 +276,12 @@ fn validateEnvironment(
     // modules_file: optional string
     if (value.object.get("modules_file")) |modules_file| {
         if (modules_file != .string and modules_file != .null) {
-            const position = try findValuePosition(content, modules_file);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'modules_file' must be a string or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.modules_file", .{path}),
             });
         }
@@ -371,35 +290,23 @@ fn validateEnvironment(
     // dependencies: array of strings
     if (value.object.get("dependencies")) |dependencies| {
         if (dependencies != .array) {
-            const position = try findValuePosition(content, dependencies);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'dependencies' must be an array",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.dependencies", .{path}),
             });
         } else {
             for (dependencies.array.items, 0..) |dep, i| {
                 if (dep != .string) {
-                    const position = try findValuePosition(content, dep);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'dependencies[{d}]' must be a string",
                             .{ env_name, i },
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.dependencies[{d}]", .{ path, i }),
                     });
                 }
@@ -410,18 +317,12 @@ fn validateEnvironment(
     // dependency_file: optional string
     if (value.object.get("dependency_file")) |dep_file| {
         if (dep_file != .string and dep_file != .null) {
-            const position = try findValuePosition(content, dep_file);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'dependency_file' must be a string or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.dependency_file", .{path}),
             });
         }
@@ -430,36 +331,24 @@ fn validateEnvironment(
     // setup: optional object with commands and script
     if (value.object.get("setup")) |setup_obj| {
         if (setup_obj != .object and setup_obj != .null) {
-            const position = try findValuePosition(content, setup_obj);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'setup' must be an object or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.setup", .{path}),
             });
         } else if (setup_obj == .object) {
             // Validate script field
             if (setup_obj.object.get("script")) |script| {
                 if (script != .string and script != .null) {
-                    const position = try findValuePosition(content, script);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'setup.script' must be a string or null",
                             .{env_name},
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.script", .{path}),
                     });
                 }
@@ -468,35 +357,23 @@ fn validateEnvironment(
             // Validate commands field
             if (setup_obj.object.get("commands")) |commands| {
                 if (commands != .array and commands != .null) {
-                    const position = try findValuePosition(content, commands);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'setup.commands' must be an array or null",
                             .{env_name},
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands", .{path}),
                     });
                 } else if (commands == .array) {
                     for (commands.array.items, 0..) |cmd, i| {
                         if (cmd != .string) {
-                            const position = try findValuePosition(content, cmd);
-                            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                             try errors.append(ValidationError{
-                                .line = position.line,
-                                .column = position.column,
                                 .message = try std.fmt.allocPrint(
                                     allocator,
                                     "In environment '{s}', 'setup.commands[{d}]' must be a string",
                                     .{ env_name, i },
                                 ),
-                                .context = context,
                                 .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands[{d}]", .{ path, i }),
                             });
                         }
@@ -509,36 +386,24 @@ fn validateEnvironment(
     // activate: optional object with commands and script
     if (value.object.get("activate")) |activate_obj| {
         if (activate_obj != .object and activate_obj != .null) {
-            const position = try findValuePosition(content, activate_obj);
-            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = position.line,
-                .column = position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', 'activate' must be an object or null",
                     .{env_name},
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.activate", .{path}),
             });
         } else if (activate_obj == .object) {
             // Validate script field
             if (activate_obj.object.get("script")) |script| {
                 if (script != .string and script != .null) {
-                    const position = try findValuePosition(content, script);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'activate.script' must be a string or null",
                             .{env_name},
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.script", .{path}),
                     });
                 }
@@ -547,35 +412,23 @@ fn validateEnvironment(
             // Validate commands field
             if (activate_obj.object.get("commands")) |commands| {
                 if (commands != .array and commands != .null) {
-                    const position = try findValuePosition(content, commands);
-                    const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                     try errors.append(ValidationError{
-                        .line = position.line,
-                        .column = position.column,
                         .message = try std.fmt.allocPrint(
                             allocator,
                             "In environment '{s}', 'activate.commands' must be an array or null",
                             .{env_name},
                         ),
-                        .context = context,
                         .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands", .{path}),
                     });
                 } else if (commands == .array) {
                     for (commands.array.items, 0..) |cmd, i| {
                         if (cmd != .string) {
-                            const position = try findValuePosition(content, cmd);
-                            const context = getContextAroundPosition(allocator, content, position.line) catch null;
-
                             try errors.append(ValidationError{
-                                .line = position.line,
-                                .column = position.column,
                                 .message = try std.fmt.allocPrint(
                                     allocator,
                                     "In environment '{s}', 'activate.commands[{d}]' must be a string",
                                     .{ env_name, i },
                                 ),
-                                .context = context,
                                 .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands[{d}]", .{ path, i }),
                             });
                         }
@@ -614,18 +467,12 @@ fn validateEnvironment(
 
         // If not allowed, add validation error
         if (!is_allowed) {
-            const field_position = try findValuePosition(content, entry.value_ptr.*);
-            const context = getContextAroundPosition(allocator, content, field_position.line) catch null;
-
             try errors.append(ValidationError{
-                .line = field_position.line,
-                .column = field_position.column,
                 .message = try std.fmt.allocPrint(
                     allocator,
                     "In environment '{s}', '{s}' is not a recognized field.",
                     .{ env_name, field_name },
                 ),
-                .context = context,
                 .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, field_name }),
             });
         }
@@ -638,126 +485,114 @@ const Position = struct {
     column: usize,
 };
 
-/// Find the position of an error in the JSON text
-fn findErrorPosition(content: []const u8, _: []const u8) !Position {
-    // For syntax errors, we need to scan the file to find the approximate location
-    // This approach attempts to locate common JSON syntax errors
+/// Builds a map from dotted field path (e.g. "myenv.target_machines[0]") to the
+/// position of that value in the source, by walking the token stream once.
+/// Container values record the position of their opening token; the empty
+/// string key "" is the document root. Positions come from the parser's own
+/// `Diagnostics`, so they are exact and repeat-proof.
+fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMap(Position) {
+    var map = std.StringHashMap(Position).init(allocator);
+    errdefer map.deinit();
 
-    var line: usize = 1;
-    var column: usize = 1;
-    var in_string = false;
-    var escape_next = false;
+    var scanner = json.Scanner.initCompleteInput(allocator, content);
+    defer scanner.deinit();
+    var diag: json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diag);
 
-    // Track brackets and braces for balance checking
-    var stack = std.ArrayList(struct { char: u8, pos: Position }).init(std.heap.page_allocator);
-    defer stack.deinit();
+    const Frame = struct { is_object: bool, expecting_key: bool, index: usize, base_len: usize };
+    var frames = std.array_list.Managed(Frame).init(allocator);
+    defer frames.deinit();
+    var path = std.array_list.Managed(u8).init(allocator);
+    defer path.deinit();
+    var have_root = false;
 
-    for (content) |c| {
-        const current_pos = Position{ .line = line, .column = column };
+    while (true) {
+        // Captured before consuming the token, this sits at the token's start
+        // (Diagnostics otherwise reports the end of the just-consumed token).
+        const before = Position{ .line = diag.getLine(), .column = diag.getColumn() };
+        const tok = try scanner.nextAlloc(allocator, .alloc_if_needed);
+        if (tok == .end_of_document) break;
 
-        if (c == '\n') {
-            line += 1;
-            column = 1;
-            // Newline in a string is invalid in JSON
-            if (in_string) {
-                return current_pos;
+        if (frames.items.len == 0) {
+            // Document root value.
+            if (!have_root) {
+                have_root = true;
+                try map.put("", before);
+                switch (tok) {
+                    .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = 0 }),
+                    .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = 0 }),
+                    else => {},
+                }
+            }
+            continue;
+        }
+
+        const ti = frames.items.len - 1;
+        if (frames.items[ti].is_object) {
+            if (frames.items[ti].expecting_key) {
+                switch (tok) {
+                    .object_end => {
+                        _ = frames.pop();
+                    },
+                    .string, .allocated_string => |key| {
+                        path.shrinkRetainingCapacity(frames.items[ti].base_len);
+                        if (frames.items[ti].base_len > 0) try path.append('.');
+                        try path.appendSlice(key);
+                        frames.items[ti].expecting_key = false;
+                    },
+                    else => {},
+                }
+            } else {
+                // Value for the current key; `path` already holds its full path.
+                try map.put(try allocator.dupe(u8, path.items), before);
+                frames.items[ti].expecting_key = true;
+                switch (tok) {
+                    .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
+                    .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
+                    else => {},
+                }
             }
         } else {
-            column += 1;
-        }
-
-        if (escape_next) {
-            escape_next = false;
-        } else if (c == '\\') {
-            escape_next = true;
-        } else if (c == '"') {
-            in_string = !in_string;
-        } else if (!in_string) {
-            // Check for balanced brackets
-            if (c == '{' or c == '[') {
-                try stack.append(.{ .char = c, .pos = current_pos });
-            } else if (c == '}') {
-                if (stack.items.len == 0 or stack.items[stack.items.len - 1].char != '{') {
-                    return current_pos;
-                }
-                _ = stack.pop();
-            } else if (c == ']') {
-                if (stack.items.len == 0 or stack.items[stack.items.len - 1].char != '[') {
-                    return current_pos;
-                }
-                _ = stack.pop();
-            }
-
-            // Check for invalid characters outside of strings
-            if (!(std.ascii.isWhitespace(c) or
-                c == '{' or c == '}' or c == '[' or c == ']' or
-                c == ':' or c == ',' or c == '"' or
-                std.ascii.isDigit(c) or c == '-' or c == '.' or c == '+' or
-                c == 't' or c == 'r' or c == 'u' or c == 'e' or
-                c == 'f' or c == 'a' or c == 'l' or c == 's' or
-                c == 'n'))
-            {
-                return current_pos;
+            switch (tok) {
+                .array_end => {
+                    _ = frames.pop();
+                },
+                else => {
+                    path.shrinkRetainingCapacity(frames.items[ti].base_len);
+                    try path.print("[{d}]", .{frames.items[ti].index});
+                    try map.put(try allocator.dupe(u8, path.items), before);
+                    frames.items[ti].index += 1;
+                    switch (tok) {
+                        .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
+                        .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
+                        else => {},
+                    }
+                },
             }
         }
     }
 
-    // Check for unclosed string
-    if (in_string) {
-        return Position{ .line = line, .column = column };
-    }
-
-    // Check for unbalanced brackets
-    if (stack.items.len > 0) {
-        return stack.items[stack.items.len - 1].pos;
-    }
-
-    // If no specific issue found, return the end position
-    return Position{ .line = line, .column = column };
+    return map;
 }
 
-/// Find the position of a JSON value in the text
-fn findValuePosition(content: []const u8, value: json.Value) !Position {
-    // This is a simplistic implementation that just scans for the value
-    // A more sophisticated implementation would track positions during parsing
+/// Backfills accurate line/column/context for each semantic error from the
+/// position map, keyed by each error's `field_path`. Errors whose path is not
+/// found keep their default (0, 0) position.
+fn fillPositions(allocator: Allocator, content: []const u8, errors: []ValidationError) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    const value_str = switch (value) {
-        .string => |s| s,
-        .integer => |i| std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{i}) catch "0",
-        .float => |f| std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{f}) catch "0",
-        .bool => |b| if (b) "true" else "false",
-        .null => "null",
-        .array => "[",
-        .object => "{",
-        else => "value",
-    };
+    var map = buildPositionMap(arena.allocator(), content) catch return;
 
-    var line: usize = 1;
-    var column: usize = 1;
-
-    var i: usize = 0;
-    while (i < content.len) : (i += 1) {
-        if (content[i] == '\n') {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-
-        // Try to match the value at this position
-        if (i + value_str.len <= content.len and std.mem.eql(u8, content[i .. i + value_str.len], value_str)) {
-            return Position{ .line = line, .column = column };
+    for (errors) |*e| {
+        const key = e.field_path orelse "";
+        if (map.get(key)) |pos| {
+            e.line = pos.line;
+            e.column = pos.column;
+            if (e.context) |old| allocator.free(old);
+            e.context = getContextAroundPosition(allocator, content, pos.line) catch null;
         }
     }
-
-    // If we can't find the value, return position 1,1
-    return Position{ .line = 1, .column = 1 };
-}
-
-/// Find the position of a JSON object in the text
-fn findObjectPosition(content: []const u8, object: json.ObjectMap) !Position {
-    // For simplicity, just find the opening brace
-    return findValuePosition(content, json.Value{ .object = object });
 }
 
 /// Get context (the line) around a specific position
@@ -785,7 +620,7 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
 }
 
 /// Prints validation errors to stderr
-pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(ValidationError)) void {
+pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Managed(ValidationError)) void {
     for (errors.items, 0..) |err, i| {
         if (i > 0) {
             output.printError(allocator, "", .{}) catch {};
@@ -808,7 +643,7 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(Validat
 
             // Print a marker pointing to the column
             if (err.column > 0) {
-                var marker = std.ArrayList(u8).init(std.heap.page_allocator);
+                var marker = std.array_list.Managed(u8).init(std.heap.page_allocator);
                 defer marker.deinit();
 
                 // Create spaces up to the column

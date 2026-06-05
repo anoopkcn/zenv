@@ -45,7 +45,7 @@ fn getVersion(b: *std.Build) Version {
         "--dirty=-dirty", // Append -dirty if working tree is modified
         "--always", // Fallback to commit hash if no tag found
     }, &exit_code, // Pass address for exit code
-        .Ignore // Ignore stderr
+        .ignore // Ignore stderr
     ) catch |err| {
         std.log.warn("git describe failed, cannot determine version: {s}", .{@errorName(err)});
         return .unknown;
@@ -139,9 +139,11 @@ pub fn build(b: *std.Build) !void {
     // Create the executable
     const exe = b.addExecutable(.{
         .name = "zenv",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = effective_optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = effective_optimize,
+        }),
     });
 
     // Add the options module as an import named "options"
@@ -247,9 +249,11 @@ fn setupTargetReleaseWithOptimize(
     // --- Build Executable for the Target ---
     const exe_release = b.addExecutable(.{
         .name = exe_name,
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe_release.root_module.addImport("options", options_import);
 

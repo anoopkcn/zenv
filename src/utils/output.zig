@@ -1,9 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const fs = std.fs;
+const File = std.Io.File;
+const runtime = @import("runtime.zig");
 
 // Global state for logging
-var log_file: ?fs.File = null;
+var log_file: ?File = null;
 var log_enabled: bool = false;
 
 /// Starts logging to the specified file path
@@ -14,13 +15,13 @@ pub fn startLogging(allocator: Allocator, path: []const u8) !void {
     }
 
     const dir_path = std.fs.path.dirname(path) orelse ".";
-    std.fs.cwd().makePath(dir_path) catch |err| {
+    runtime.makePath(dir_path) catch |err| {
         if (err != error.PathAlreadyExists) {
             return err;
         }
     };
 
-    log_file = try fs.cwd().createFile(path, .{ .truncate = false, .read = true });
+    log_file = try runtime.createFile(path, .{ .truncate = false, .read = true });
     log_enabled = true;
 
     try print(allocator, "Logging started: output will be saved to {s}", .{path});
@@ -29,7 +30,7 @@ pub fn startLogging(allocator: Allocator, path: []const u8) !void {
 /// Stops logging and closes the log file if open
 pub fn stopLogging() void {
     if (log_file) |*file| {
-        file.close();
+        file.close(runtime.io);
         log_file = null;
         log_enabled = false;
     }
@@ -43,8 +44,33 @@ pub fn isLoggingEnabled() bool {
 /// Writes a message to the log file if logging is enabled
 fn logMessage(message: []const u8) !void {
     if (log_enabled and log_file != null) {
-        try log_file.?.writeAll(message);
+        try log_file.?.writeStreamingAll(runtime.io, message);
     }
+}
+
+/// Writes `message` to the given standard stream and flushes it.
+fn writeStd(file: File, message: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    var fw = file.writerStreaming(runtime.io, &buf);
+    const w = &fw.interface;
+    try w.writeAll(message);
+    try w.flush();
+}
+
+/// Writes formatted text to stdout verbatim (no "Info:" prefix, no newline,
+/// no logging). For data output meant to be captured by a shell, e.g.
+/// `source $(zenv activate ...)`.
+pub fn rawOut(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const msg = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(msg);
+    try writeStd(File.stdout(), msg);
+}
+
+/// Like `rawOut` but writes to stderr.
+pub fn rawErr(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const msg = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(msg);
+    try writeStd(File.stderr(), msg);
 }
 
 pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
@@ -58,8 +84,7 @@ pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !voi
     };
     defer if (message.ptr != &buf) allocator.free(message);
 
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(message);
+    try writeStd(File.stdout(), message);
     try logMessage(message);
 }
 
@@ -75,8 +100,7 @@ pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype)
     };
     defer if (message.ptr != &buf) allocator.free(message);
 
-    const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(message);
+    try writeStd(File.stderr(), message);
     try logMessage(message);
 }
 
@@ -92,7 +116,6 @@ pub fn printNoNewline(allocator: Allocator, comptime fmt: []const u8, args: anyt
     };
     defer if (message.ptr != &buf) allocator.free(message);
 
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(message);
+    try writeStd(File.stdout(), message);
     try logMessage(message);
 }

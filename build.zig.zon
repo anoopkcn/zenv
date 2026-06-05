@@ -2,7 +2,7 @@
     .name = .zenv,
     .version = "0.20.2",
     .fingerprint = 0x29c2040f7262b616,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

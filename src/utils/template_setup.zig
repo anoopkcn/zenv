@@ -3,9 +3,9 @@ const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
-const fs = std.fs;
 const output = @import("output.zig");
 const template = @import("template.zig");
+const runtime = @import("runtime.zig");
 
 // Embed the template file at compile time
 const SETUP_ENV_TEMPLATE = @embedFile("templates/setup.template");
@@ -44,7 +44,7 @@ pub fn createSetupScriptFromTemplate(
 }
 
 fn fileExists(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch {
+    runtime.access(path) catch {
         return false;
     };
     return true;
@@ -107,46 +107,23 @@ fn copyHookScript(
     }
     errdefer allocator.free(dest_path);
 
-    // Copy the script file - add extra debug info
-    output.print(allocator, "Attempting to open source file: {s}", .{source_path}) catch {};
-    var source_file = fs.cwd().openFile(source_path, .{}) catch |err| {
-        output.printError(allocator, "Failed to open source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+    // Copy the script file (read whole source, write to an executable dest)
+    output.print(allocator, "Copying hook script {s} -> {s}", .{ source_path, dest_path }) catch {};
+    const content = runtime.readFileAlloc(allocator, source_path, 10 * 1024 * 1024) catch |err| {
+        output.printError(allocator, "Failed to read source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
         return error.FileNotFound;
     };
-    defer source_file.close();
+    defer allocator.free(content);
 
-    output.print(allocator, "Attempting to create destination file: {s}", .{dest_path}) catch {};
-    var dest_file = if (is_absolute_base_dir)
-        std.fs.createFileAbsolute(dest_path, .{}) catch |err| {
-            output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-            return error.FileNotFound;
-        }
-    else
-        fs.cwd().createFile(dest_path, .{}) catch |err| {
-            output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-            return error.FileNotFound;
-        };
-    defer dest_file.close();
+    var dest_file = runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) }) catch |err| {
+        output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
+    };
+    defer dest_file.close(runtime.io);
 
-    // Copy the content
-    var buffer: [8192]u8 = undefined;
-    var bytes_read: usize = 0;
-    while (true) {
-        bytes_read = source_file.read(&buffer) catch |err| {
-            output.printError(allocator, "Error reading from source file '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
-            return error.FileNotFound;
-        };
-        if (bytes_read == 0) break;
-        dest_file.writeAll(buffer[0..bytes_read]) catch |err| {
-            output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-            return error.FileNotFound;
-        };
-    }
-
-    // Make the destination file executable
-    dest_file.chmod(0o755) catch |err| {
-        output.printError(allocator, "Failed to set permissions on '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-        // Continue anyway, this is not critical
+    dest_file.writeStreamingAll(runtime.io, content) catch |err| {
+        output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
     };
 
     output.print(allocator, "Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
@@ -154,7 +131,7 @@ fn copyHookScript(
 }
 
 fn accessFile(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch {
+    runtime.access(path) catch {
         return false;
     };
     return true;
@@ -178,8 +155,8 @@ fn createSetupScript(
     try output.print(allocator, "Creating setup script for '{s}'...", .{env_name});
 
     // Get absolute path of current working directory (where zenv.json is)
-    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
+    const cwd_path = try runtime.cwdRealpath(allocator);
+    defer allocator.free(cwd_path);
     output.print(allocator, "Current working directory: {s}", .{cwd_path}) catch {};
 
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
@@ -217,24 +194,15 @@ fn createSetupScript(
 
     // Create the scripts directory
     output.print(allocator, "Creating scripts directory: {s}", .{scripts_rel_path}) catch {};
-    if (is_absolute_base_dir) {
-        std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                output.printError(allocator, "Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
-                // Continue anyway, as this is not a critical error
-            }
-        };
-    } else {
-        fs.cwd().makePath(scripts_rel_path) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                output.printError(allocator, "Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
-                // Continue anyway, as this is not a critical error
-            }
-        };
-    }
+    runtime.makePath(scripts_rel_path) catch |err| {
+        if (err != error.PathAlreadyExists) {
+            output.printError(allocator, "Failed to create scripts directory '{s}': {s}", .{ scripts_rel_path, @errorName(err) }) catch {};
+            // Continue anyway, as this is not a critical error
+        }
+    };
 
     // Handle setup hook script copying if present
-    var setup_hook_block = std.ArrayList(u8).init(allocator);
+    var setup_hook_block = std.array_list.Managed(u8).init(allocator);
     defer setup_hook_block.deinit();
     var setup_hook_path: ?[]const u8 = null;
     defer if (setup_hook_path) |path| allocator.free(path);
@@ -247,7 +215,7 @@ fn createSetupScript(
         const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
             output.printError(allocator, "Failed to copy setup script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
             // Continue anyway, but add a warning in the script
-            try setup_hook_block.writer().print(
+            try setup_hook_block.print(
                 \\
                 \\# Warning: Failed to copy setup script from '{s}'
                 \\echo "Warning: Failed to copy setup script from '{s}'"
@@ -260,7 +228,7 @@ fn createSetupScript(
         defer allocator.free(dest_path);
         setup_hook_path = try allocator.dupe(u8, dest_path);
 
-        try setup_hook_block.writer().print(
+        try setup_hook_block.print(
             \\
             \\# Execute custom setup script if it exists
             \\if [ -f "{s}" ]; then
@@ -369,13 +337,13 @@ fn createSetupScript(
     try replacements.put("PIP_INSTALL_COMMAND", pip_install_cmd);
 
     // Generate the module loading block
-    var module_loading_block = std.ArrayList(u8).init(allocator);
+    var module_loading_block = std.array_list.Managed(u8).init(allocator);
     defer module_loading_block.deinit();
-    const module_writer = module_loading_block.writer();
+    const module_writer = &module_loading_block;
 
     if (env_config.modules.items.len > 0) {
         // Build the module list string for display
-        var module_list_str = std.ArrayList(u8).init(allocator);
+        var module_list_str = std.array_list.Managed(u8).init(allocator);
         defer module_list_str.deinit();
         for (env_config.modules.items, 0..) |module_name, idx| {
             if (idx > 0) try module_list_str.appendSlice(", ");
@@ -416,9 +384,9 @@ fn createSetupScript(
     try replacements.put("MODULE_LOADING_BLOCK", module_loading_slice);
 
     // Generate custom setup commands block
-    var custom_setup_commands_block = std.ArrayList(u8).init(allocator);
+    var custom_setup_commands_block = std.array_list.Managed(u8).init(allocator);
     defer custom_setup_commands_block.deinit();
-    const custom_writer = custom_setup_commands_block.writer();
+    const custom_writer = &custom_setup_commands_block;
 
     if (env_config.setup != null and env_config.setup.?.commands != null and env_config.setup.?.commands.?.items.len > 0) {
         try custom_writer.print("echo 'Info: Step 5: Running custom setup commands'\n", .{});

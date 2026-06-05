@@ -10,7 +10,7 @@ const output = @import("output.zig");
 fn parseDependenciesLine(
     allocator: Allocator,
     line: []const u8,
-    deps_list: *std.ArrayList([]const u8),
+    deps_list: *std.array_list.Managed([]const u8),
     count: *usize,
 ) !void {
     // Handle quoted strings in arrays: "package1", "package2"
@@ -74,7 +74,7 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
 pub fn parsePyprojectToml(
     allocator: Allocator,
     content: []const u8,
-    deps_list: *std.ArrayList([]const u8),
+    deps_list: *std.array_list.Managed([]const u8),
 ) !usize {
     output.print(allocator, "Parsing pyproject.toml for dependencies...", .{}) catch {};
 
@@ -97,7 +97,7 @@ pub fn parsePyprojectToml(
     var found_content = false;
 
     // Store table fields for later processing
-    var table_entries = std.ArrayList([]const u8).init(allocator);
+    var table_entries = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (table_entries.items) |entry| {
             allocator.free(entry);
@@ -289,9 +289,9 @@ fn isStandaloneDepTable(line: []const u8) bool {
 fn processPackageLine(
     allocator: Allocator,
     line: []const u8,
-    deps_list: *std.ArrayList([]const u8),
+    deps_list: *std.array_list.Managed([]const u8),
     count: *usize,
-    table_entries: *std.ArrayList([]const u8),
+    table_entries: *std.array_list.Managed([]const u8),
 ) !void {
     var parts = std.mem.splitScalar(u8, line, '=');
     if (parts.next()) |package_name_raw| {
@@ -320,7 +320,7 @@ fn processPackageLine(
 fn processTableEntries(
     allocator: Allocator,
     entries: []const []const u8,
-    deps_list: *std.ArrayList([]const u8),
+    deps_list: *std.array_list.Managed([]const u8),
     count: *usize,
 ) !void {
     for (entries) |entry| {
@@ -343,13 +343,13 @@ fn processTableEntries(
 pub fn parseRequirementsTxt(
     allocator: Allocator,
     content: []const u8,
-    deps_list: *std.ArrayList([]const u8),
+    deps_list: *std.array_list.Managed([]const u8),
 ) !usize {
     output.print(allocator, "Parsing requirements.txt for dependencies...", .{}) catch {};
     var count: usize = 0;
 
     // Create a reusable buffer to minimize allocations
-    var line_buffer = std.ArrayList(u8).init(allocator);
+    var line_buffer = std.array_list.Managed(u8).init(allocator);
     defer line_buffer.deinit();
 
     // Split lines more efficiently with iterator directly
@@ -383,9 +383,9 @@ pub fn validateDependencies(
     allocator: Allocator,
     raw_deps: []const []const u8,
     env_name: []const u8,
-) !std.ArrayList([]const u8) {
+) !std.array_list.Managed([]const u8) {
     output.print(allocator, "Validating dependencies for '{s}':", .{env_name}) catch {};
-    var valid_deps = std.ArrayList([]const u8).init(allocator);
+    var valid_deps = std.array_list.Managed([]const u8).init(allocator);
     // Improved error handling with explicit cleanup of any added items
     errdefer {
         // Only free items we owned and added to valid_deps
@@ -397,7 +397,7 @@ pub fn validateDependencies(
     defer seen_packages.deinit();
 
     // Reuse a buffer for lowercase string conversion to reduce allocations
-    var lowercase_buf = std.ArrayList(u8).init(allocator);
+    var lowercase_buf = std.array_list.Managed(u8).init(allocator);
     defer lowercase_buf.deinit();
 
     for (raw_deps) |dep| {

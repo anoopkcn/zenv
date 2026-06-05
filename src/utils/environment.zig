@@ -4,8 +4,8 @@ const config_module = @import("config.zig");
 const errors = @import("errors.zig");
 const flags_module = @import("flags.zig");
 const process = std.process;
-const fs = std.fs;
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
@@ -248,43 +248,26 @@ pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostn
 // Helper function to get hostname using the `hostname` command (internal)
 pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Executing 'hostname' command", .{});
-    const argv = [_][]const u8{"hostname"};
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe; // Capture stderr as well
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 128) // Limit size for hostname
-        catch |err| {
-            output.printError(allocator, "Failed to read stdout from `hostname` command: {s}", .{@errorName(err)}) catch {};
-            _ = child.wait() catch {}; // Ensure child process is waited on
-            return error.ProcessError;
-        };
-    errdefer allocator.free(stdout);
-
-    const stderr = child.stderr.?.readToEndAlloc(allocator, 512) // Limit stderr size
-        catch |err| {
-            output.printError(allocator, "Failed to read stderr from `hostname` command: {s}", .{@errorName(err)}) catch {};
-            _ = child.wait() catch {};
-            return error.ProcessError;
-        };
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
+    const result = std.process.run(allocator, runtime.io, .{
+        .argv = &[_][]const u8{"hostname"},
+        .stdout_limit = .limited(128),
+        .stderr_limit = .limited(512),
+    }) catch |err| {
+        output.printError(allocator, "Failed to run `hostname` command: {s}", .{@errorName(err)}) catch {};
+        return error.ProcessError;
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
     // Check if the command was successful
-    const success = blk: {
-        if (term != .Exited) break :blk false;
-        if (term.Exited != 0) break :blk false;
-        break :blk true;
-    };
+    const success = result.term == .exited and result.term.exited == 0;
 
     if (!success) {
-        output.printError(allocator, "`hostname` command failed. Term: {?} Stderr: {s}", .{ term, stderr }) catch {};
+        output.printError(allocator, "`hostname` command failed. Term: {s} Stderr: {s}", .{ @tagName(result.term), result.stderr }) catch {};
         return error.ProcessError;
     }
 
-    const trimmed_hostname = std.mem.trim(u8, stdout, &std.ascii.whitespace);
+    const trimmed_hostname = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
     if (trimmed_hostname.len == 0) {
         output.printError(allocator, "`hostname` command returned empty output.", .{}) catch {};
         return error.MissingHostname;
@@ -298,44 +281,23 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Attempting to get hostname from environment variable...", .{});
 
-    // Try HOSTNAME first
-    const hostname_env = std.process.getEnvVarOwned(allocator, "HOSTNAME") catch |err| {
-        if (err == error.EnvironmentVariableNotFound) {
-            // Try HOST if HOSTNAME is not found
-            errors.debugLog(allocator, "HOSTNAME not set, trying HOST...", .{});
-            const host_env = std.process.getEnvVarOwned(allocator, "HOST") catch |err2| {
-                if (err2 == error.EnvironmentVariableNotFound) {
-                    // Fallback to command if neither env var is set
-                    errors.debugLog(allocator, "HOST not set, falling back to 'hostname' command...", .{});
-                    return getHostnameFromCommand(allocator);
-                } else {
-                    // Use our new error helper for consistent logging
-                    return errors.logAndReturn(allocator, err2, "Failed to get HOST environment variable: {s}", .{@errorName(err2)});
-                }
-            };
-            // Check if HOST was empty
-            if (host_env.len == 0) {
-                allocator.free(host_env);
-                errors.debugLog(allocator, "HOST was empty, falling back to 'hostname' command...", .{});
-                return getHostnameFromCommand(allocator);
-            }
-            errors.debugLog(allocator, "Got hostname from HOST: '{s}'", .{host_env});
-            return host_env; // Return hostname from HOST
-        } else {
-            // Use our new error helper for consistent logging
-            return errors.logAndReturn(allocator, err, "Failed to get HOSTNAME environment variable: {s}", .{@errorName(err)});
+    // Try HOSTNAME, then HOST (if non-empty), then fall back to the command.
+    if (runtime.env("HOSTNAME")) |hostname_env| {
+        if (hostname_env.len > 0) {
+            errors.debugLog(allocator, "Got hostname from HOSTNAME: '{s}'", .{hostname_env});
+            return allocator.dupe(u8, hostname_env);
         }
-    };
-
-    // Check if HOSTNAME was empty
-    if (hostname_env.len == 0) {
-        allocator.free(hostname_env);
-        errors.debugLog(allocator, "HOSTNAME was empty, falling back to 'hostname' command...", .{});
-        return getHostnameFromCommand(allocator);
     }
 
-    errors.debugLog(allocator, "Got hostname from HOSTNAME: '{s}'", .{hostname_env});
-    return hostname_env;
+    if (runtime.env("HOST")) |host_env| {
+        if (host_env.len > 0) {
+            errors.debugLog(allocator, "Got hostname from HOST: '{s}'", .{host_env});
+            return allocator.dupe(u8, host_env);
+        }
+    }
+
+    errors.debugLog(allocator, "Hostname env vars not set, falling back to 'hostname' command...", .{});
+    return getHostnameFromCommand(allocator);
 }
 
 // Simple check for hostname matching target machine (used by list command)
@@ -442,7 +404,7 @@ pub fn getAndValidateEnvironment(
         output.print(allocator, "Modules file specified: {s}", .{modules_file_path}) catch {};
 
         // Check if the file exists
-        std.fs.cwd().access(modules_file_path, .{}) catch |err| {
+        runtime.access(modules_file_path) catch |err| {
             if (err == error.FileNotFound) {
                 output.printError(allocator, "Modules file '{s}' not found.", .{modules_file_path}) catch {};
                 handleErrorFn(err);
@@ -520,7 +482,7 @@ pub fn getAndValidateEnvironment(
         var formatted_targets: []const u8 = undefined;
         var formatted_targets_allocated = false;
         format_block: {
-            var targets_buffer = std.ArrayList(u8).init(allocator);
+            var targets_buffer = std.array_list.Managed(u8).init(allocator);
             defer targets_buffer.deinit();
 
             // Attempt to format the string
@@ -537,7 +499,7 @@ pub fn getAndValidateEnvironment(
                         break :format_block;
                     };
                 }
-                targets_buffer.writer().print("\"{s}\"", .{target}) catch |err| {
+                targets_buffer.print("\"{s}\"", .{target}) catch |err| {
                     output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                     handleErrorFn(err);
                     break :format_block;
@@ -596,7 +558,7 @@ fn lookupCurrentDirectoryEnvironment(
     const config_path = "zenv.json";
 
     // Check if zenv.json exists in current directory
-    std.fs.cwd().access(config_path, .{}) catch |err| {
+    runtime.access(config_path) catch |err| {
         if (err == error.FileNotFound) {
             output.printError(allocator, "No zenv.json found in current directory. Cannot use '.' as environment identifier.", .{}) catch {};
             handleErrorFn(error.ConfigFileNotFound);
@@ -609,15 +571,15 @@ fn lookupCurrentDirectoryEnvironment(
     };
 
     // Get current directory path
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Failed to get current directory path: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return null;
     };
+    defer allocator.free(cwd_path);
 
     // Look for environments in the registry that match the current directory
-    var matching_entries = std.ArrayList(RegistryEntry).init(allocator);
+    var matching_entries = std.array_list.Managed(RegistryEntry).init(allocator);
     defer matching_entries.deinit();
 
     for (registry.entries.items) |reg_entry| {
@@ -682,7 +644,7 @@ pub fn lookupRegistryEntry(
     const entry_copy = registry.lookup(resolved_identifier) orelse {
         // Special handling for ambiguous ID prefixes
         if (is_potential_id_prefix) {
-            var matching_envs = std.ArrayList([]const u8).init(registry.allocator);
+            var matching_envs = std.array_list.Managed([]const u8).init(registry.allocator);
             defer matching_envs.deinit();
             var match_count: usize = 0;
 
@@ -709,12 +671,12 @@ pub fn lookupRegistryEntry(
             }
 
             if (match_count > 1) {
-                std.io.getStdErr().writer().print("Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{resolved_identifier}) catch {};
+                output.rawErr(allocator, "Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{resolved_identifier}) catch {};
                 // Print the collected names
                 for (matching_envs.items) |env_name| {
-                    std.io.getStdErr().writer().print("  - {s}\n", .{env_name}) catch {};
+                    output.rawErr(allocator, "  - {s}\n", .{env_name}) catch {};
                 }
-                std.io.getStdErr().writer().print("Please use more characters to make the ID unique.\n", .{}) catch {};
+                output.rawErr(allocator, "Please use more characters to make the ID unique.\n", .{}) catch {};
                 handleErrorFn(error.AmbiguousIdentifier);
                 return null;
             }
@@ -727,8 +689,8 @@ pub fn lookupRegistryEntry(
             identifier // Show original alias name in error
         else
             resolved_identifier;
-        std.io.getStdErr().writer().print("Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
-        std.io.getStdErr().writer().print("Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
+        output.rawErr(allocator, "Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
+        output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
         handleErrorFn(error.EnvironmentNotRegistered);
         return null;
     };
@@ -798,7 +760,7 @@ pub fn lookupRegistryEntry(
 //     }
 
 //     // Create list to track missing modules
-//     var missing_modules = std.ArrayList([]const u8).init(allocator);
+//     var missing_modules = std.array_list.Managed([]const u8).init(allocator);
 //     defer missing_modules.deinit();
 
 //     // Track if we loaded the first module ourselves during this check
@@ -904,8 +866,8 @@ pub fn lookupRegistryEntry(
 pub fn readModulesFromFile(
     allocator: Allocator,
     file_path: []const u8,
-) !std.ArrayList([]const u8) {
-    var modules_list = std.ArrayList([]const u8).init(allocator);
+) !std.array_list.Managed([]const u8) {
+    var modules_list = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (modules_list.items) |item| {
             allocator.free(item);
@@ -914,7 +876,7 @@ pub fn readModulesFromFile(
     }
 
     // Open and read the file
-    const file_content = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const file_content = try runtime.readFileAlloc(allocator, file_path, 1024 * 1024);
     defer allocator.free(file_content);
 
     output.print(allocator, "Reading modules from file: {s}", .{file_path}) catch {};
@@ -922,11 +884,11 @@ pub fn readModulesFromFile(
     // Debug the file content with hex representation for all bytes
     if (file_content.len > 0) {
         const debug_len = @min(file_content.len, 100);
-        var hex_buf = std.ArrayList(u8).init(allocator);
+        var hex_buf = std.array_list.Managed(u8).init(allocator);
         defer hex_buf.deinit();
 
         for (file_content[0..debug_len]) |byte| {
-            hex_buf.writer().print("{X:0>2} ", .{byte}) catch {};
+            hex_buf.print("{X:0>2} ", .{byte}) catch {};
         }
         output.print(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items}) catch {};
     }

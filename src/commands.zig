@@ -10,6 +10,7 @@ const jupyter = @import("utils/jupyter.zig");
 const configurations = @import("utils/config.zig");
 const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
+const runtime = @import("utils/runtime.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
@@ -18,12 +19,11 @@ pub fn handleInitCommand(
     allocator: Allocator,
     args: []const []const u8,
 ) void {
-    const cwd = std.fs.cwd();
     const config_path = "zenv.json";
 
     // Check if file exists
     const file_exists = blk: {
-        cwd.access(config_path, .{}) catch |err| {
+        runtime.access(config_path) catch |err| {
             if (err != error.FileNotFound) {
                 output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
                 std.process.exit(1);
@@ -59,7 +59,7 @@ pub fn handleInitCommand(
     const dev_dep_file_value: []const u8 = blk: {
         var requirements_txt_found: bool = false;
         // Check for requirements.txt
-        if (cwd.access("requirements.txt", .{})) |_| {
+        if (runtime.access("requirements.txt")) |_| {
             requirements_txt_found = true;
         } else |err| {
             if (err == error.FileNotFound) {
@@ -77,7 +77,7 @@ pub fn handleInitCommand(
 
         // Check for pyproject.toml
         var pyproject_toml_found: bool = false;
-        if (cwd.access("pyproject.toml", .{})) |_| {
+        if (runtime.access("pyproject.toml")) |_| {
             pyproject_toml_found = true;
         } else |err| {
             if (err == error.FileNotFound) {
@@ -128,13 +128,13 @@ pub fn handleInitCommand(
     defer allocator.free(processed_content);
 
     // Write template to file
-    const file = cwd.createFile(config_path, .{}) catch |err| {
+    var file = runtime.createFile(config_path, .{}) catch |err| {
         output.printError(allocator, "Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
-    defer file.close();
+    defer file.close(runtime.io);
 
-    file.writeAll(processed_content) catch |err| {
+    file.writeStreamingAll(runtime.io, processed_content) catch |err| {
         output.printError(allocator, "Writing to {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
@@ -184,7 +184,7 @@ pub fn handleSetupCommand(
     const base_dir_path = if (std.fs.path.isAbsolute(config.base_dir))
         config.base_dir
     else
-        try std.fs.path.join(allocator, &[_][]const u8{ try std.fs.cwd().realpathAlloc(allocator, "."), config.base_dir });
+        try std.fs.path.join(allocator, &[_][]const u8{ try runtime.cwdRealpath(allocator), config.base_dir });
     defer if (!std.fs.path.isAbsolute(config.base_dir)) allocator.free(base_dir_path);
 
     const env_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir_path, env_name });
@@ -197,17 +197,17 @@ pub fn handleSetupCommand(
     defer output.stopLogging();
 
     // Log the command that was used to start the setup
-    var command_str = std.ArrayList(u8).init(allocator);
+    var command_str = std.array_list.Managed(u8).init(allocator);
     // Note: don't free command_str until after installation is complete
     for (args, 0..) |arg, i| {
         if (i > 0) {
-            command_str.writer().print(" ", .{}) catch {};
+            command_str.print(" ", .{}) catch {};
         }
         if (std.mem.indexOf(u8, arg, " ") != null) {
             // Quote arguments with spaces
-            command_str.writer().print("\"{s}\"", .{arg}) catch {};
+            command_str.print("\"{s}\"", .{arg}) catch {};
         } else {
-            command_str.writer().print("{s}", .{arg}) catch {};
+            command_str.print("{s}", .{arg}) catch {};
         }
     }
     output.print(allocator, "Command: {s}", .{command_str.items}) catch {};
@@ -234,7 +234,7 @@ pub fn handleSetupCommand(
     }
 
     // 1. Combine Dependencies
-    var all_required_deps = std.ArrayList([]const u8).init(allocator);
+    var all_required_deps = std.array_list.Managed([]const u8).init(allocator);
     // Track ownership of item strings properly
     var deps_need_cleanup = true;
     // Defer cleanup if needed
@@ -269,7 +269,7 @@ pub fn handleSetupCommand(
     // Add dependencies from requirements file if specified
     if (env_config.dependency_file) |req_file| {
         // Check if the specified requirements file actually exists
-        std.fs.cwd().access(req_file, .{}) catch |err| {
+        runtime.access(req_file) catch |err| {
             if (err == error.FileNotFound) {
                 output.printError(allocator, "Requirements file specified in configuration ('{s}') not found.", .{req_file}) catch {};
                 handleErrorFn(err); // Use the original file not found error
@@ -282,17 +282,10 @@ pub fn handleSetupCommand(
             }
         };
 
-        // Log the absolute path for debugging
-        var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = std.fs.cwd().realpath(req_file, &abs_path_buf) catch |err| {
-            output.printError(allocator, "Failed to resolve absolute path for requirements file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
-            // handleErrorFn(err); // Or map to ZenvError
-            return err; // Propagate error
-        };
-        output.print(allocator, "Reading dependencies from file: '{s}' (absolute path: '{s}')", .{ req_file, abs_path }) catch {};
+        output.print(allocator, "Reading dependencies from file: '{s}'", .{req_file}) catch {};
 
         // Read the file content - use temp_allocator since we're done with it after parsing
-        const req_content = std.fs.cwd().readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
+        const req_content = runtime.readFileAlloc(temp_allocator, req_file, 1 * 1024 * 1024) catch |err| {
             output.printError(allocator, "Failed to read file '{s}': {s}", .{ req_file, @errorName(err) }) catch {};
             handleErrorFn(error.PathResolutionFailed); // Use specific error
             return error.PathResolutionFailed; // Exit setup command
@@ -361,12 +354,12 @@ pub fn handleSetupCommand(
     try aux.createActivationScript(allocator, env_config, env_name, base_dir);
 
     // 5. Register the environment in the global registry
-    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
+    const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
+    defer allocator.free(cwd_path);
 
     try registry.register(
         env_name,
@@ -407,7 +400,7 @@ pub fn handleActivateCommand(
     const entry = env.lookupRegistryEntry(allocator, registry, identifier, handleErrorFn) orelse return;
     const venv_path = entry.venv_path;
 
-    std.io.getStdOut().writer().print("{s}/activate.sh\n", .{venv_path}) catch |e| {
+    output.rawOut(allocator, "{s}/activate.sh\n", .{venv_path}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -418,7 +411,10 @@ pub fn handleListCommand(
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) void {
-    const stdout = std.io.getStdOut().writer(); // special case for using standard writter
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writerStreaming(runtime.io, &stdout_buf);
+    const stdout = &stdout_fw.interface; // special case for using standard writer
+    defer stdout.flush() catch {};
     const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
 
     var current_hostname: ?[]const u8 = null;
@@ -597,12 +593,12 @@ pub fn handleRegisterCommand(
     }
 
     // Get absolute path of current working directory
-    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = std.fs.cwd().realpath(".", &abs_path_buf) catch |err| {
+    const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
         output.printError(allocator, "Could not get current working directory: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
+    defer allocator.free(cwd_path);
 
     // Get the base_dir from the loaded config
     const base_dir = config.base_dir;
@@ -703,7 +699,7 @@ pub fn handleCdCommand(
     const project_dir = entry.project_dir;
 
     // Output just the project directory path
-    std.io.getStdOut().writer().print("{s}\n", .{project_dir}) catch |e| {
+    output.rawOut(allocator, "{s}\n", .{project_dir}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -812,7 +808,7 @@ pub fn handleRmCommand(
     }
 
     output.print(allocator, "Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
-    std.fs.deleteTreeAbsolute(venv_path_to_remove) catch |err| {
+    runtime.deleteTree(venv_path_to_remove) catch |err| {
         output.printError(allocator, "Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
         output.printError(allocator, "You may need to remove it manually.", .{}) catch {};
         handleErrorFn(err);
@@ -857,26 +853,25 @@ pub fn handleRunCommand(
         return;
     };
     defer {
-        std.fs.cwd().deleteFile(temp_script_path) catch |err| {
+        runtime.deleteFile(temp_script_path) catch |err| {
             output.print(allocator, "Warning: Failed to delete temporary script: {s}", .{@errorName(err)}) catch {};
         };
         allocator.free(temp_script_path);
     }
 
     // Execute the script
-    var script_argv = [_][]const u8{ "/bin/bash", temp_script_path };
-    var child = std.process.Child.init(&script_argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-
-    child.spawn() catch |err| {
+    var child = std.process.spawn(runtime.io, .{
+        .argv = &[_][]const u8{ "/bin/bash", temp_script_path },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch |err| {
         output.printError(allocator, "Failed to spawn command: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
     };
 
-    const term = child.wait() catch |err| {
+    const term = child.wait(runtime.io) catch |err| {
         output.printError(allocator, "Failed to wait for command: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
@@ -884,14 +879,14 @@ pub fn handleRunCommand(
 
     // Check if the command was successful
     const success = blk: {
-        if (term != .Exited) break :blk false;
-        if (term.Exited != 0) break :blk false;
+        if (term != .exited) break :blk false;
+        if (term.exited != 0) break :blk false;
         break :blk true;
     };
 
     if (!success) {
-        if (term == .Exited) {
-            output.printError(allocator, "Command exited with status: {d}", .{term.Exited}) catch {};
+        if (term == .exited) {
+            output.printError(allocator, "Command exited with status: {d}", .{term.exited}) catch {};
         } else {
             output.printError(allocator, "Command terminated abnormally", .{}) catch {};
         }
@@ -909,25 +904,26 @@ fn createTempRunScript(
 ) ![]const u8 {
     // Create temporary file with unique name
     var temp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const temp_path = try std.fmt.bufPrint(&temp_path_buf, "/tmp/zenv_run_{d}.sh", .{std.time.milliTimestamp()});
+    const temp_path = try std.fmt.bufPrint(&temp_path_buf, "/tmp/zenv_run_{d}.sh", .{runtime.nowMillis()});
     const temp_path_owned = try allocator.dupe(u8, temp_path);
     errdefer allocator.free(temp_path_owned);
 
-    var file = try std.fs.cwd().createFile(temp_path_owned, .{});
-    defer file.close();
+    var file = try runtime.createFile(temp_path_owned, .{ .permissions = .fromMode(0o755) });
+    defer file.close(runtime.io);
 
-    // Make it executable
-    try file.chmod(0o755);
+    var wbuf: [4096]u8 = undefined;
+    var fw = file.writer(runtime.io, &wbuf);
+    const writer = &fw.interface;
 
     // Write script content
-    try file.writeAll("#!/bin/bash\nset -e\n\n");
-    try file.writer().print("source \"{s}\"\n\n", .{activate_path});
+    try writer.writeAll("#!/bin/bash\nset -e\n\n");
+    try writer.print("source \"{s}\"\n\n", .{activate_path});
 
     // Add command with arguments, properly escaped
-    try file.writer().print("{s}", .{command});
+    try writer.print("{s}", .{command});
     for (args) |arg| {
         // Escape quotes in arguments
-        var escaped_arg = std.ArrayList(u8).init(allocator);
+        var escaped_arg = std.array_list.Managed(u8).init(allocator);
         defer escaped_arg.deinit();
 
         for (arg) |char| {
@@ -937,9 +933,10 @@ fn createTempRunScript(
             try escaped_arg.append(char);
         }
 
-        try file.writer().print(" \"{s}\"", .{escaped_arg.items});
+        try writer.print(" \"{s}\"", .{escaped_arg.items});
     }
-    try file.writeAll("\n");
+    try writer.writeAll("\n");
+    try writer.flush();
 
     return temp_path_owned;
 }
@@ -973,7 +970,7 @@ pub fn handleLogCommand(
     defer allocator.free(log_file_path);
 
     // Check if the log file exists
-    std.fs.cwd().access(log_file_path, .{}) catch |err| {
+    runtime.access(log_file_path) catch |err| {
         if (err == error.FileNotFound) {
             output.printError(allocator, "No setup log found for environment '{s}'", .{entry.env_name}) catch {};
             output.printError(allocator, "The log file should be at: {s}", .{log_file_path}) catch {};
@@ -987,7 +984,7 @@ pub fn handleLogCommand(
     };
 
     // Read and print the log file
-    const log_content = std.fs.cwd().readFileAlloc(allocator, log_file_path, 10 * 1024 * 1024) catch |err| {
+    const log_content = runtime.readFileAlloc(allocator, log_file_path, 10 * 1024 * 1024) catch |err| {
         output.printError(allocator, "Failed to read log file '{s}': {s}", .{ log_file_path, @errorName(err) }) catch {};
         handleErrorFn(err);
         return;
@@ -995,7 +992,7 @@ pub fn handleLogCommand(
     defer allocator.free(log_content);
 
     // Output the log content
-    std.io.getStdOut().writer().print("{s}", .{log_content}) catch |err| {
+    output.rawOut(allocator, "{s}", .{log_content}) catch |err| {
         output.printError(allocator, "Error writing log to stdout: {s}", .{@errorName(err)}) catch {};
         handleErrorFn(err);
         return;
@@ -1020,8 +1017,7 @@ pub fn handleValidateCommand(
     }
 
     // Check if file exists before validating
-    if (std.fs.cwd().openFile(validate_config_path, .{})) |file| {
-        file.close();
+    if (runtime.access(validate_config_path)) |_| {
         output.print(allocator, "File exists, proceeding with validation", .{}) catch {};
     } else |err| {
         output.printError(allocator, "Failed to open file '{s}': {s}", .{ validate_config_path, @errorName(err) }) catch {};
@@ -1397,7 +1393,7 @@ pub fn handleRenameCommand(
     };
     defer allocator.free(new_venv_path);
 
-    std.fs.cwd().access(new_venv_path, .{}) catch |err| {
+    runtime.access(new_venv_path) catch |err| {
         if (err != error.FileNotFound) {
             output.printError(allocator, "New environment directory already exists: {s}", .{new_venv_path}) catch {};
             handleError(error.PathAlreadyExists);
@@ -1411,14 +1407,14 @@ pub fn handleRenameCommand(
 
     // === ATOMIC OPERATIONS START ===
 
-    std.fs.cwd().rename(old_venv_path, new_venv_path) catch |err| {
+    runtime.rename(old_venv_path, new_venv_path) catch |err| {
         output.printError(allocator, "Failed to rename environment directory: {s}", .{@errorName(err)}) catch {};
         handleError(error.IoError);
         return;
     };
 
     updateGeneratedScripts(allocator, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
-        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+        runtime.rename(new_venv_path, old_venv_path) catch {};
 
         output.printError(allocator, "Failed to update generated scripts: {s}", .{@errorName(err)}) catch {};
         handleError(err);
@@ -1427,7 +1423,7 @@ pub fn handleRenameCommand(
 
     registry.renameEnvironment(old_identifier, new_name) catch |err| {
         _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+        runtime.rename(new_venv_path, old_venv_path) catch {};
 
         switch (err) {
             error.EnvironmentAlreadyExists => {
@@ -1448,7 +1444,7 @@ pub fn handleRenameCommand(
         jupyter.renameKernel(allocator, old_name, new_name, new_venv_path) catch |err| {
             _ = registry.renameEnvironment(new_name, old_name) catch {};
             _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-            std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+            runtime.rename(new_venv_path, old_venv_path) catch {};
 
             switch (err) {
                 error.KernelExists => {
@@ -1469,7 +1465,7 @@ pub fn handleRenameCommand(
         }
         _ = registry.renameEnvironment(new_name, old_name) catch {};
         _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-        std.fs.cwd().rename(new_venv_path, old_venv_path) catch {};
+        runtime.rename(new_venv_path, old_venv_path) catch {};
 
         output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
         handleError(error.RegistryError);
@@ -1519,15 +1515,10 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
 }
 
 fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
-    const file = std.fs.openFileAbsolute(script_path, .{ .mode = .read_write }) catch |err| {
-        return err;
-    };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB max
+    const content = try runtime.readFileAlloc(allocator, script_path, 1024 * 1024); // 1MB max
     defer allocator.free(content);
 
-    var updated_content = std.ArrayList(u8).init(allocator);
+    var updated_content = std.array_list.Managed(u8).init(allocator);
     defer updated_content.deinit();
 
     var i: usize = 0;
@@ -1555,23 +1546,21 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
         i += 1;
     }
 
-    try file.seekTo(0);
-    try file.setEndPos(0);
-    try file.writeAll(updated_content.items);
+    try runtime.writeFile(script_path, updated_content.items);
 }
 
 fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
     const scripts_dir = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
     defer allocator.free(scripts_dir);
 
-    var dir = std.fs.openDirAbsolute(scripts_dir, .{ .iterate = true }) catch |err| {
+    var dir = runtime.openDir(scripts_dir, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) return; // Scripts directory doesn't exist, that's fine
         return err;
     };
-    defer dir.close();
+    defer dir.close(runtime.io);
 
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(runtime.io)) |entry| {
         if (entry.kind != .file) continue;
 
         if (std.mem.endsWith(u8, entry.name, ".sh") or
@@ -1595,7 +1584,7 @@ fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []co
 
     output.print(allocator, "Updating local config: {s}", .{config_path}) catch {};
 
-    const config_file = std.fs.openFileAbsolute(config_path, .{ .mode = .read_write }) catch |err| {
+    const config_contents = runtime.readFileAlloc(allocator, config_path, 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
             output.print(allocator, "No local config file found, skipping update", .{}) catch {};
             return; // No config file, that's fine
@@ -1603,9 +1592,6 @@ fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []co
         output.printError(allocator, "Failed to open config file: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    defer config_file.close();
-
-    const config_contents = try config_file.readToEndAlloc(allocator, 1024 * 1024); // 1MB max
     defer allocator.free(config_contents);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, config_contents, .{}) catch |err| {
@@ -1627,9 +1613,7 @@ fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []co
             const updated_contents = try std.mem.replaceOwned(u8, allocator, config_contents, old_key_pattern, new_key_pattern);
             defer allocator.free(updated_contents);
 
-            try config_file.seekTo(0);
-            try config_file.setEndPos(0);
-            try config_file.writeAll(updated_contents);
+            try runtime.writeFile(config_path, updated_contents);
 
             output.print(allocator, "Successfully updated local config file", .{}) catch {};
         } else {

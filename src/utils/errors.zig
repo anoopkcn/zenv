@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 pub const ZenvError = error{
     MissingHostname,
@@ -78,12 +79,8 @@ pub fn handleFileError(allocator: Allocator, err: anyerror, path: []const u8, op
 ///
 /// Returns: Whether debug logging should be enabled
 pub fn isDebugEnabled(allocator: Allocator) bool {
-    const env_var = std.process.getEnvVarOwned(allocator, "ZENV_DEBUG") catch |err| {
-        if (err == error.EnvironmentVariableNotFound) return false;
-        // If we encounter other errors reading the env var, default to false
-        return false;
-    };
-    defer allocator.free(env_var);
+    _ = allocator;
+    const env_var = runtime.env("ZENV_DEBUG") orelse return false;
 
     return std.mem.eql(u8, env_var, "1") or
         std.mem.eql(u8, env_var, "true") or

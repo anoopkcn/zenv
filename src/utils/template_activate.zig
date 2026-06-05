@@ -3,8 +3,8 @@ const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const errors = @import("errors.zig");
-const fs = std.fs;
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 const template = @import("template.zig");
 
@@ -31,41 +31,26 @@ fn createActivationScript(
     output.print(allocator, "Creating activation script for '{s}'...", .{env_name}) catch {};
 
     // Get absolute path of current working directory
-    var abs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try std.fs.cwd().realpath(".", &abs_path_buf);
-    errdefer {
-        _ = output.printError(allocator, "Failed to get CWD realpath in createActivationScript", .{}) catch {};
-    } // Add error context
+    const cwd_path = try runtime.cwdRealpath(allocator);
+    defer allocator.free(cwd_path);
 
     // Check if base_dir is absolute
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
     // Create scripts directory for hook scripts if needed
-    var scripts_rel_path: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
-    } else {
-        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
-    }
+    const scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
     defer allocator.free(scripts_rel_path);
 
-    // Create the scripts directory
-    if (is_absolute_base_dir) {
-        std.fs.makeDirAbsolute(scripts_rel_path) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
-                // Continue anyway, as this is not a critical error
-            }
-        };
-    } else {
-        fs.cwd().makePath(scripts_rel_path) catch |err| {
+    // Create the scripts directory (idempotent, works for absolute and relative)
+    runtime.makePath(scripts_rel_path) catch |err| {
+        if (err != error.PathAlreadyExists) {
             output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, as this is not a critical error
-        };
-    }
+        }
+    };
 
     // Handle activation script copying if present
-    var activate_hook_block = std.ArrayList(u8).init(allocator);
+    var activate_hook_block = std.array_list.Managed(u8).init(allocator);
     defer activate_hook_block.deinit();
     var activate_hook_path: ?[]const u8 = null;
     defer if (activate_hook_path) |path| allocator.free(path);
@@ -77,7 +62,7 @@ fn createActivationScript(
             defer allocator.free(dest_path);
             activate_hook_path = try allocator.dupe(u8, dest_path);
 
-            try activate_hook_block.writer().print(
+            try activate_hook_block.print(
                 \\
                 \\if [ -f "{s}" ]; then
                 \\  source "{s}" || echo "Warning: Activation script failed with exit code $?"
@@ -89,7 +74,7 @@ fn createActivationScript(
         } else |err| {
             output.printError(allocator, "Failed to copy activation script: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, but add a warning in the script
-            try activate_hook_block.writer().print(
+            try activate_hook_block.print(
                 \\
                 \\echo "Warning: Failed to copy activation script from '{s}'"
                 \\
@@ -143,14 +128,14 @@ fn createActivationScript(
     try replacements.put("ZENV_ENV_DIR", zenv_env_dir_export_line);
 
     // Generate the module loading block
-    var module_loading_block = std.ArrayList(u8).init(allocator);
+    var module_loading_block = std.array_list.Managed(u8).init(allocator);
     defer module_loading_block.deinit();
-    const module_writer = module_loading_block.writer();
+    const module_writer = &module_loading_block;
 
     // Add module loading logic
     if (env_config.modules.items.len > 0) {
         // Build the module list string for display
-        var module_list_str = std.ArrayList(u8).init(allocator);
+        var module_list_str = std.array_list.Managed(u8).init(allocator);
         defer module_list_str.deinit();
         for (env_config.modules.items, 0..) |module_name, idx| {
             if (idx > 0) try module_list_str.appendSlice(", ");
@@ -184,15 +169,15 @@ fn createActivationScript(
     try replacements.put("CUSTOM_VAR_UNSET", unset_slice);
 
     // Generate activate commands block
-    var activate_commands_block = std.ArrayList(u8).init(allocator);
+    var activate_commands_block = std.array_list.Managed(u8).init(allocator);
     defer activate_commands_block.deinit();
 
     if (env_config.activate != null and env_config.activate.?.commands != null and env_config.activate.?.commands.?.items.len > 0) {
-        try activate_commands_block.writer().print("# Run custom activation commands\n", .{});
+        try activate_commands_block.print("# Run custom activation commands\n", .{});
         for (env_config.activate.?.commands.?.items) |cmd| {
-            try activate_commands_block.writer().print("{s}\n", .{cmd});
+            try activate_commands_block.print("{s}\n", .{cmd});
         }
-        try activate_commands_block.writer().print("\n", .{});
+        try activate_commands_block.print("\n", .{});
     }
 
     const activate_commands_slice = try activate_commands_block.toOwnedSlice();
@@ -205,10 +190,10 @@ fn createActivationScript(
     try replacements.put("ACTIVATE_HOOK_BLOCK", activate_hook_slice);
 
     // Add optional description
-    var description_text = std.ArrayList(u8).init(allocator);
+    var description_text = std.array_list.Managed(u8).init(allocator);
     defer description_text.deinit();
     if (env_config.description) |desc| {
-        try description_text.writer().print(": {s}", .{desc});
+        try description_text.print(": {s}", .{desc});
     }
     const desc_slice = try description_text.toOwnedSlice();
     defer allocator.free(desc_slice);
@@ -217,17 +202,10 @@ fn createActivationScript(
     const processed_content = try template.processTemplateString(allocator, ACTIVATION_TEMPLATE, replacements);
     defer allocator.free(processed_content);
 
-    // Write the processed content to the file
-    var file = if (is_absolute_base_dir)
-        try std.fs.createFileAbsolute(script_rel_path, .{})
-    else
-        try fs.cwd().createFile(script_rel_path, .{});
-
-    defer file.close();
-    try file.writeAll(processed_content);
-
-    // Make executable
-    try file.chmod(0o755);
+    // Write the processed content to the file (executable)
+    var file = try runtime.createFile(script_rel_path, .{ .permissions = .fromMode(0o755) });
+    defer file.close(runtime.io);
+    try file.writeStreamingAll(runtime.io, processed_content);
 
     output.print(allocator, "Activation script created at {s}", .{script_abs_path}) catch {};
 }
@@ -253,7 +231,7 @@ fn copyHookScript(
 
     // Check if hook script exists
     const source_exists = blk: {
-        fs.cwd().access(resolved_hook_path, .{}) catch |err| {
+        runtime.access(resolved_hook_path) catch |err| {
             if (err == error.FileNotFound) {
                 output.printError(allocator, "Hook script not found: {s}", .{resolved_hook_path}) catch {};
                 return err;
@@ -277,27 +255,13 @@ fn copyHookScript(
     }
     errdefer allocator.free(dest_path);
 
-    // Copy the script file
-    var source_file = try fs.cwd().openFile(resolved_hook_path, .{});
-    defer source_file.close();
+    // Copy the script file (read whole source, write to an executable dest)
+    const content = try runtime.readFileAlloc(allocator, resolved_hook_path, 10 * 1024 * 1024);
+    defer allocator.free(content);
 
-    var dest_file = if (is_absolute_base_dir)
-        try std.fs.createFileAbsolute(dest_path, .{})
-    else
-        try fs.cwd().createFile(dest_path, .{});
-    defer dest_file.close();
-
-    // Copy the content
-    var buffer: [8192]u8 = undefined;
-    var bytes_read: usize = 0;
-    while (true) {
-        bytes_read = try source_file.read(&buffer);
-        if (bytes_read == 0) break;
-        try dest_file.writeAll(buffer[0..bytes_read]);
-    }
-
-    // Make the destination file executable
-    try dest_file.chmod(0o755);
+    var dest_file = try runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) });
+    defer dest_file.close(runtime.io);
+    try dest_file.writeStreamingAll(runtime.io, content);
 
     output.print(allocator, "Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
     return dest_path;
