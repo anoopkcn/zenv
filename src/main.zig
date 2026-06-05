@@ -82,7 +82,7 @@ fn printVersion() void {
 }
 
 fn printUsage() void {
-    const usage = comptime 
+    const usage = comptime
         \\Usage: zenv <command> [name|id] [options]
         \\
         \\Manages Python virtual environments based on zenv.json configuration.
@@ -263,167 +263,153 @@ pub fn main(app: std.process.Init) anyerror!void {
 
     const handleError = struct {
         pub fn func(alloc: Allocator, err: anyerror) void {
-            // Standard error handler
-            if (@errorReturnTrace()) |trace| {
-                output.printError(alloc, "{s}", .{@errorName(err)}) catch {};
-
-                // Handle specific errors
-                switch (err) {
-                    error.ConfigFileNotFound => {
-                        output.printError(alloc,
-                            \\Configuration file '{s}' not found
-                        , .{config_path}) catch {};
-                    },
-                    error.FileNotFound => {
-                        output.printError(alloc,
-                            \\zenv could not find a file required to complete this command
-                        , .{}) catch {};
-                    },
-                    error.ClusterNotFound => {
-                        output.printError(alloc,
-                            \\Target machine mismatch or environment not suitable for current machine
-                        , .{}) catch {};
-                    },
-                    error.EnvironmentNotFound => {
-                        output.printError(alloc,
-                            \\Environment name not found in configuration or argument missing
-                        , .{}) catch {};
-                    },
-                    error.JsonParseError => {
-                        output.printError(alloc,
-                            \\Invalid JSON format in '{s}'. Check syntax
-                        , .{config_path}) catch {};
-                    },
-                    error.InvalidFormat => {
-                        output.printError(alloc,
-                            \\Invalid JSON format in '{s}'. Check syntax for details above
-                        , .{config_path}) catch {};
-                    },
-                    error.ConfigInvalid => {
-                        output.printError(alloc,
-                            \\Invalid configuration structure in '{s}'. Check keys/types/required fields
-                        , .{config_path}) catch {};
-                    },
-                    error.MissingHostname => {
-                        output.printError(alloc,
-                            \\HOSTNAME is not set or inaccessible which is required for validation
-                        , .{}) catch {};
-                    },
-                    error.PathResolutionFailed => {
-                        output.printError(alloc,
-                            \\Failed to resolve a required file path (e.g., requirements file)
-                            \\
-                        , .{}) catch {};
-                    },
-                    error.TargetMachineMismatch => {
-                        output.printError(alloc,
-                            \\Current machine does not match the target specified for this environment
-                        , .{}) catch {};
-                    },
-                    error.AmbiguousIdentifier => {
-                        output.printError(alloc,
-                            \\The provided ID prefix matches multiple environments. Use more characters
-                        , .{}) catch {};
-                    },
-                    error.RegistryError => {
-                        output.printError(alloc,
-                            \\Failed to access the environment registry. Check permissions for ZENV_DIR
-                        , .{}) catch {};
-                    },
-                    error.ArgsError => {
-                        output.printError(alloc,
-                            \\Invalid command-line arguments provided. Check usage with 'zenv help'
-                        , .{}) catch {};
-                    },
-                    error.EnvironmentNotRegistered => {
-                        output.printError(alloc,
-                            \\The specified environment is not registered. Use 'zenv register <name>'
-                        , .{}) catch {};
-                    },
-                    error.MissingPythonExecutable => {
-                        output.printError(alloc,
-                            \\A required Python executable was not found or is not configured
-                        , .{}) catch {};
-                        output.printError(alloc,
-                            \\Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json
-                        , .{}) catch {};
-                    },
-                    error.InvalidRegistryFormat => {
-                        output.printError(alloc,
-                            \\The registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
-                        , .{}) catch {};
-                    },
-                    error.ConfigFileReadError => {
-                        output.printError(alloc,
-                            \\Error reading the configuration file '{s}'. Check permissions and file integrity
-                        , .{config_path}) catch {};
-                    },
-                    error.HostnameParseError => {
-                        output.printError(alloc,
-                            \\Failed to parse the system hostname
-                        , .{}) catch {};
-                    },
-                    error.IoError => {
-                        output.printError(alloc,
-                            \\An I/O error occurred. Check file system permissions and disk space
-                        , .{}) catch {};
-                    },
-                    error.OutOfMemory => {
-                        output.printError(alloc,
-                            \\The application ran out of memory. Try freeing up system resources
-                        , .{}) catch {};
-                    },
-                    error.PathTraversalAttempt => {
-                        output.printError(alloc,
-                            \\A path traversal attempt was detected and blocked for security reasons
-                        , .{}) catch {};
-                    },
-                    error.EnvironmentVariableNotFound => {
-                        output.printError(alloc,
-                            \\A required environment variable was not found. Please ensure it is set
-                        , .{}) catch {};
-                    },
-                    error.InvalidWtf8 => {
-                        output.printError(alloc,
-                            \\An environment variable contained invalid UTF-8 (WTF-8) characters
-                        , .{}) catch {};
-                    },
-                    error.ProcessError => {
-                        // For process errors, already handled by the process itself
-                        process.exit(1); // Exit immediately to prevent stack trace
-                    },
-                    error.ModuleLoadError => {
-                        // Module load errors are already handled by module loader
-                        process.exit(1); // Exit immediately to prevent stack trace
-                    },
-                    error.EnvironmentAlreadyExists => {
-                        output.printError(alloc,
-                            \\An environment with that name already exists
-                        , .{}) catch {};
-                    },
-                    error.InvalidEnvironmentName => {
-                        output.printError(alloc,
-                            \\Invalid environment name. Use only alphanumeric characters, hyphens, underscores, and dots
-                        , .{}) catch {};
-                    },
-                    error.PathAlreadyExists => {
-                        output.printError(alloc,
-                            \\The target path already exists
-                        , .{}) catch {};
-                    },
-                    error.InvalidPath => {
-                        output.printError(alloc,
-                            \\Invalid file or directory path
-                        , .{}) catch {};
-                    },
-                    else => {
-                        output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
-                        _ = trace; // error return trace is dumped by the std bootstrap on error
-                    },
-                }
-            } else {
-                // However, if it is, it means an error occurred without a return trace.
-                output.printError(alloc, "Error: {s} (no trace available)", .{@errorName(err)}) catch {};
+            // Map the error to a single user-facing message, then exit.
+            switch (err) {
+                error.ConfigFileNotFound => {
+                    output.printError(alloc,
+                        \\Configuration file '{s}' not found
+                    , .{config_path}) catch {};
+                },
+                error.FileNotFound => {
+                    output.printError(alloc,
+                        \\zenv could not find a file required to complete this command
+                    , .{}) catch {};
+                },
+                error.ClusterNotFound => {
+                    output.printError(alloc,
+                        \\Target machine mismatch or environment not suitable for current machine
+                    , .{}) catch {};
+                },
+                error.EnvironmentNotFound => {
+                    output.printError(alloc,
+                        \\Environment name not found in configuration or argument missing
+                    , .{}) catch {};
+                },
+                error.JsonParseError => {
+                    output.printError(alloc,
+                        \\Invalid JSON format in '{s}'. Check syntax
+                    , .{config_path}) catch {};
+                },
+                error.InvalidFormat => {
+                    output.printError(alloc,
+                        \\Invalid JSON format in '{s}'. Check syntax for details above
+                    , .{config_path}) catch {};
+                },
+                error.ConfigInvalid => {
+                    output.printError(alloc,
+                        \\Invalid configuration structure in '{s}'. Check keys/types/required fields
+                    , .{config_path}) catch {};
+                },
+                error.MissingHostname => {
+                    output.printError(alloc,
+                        \\HOSTNAME is not set or inaccessible which is required for validation
+                    , .{}) catch {};
+                },
+                error.PathResolutionFailed => {
+                    output.printError(alloc,
+                        \\Failed to resolve a required file path (e.g., requirements file)
+                        \\
+                    , .{}) catch {};
+                },
+                error.TargetMachineMismatch => {
+                    output.printError(alloc,
+                        \\Current machine does not match the target specified for this environment
+                    , .{}) catch {};
+                },
+                error.AmbiguousIdentifier => {
+                    output.printError(alloc,
+                        \\The provided ID prefix matches multiple environments. Use more characters
+                    , .{}) catch {};
+                },
+                error.RegistryError => {
+                    output.printError(alloc,
+                        \\Failed to access the environment registry. Check permissions for ZENV_DIR
+                    , .{}) catch {};
+                },
+                error.ArgsError => {
+                    output.printError(alloc,
+                        \\Invalid command-line arguments provided. Check usage with 'zenv help'
+                    , .{}) catch {};
+                },
+                error.EnvironmentNotRegistered => {
+                    output.printError(alloc,
+                        \\The specified environment is not registered. Use 'zenv register <name>'
+                    , .{}) catch {};
+                },
+                error.MissingPythonExecutable => {
+                    output.printError(alloc,
+                        \\A required Python executable was not found or is not configured
+                    , .{}) catch {};
+                    output.printError(alloc,
+                        \\Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json
+                    , .{}) catch {};
+                },
+                error.InvalidRegistryFormat => {
+                    output.printError(alloc,
+                        \\The registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
+                    , .{}) catch {};
+                },
+                error.ConfigFileReadError => {
+                    output.printError(alloc,
+                        \\Error reading the configuration file '{s}'. Check permissions and file integrity
+                    , .{config_path}) catch {};
+                },
+                error.HostnameParseError => {
+                    output.printError(alloc,
+                        \\Failed to parse the system hostname
+                    , .{}) catch {};
+                },
+                error.IoError => {
+                    output.printError(alloc,
+                        \\An I/O error occurred. Check file system permissions and disk space
+                    , .{}) catch {};
+                },
+                error.OutOfMemory => {
+                    output.printError(alloc,
+                        \\The application ran out of memory. Try freeing up system resources
+                    , .{}) catch {};
+                },
+                error.PathTraversalAttempt => {
+                    output.printError(alloc,
+                        \\A path traversal attempt was detected and blocked for security reasons
+                    , .{}) catch {};
+                },
+                error.EnvironmentVariableNotFound => {
+                    output.printError(alloc,
+                        \\A required environment variable was not found. Please ensure it is set
+                    , .{}) catch {};
+                },
+                error.InvalidWtf8 => {
+                    output.printError(alloc,
+                        \\An environment variable contained invalid UTF-8 (WTF-8) characters
+                    , .{}) catch {};
+                },
+                error.ProcessError, error.ModuleLoadError => {
+                    // Already reported by the process / module loader; just exit.
+                },
+                error.EnvironmentAlreadyExists => {
+                    output.printError(alloc,
+                        \\An environment with that name already exists
+                    , .{}) catch {};
+                },
+                error.InvalidEnvironmentName => {
+                    output.printError(alloc,
+                        \\Invalid environment name. Use only alphanumeric characters, hyphens, underscores, and dots
+                    , .{}) catch {};
+                },
+                error.PathAlreadyExists => {
+                    output.printError(alloc,
+                        \\The target path already exists
+                    , .{}) catch {};
+                },
+                error.InvalidPath => {
+                    output.printError(alloc,
+                        \\Invalid file or directory path
+                    , .{}) catch {};
+                },
+                else => {
+                    output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
+                },
             }
             process.exit(1);
         }
