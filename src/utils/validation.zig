@@ -628,9 +628,9 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Manage
         }
 
         if (err.line > 0) {
-            output.printError(allocator, "Error approximately at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
+            output.printError(allocator, "at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
         } else {
-            output.printError(allocator, "Error: {s}", .{err.message}) catch {};
+            output.printError(allocator, "{s}", .{err.message}) catch {};
         }
 
         if (err.field_path) |path| {

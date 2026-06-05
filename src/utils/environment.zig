@@ -644,7 +644,7 @@ pub fn lookupRegistryEntry(
             }
 
             if (match_count > 1) {
-                output.rawErr(allocator, "Error: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{resolved_identifier}) catch {};
+                output.rawErr(allocator, "ERROR: Ambiguous ID prefix '{s}' matches multiple environments:\n", .{resolved_identifier}) catch {};
                 // Print the collected names
                 for (matching_envs.items) |env_name| {
                     output.rawErr(allocator, "  - {s}\n", .{env_name}) catch {};
@@ -661,7 +661,7 @@ pub fn lookupRegistryEntry(
             identifier // Show original alias name in error
         else
             resolved_identifier;
-        output.rawErr(allocator, "Error: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
+        output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{display_identifier}) catch {};
         output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
         return error.EnvironmentNotRegistered;
     };

@@ -85,10 +85,10 @@ pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !voi
     var buf: [1024]u8 = undefined;
     const message = if (fmt.len + 50 < buf.len) blk: {
         // Use stack buffer for small messages
-        break :blk try std.fmt.bufPrint(&buf, "Info: " ++ fmt ++ "\n", args);
+        break :blk try std.fmt.bufPrint(&buf, "INFO: " ++ fmt ++ "\n", args);
     } else {
         // Use allocator for larger messages
-        try std.fmt.allocPrint(allocator, "Info: " ++ fmt ++ "\n", args);
+        try std.fmt.allocPrint(allocator, "INFO: " ++ fmt ++ "\n", args);
     };
     defer if (message.ptr != &buf) allocator.free(message);
 
@@ -101,10 +101,10 @@ pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype)
     var buf: [1024]u8 = undefined;
     const message = if (fmt.len + 50 < buf.len) blk: {
         // Use stack buffer for small messages
-        break :blk try std.fmt.bufPrint(&buf, "Error: " ++ fmt ++ "\n", args);
+        break :blk try std.fmt.bufPrint(&buf, "ERROR: " ++ fmt ++ "\n", args);
     } else {
         // Use allocator for larger messages
-        try std.fmt.allocPrint(allocator, "Error: " ++ fmt ++ "\n", args);
+        try std.fmt.allocPrint(allocator, "ERROR: " ++ fmt ++ "\n", args);
     };
     defer if (message.ptr != &buf) allocator.free(message);
 
