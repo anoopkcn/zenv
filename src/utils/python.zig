@@ -288,20 +288,14 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 
     try showInstallProgress("Configuration complete", 15);
 
-    // Determine the number of CPU cores for parallel build
-    const cpu_count = try allocator.dupeZ(u8, "4"); // Default to 4 cores as a safe value
+    // Determine the number of CPU cores for the parallel build, leaving one
+    // core free to keep the system responsive (fall back to 1 on failure).
+    const cores_to_use = if (std.Thread.getCpuCount()) |count|
+        @max(count - 1, 1)
+    else |_|
+        1;
+    const cpu_count = try std.fmt.allocPrint(allocator, "{d}", .{cores_to_use});
     defer allocator.free(cpu_count);
-
-    // Try to get the actual CPU count if possible
-    // if (std.Thread.getCpuCount()) |count| {
-    //     if (count > 1) {
-    //         const cores_to_use = @max(count - 1, 1); // Use one less than available to avoid system freeze
-    //         allocator.free(cpu_count);
-    //         cpu_count = try std.fmt.allocPrintZ(allocator, "{d}", .{cores_to_use});
-    //     }
-    // } else |_| {
-    //     // If we can't get the CPU count, stick with default
-    // }
 
     // Run make (typically 70% of installation time)
     try showInstallProgress("Building Python...", 20);
