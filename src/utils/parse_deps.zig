@@ -62,8 +62,12 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
         return false;
     }
 
-    // If the string contains spaces, probably not a package name
-    if (std.mem.indexOf(u8, package_name, " ") != null) {
+    // If the string has spaces but no version operators/comma, it's prose
+    // (e.g. a description or classifier), not a package. A requirement specifier
+    // may legitimately contain a space, as in "numpy>=1.26.0, <2.0".
+    if (std.mem.indexOf(u8, package_name, " ") != null and
+        std.mem.indexOfAny(u8, package_name, "<>=~,") == null)
+    {
         return false;
     }
 
@@ -416,11 +420,12 @@ pub fn validateDependencies(
         var valid = true;
         var has_alpha = false;
         for (dep) |c| {
-            // Allow alphanumeric, hyphen, underscore, dot, and comparison operators/brackets
+            // Allow alphanumeric, hyphen, underscore, dot, comparison operators/brackets,
+            // and comma (separates multiple version constraints, e.g. ">=1.26.0,<2.0").
             if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')) {
                 has_alpha = true;
             } else if (!((c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or
-                c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']'))
+                c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']' or c == ','))
             {
                 valid = false;
                 break;
@@ -537,4 +542,27 @@ test "isLikelyPythonPackageName filters TOML metadata fields" {
     try testing.expect(isLikelyPythonPackageName("requests"));
     try testing.expect(!isLikelyPythonPackageName("name"));
     try testing.expect(!isLikelyPythonPackageName("version"));
+    // A multi-constraint specifier may contain a space and is still a package.
+    try testing.expect(isLikelyPythonPackageName("numpy>=1.26.0, <2.0"));
+    // Prose with spaces but no version operators is not a package.
+    try testing.expect(!isLikelyPythonPackageName("Programming Language :: Python :: 3"));
+}
+
+test "validateDependencies keeps multi-constraint specifiers" {
+    test_support.setupRuntime();
+    // validateDependencies has a pre-existing leak (lowercase keys duped into its
+    // seen-packages map are not freed), so use an arena to keep this test focused
+    // on the validation behaviour rather than that unrelated leak.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = [_][]const u8{
+        "numpy>=1.26.0,<2.0",
+        "requests>=2.8.1, <3.0",
+    };
+    var valid = try validateDependencies(a, &raw, "test");
+    defer valid.deinit();
+    try testing.expectEqual(@as(usize, 2), valid.items.len);
+    try testing.expectEqualStrings("numpy>=1.26.0,<2.0", valid.items[0]);
+    try testing.expectEqualStrings("requests>=2.8.1, <3.0", valid.items[1]);
 }
