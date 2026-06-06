@@ -395,6 +395,80 @@ pub const RegistryEntry = struct {
     }
 };
 
+// Python interpreter that built a venv, read from <venv>/pyvenv.cfg.
+pub const VenvPythonInfo = struct {
+    version: []const u8,
+    path: ?[]const u8, // best-available interpreter path; may be null
+
+    pub fn deinit(self: *VenvPythonInfo, allocator: Allocator) void {
+        allocator.free(self.version);
+        if (self.path) |p| allocator.free(p);
+    }
+};
+
+// Fields extracted from a pyvenv.cfg body. Slices point INTO the input.
+const PyvenvFields = struct { version: ?[]const u8, path: ?[]const u8 };
+
+// Pure parser for pyvenv.cfg contents. `version` is the `version =` value.
+// `path` is the best-available interpreter path across Python versions:
+// `executable =` (3.11+) -> first token of `command =` (3.x, incl. zenv's
+// default 3.10) -> `home =` (the bin dir). Returns nulls when absent.
+fn parsePyvenvCfg(content: []const u8) PyvenvFields {
+    var version: ?[]const u8 = null;
+    var executable: ?[]const u8 = null;
+    var home: ?[]const u8 = null;
+    var command: ?[]const u8 = null;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t\r");
+        const val = std.mem.trim(u8, line[eq + 1 ..], " \t\r");
+        if (std.mem.eql(u8, key, "version")) {
+            version = val;
+        } else if (std.mem.eql(u8, key, "executable")) {
+            executable = val;
+        } else if (std.mem.eql(u8, key, "home")) {
+            home = val;
+        } else if (std.mem.eql(u8, key, "command")) {
+            command = val;
+        }
+    }
+
+    var path: ?[]const u8 = executable;
+    if (path == null) {
+        if (command) |cmd| {
+            const first = std.mem.sliceTo(cmd, ' ');
+            if (first.len > 0) path = first;
+        }
+    }
+    if (path == null) path = home;
+
+    return .{ .version = version, .path = path };
+}
+
+// Reads <venv_path>/pyvenv.cfg and returns the Python version + interpreter path
+// used to build the venv. Returns null if the file is absent/unreadable (env not
+// built) or has no `version`. Caller owns the returned strings (call deinit).
+pub fn readVenvPythonInfo(allocator: Allocator, venv_path: []const u8) !?VenvPythonInfo {
+    const cfg_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "pyvenv.cfg" });
+    defer allocator.free(cfg_path);
+
+    const content = runtime.readFileAlloc(allocator, cfg_path, 64 * 1024) catch {
+        // Missing or unreadable -> treat as "not built"; list output stays robust.
+        return null;
+    };
+    defer allocator.free(content);
+
+    const fields = parsePyvenvCfg(content);
+    const version = fields.version orelse return null;
+
+    return VenvPythonInfo{
+        .version = try allocator.dupe(u8, version),
+        .path = if (fields.path) |p| try allocator.dupe(u8, p) else null,
+    };
+}
+
 // Helper struct for JSON serialization
 const RegistryJSON = struct {
     environments: []const RegistryEntryJSON,
@@ -860,6 +934,57 @@ test "registry lookup by name, alias, and id prefix" {
     try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
     try testing.expect(reg.removeAlias("me"));
     try testing.expect(reg.resolveAlias("me") == null);
+}
+
+test "parsePyvenvCfg: 3.11-style uses executable path" {
+    const content =
+        \\home = /opt/python/3.11/bin
+        \\include-system-site-packages = false
+        \\version = 3.11.5
+        \\executable = /opt/python/3.11/bin/python3.11
+        \\command = /opt/python/3.11/bin/python3.11 -m venv /p/zenv/e
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.11.5", f.version.?);
+    try testing.expectEqualStrings("/opt/python/3.11/bin/python3.11", f.path.?);
+}
+
+test "parsePyvenvCfg: 3.10-style (no executable) falls back to command's first token" {
+    const content =
+        \\home = /opt/python/3.10/bin
+        \\include-system-site-packages = false
+        \\version = 3.10.8
+        \\command = /opt/python/3.10/bin/python3.10 -m venv /p/zenv/e
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.10.8", f.version.?);
+    try testing.expectEqualStrings("/opt/python/3.10/bin/python3.10", f.path.?);
+}
+
+test "parsePyvenvCfg: only version + home falls back to home" {
+    const content =
+        \\home = /usr/bin
+        \\version = 3.9.2
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.9.2", f.version.?);
+    try testing.expectEqualStrings("/usr/bin", f.path.?);
+}
+
+test "parsePyvenvCfg: missing version yields null (caller omits the line)" {
+    const content =
+        \\home = /usr/bin
+        \\include-system-site-packages = false
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expect(f.version == null);
+}
+
+test "parsePyvenvCfg: tolerates CRLF and irregular spacing around '='" {
+    const content = "version=3.12.1\r\nexecutable   =   /x/py\r\n";
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.12.1", f.version.?);
+    try testing.expectEqualStrings("/x/py", f.path.?);
 }
 
 test "Parse.getBool reads booleans and falls back on non-bool" {

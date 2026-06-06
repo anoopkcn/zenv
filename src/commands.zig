@@ -463,6 +463,18 @@ pub fn handleListCommand(
         stdout.print("\n  project : {s}", .{entry.project_dir}) catch {};
         stdout.print("\n  venv    : {s}", .{entry.venv_path}) catch {};
 
+        // Show the Python that built the venv, read from <venv>/pyvenv.cfg.
+        // Omitted entirely when the env isn't built (no pyvenv.cfg).
+        if (configurations.readVenvPythonInfo(allocator, entry.venv_path) catch null) |info_val| {
+            var info = info_val;
+            defer info.deinit(allocator);
+            if (info.path) |p| {
+                stdout.print("\n  python  : {s}  ({s})", .{ info.version, p }) catch {};
+            } else {
+                stdout.print("\n  python  : {s}", .{info.version}) catch {};
+            }
+        }
+
         // Print aliases if any exist
         if (entry.aliases.items.len > 0) {
             stdout.print("\n  aliases : ", .{}) catch {};
