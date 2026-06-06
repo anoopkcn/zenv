@@ -62,11 +62,13 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
         return false;
     }
 
-    // If the string has spaces but no version operators/comma, it's prose
-    // (e.g. a description or classifier), not a package. A requirement specifier
-    // may legitimately contain a space, as in "numpy>=1.26.0, <2.0".
+    // If the string has spaces but no version operator or extras bracket, it's
+    // prose (e.g. a description or classifier), not a package. A real requirement
+    // may legitimately contain a space, as in "numpy>=1.26.0, <2.0" or
+    // "mkdocstrings[python] >= 0.19" — those always carry an operator or '['.
+    // (Keying on the comma instead would mis-accept prose like "Fast, simple".)
     if (std.mem.indexOf(u8, package_name, " ") != null and
-        std.mem.indexOfAny(u8, package_name, "<>=~,") == null)
+        std.mem.indexOfAny(u8, package_name, "<>=~[") == null)
     {
         return false;
     }
@@ -565,4 +567,28 @@ test "validateDependencies keeps multi-constraint specifiers" {
     try testing.expectEqual(@as(usize, 2), valid.items.len);
     try testing.expectEqualStrings("numpy>=1.26.0,<2.0", valid.items[0]);
     try testing.expectEqualStrings("requests>=2.8.1, <3.0", valid.items[1]);
+}
+
+test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const content =
+        \\[project]
+        \\name = "x"
+        \\dependencies = [
+        \\    "numpy>=1.26.0, <2.0",
+        \\]
+    ;
+    var deps = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (deps.items) |d| a.free(d);
+        deps.deinit();
+    }
+    const count = try parsePyprojectToml(a, content, &deps);
+    try testing.expect(count >= 1);
+    var found = false;
+    for (deps.items) |d| {
+        if (std.mem.indexOf(u8, d, "numpy") != null and std.mem.indexOf(u8, d, "<2.0") != null) found = true;
+    }
+    try testing.expect(found);
 }
