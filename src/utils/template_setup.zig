@@ -316,6 +316,24 @@ fn createSetupScript(
     // Set no_cache flag for the template
     try replacements.put("NO_CACHE_VALUE", if (flags.no_cache) "NO_CACHE=true" else "NO_CACHE=false");
 
+    // Module-environment cache placeholders. Only active when caching is enabled
+    // AND the env actually declares modules (nothing to cache otherwise), matching
+    // the activate-side gate in buildModuleSection.
+    const module_cache_active = env_config.module_cache and env_config.modules.items.len > 0;
+    try replacements.put("MODULE_CACHE_ENABLED_VALUE", if (module_cache_active) "MODULE_CACHE_ENABLED=true" else "MODULE_CACHE_ENABLED=false");
+
+    const cache_version_str = try std.fmt.allocPrint(allocator, "{d}", .{template.MODULE_CACHE_VERSION});
+    defer allocator.free(cache_version_str);
+    try replacements.put("CACHE_VERSION", cache_version_str);
+
+    const module_cache_file = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_FILE });
+    defer allocator.free(module_cache_file);
+    try replacements.put("MODULE_CACHE_FILE", module_cache_file);
+
+    const module_cache_stamp = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_STAMP });
+    defer allocator.free(module_cache_stamp);
+    try replacements.put("MODULE_CACHE_STAMP", module_cache_stamp);
+
     // Create the pip install command based on whether we have dependencies
     const pip_install_cmd = if (valid_deps_list_len > 0)
         try std.fmt.allocPrint(allocator, "python -m pip install -r {s}", .{req_abs_path})
@@ -357,11 +375,12 @@ fn createSetupScript(
             try module_writer.print("info \"Attempting to load module: '{s}'\"\n", .{module_name});
 
             if (modules_verified) {
-                // Just load the module when pre-verified, we already checked they exist
-                try module_writer.print("safe_module_load '{s}'\n", .{module_name});
+                // Just load the module when pre-verified, we already checked they exist.
+                // A failure still flips ZENV_MOD_OK so a half-loaded env is never cached.
+                try module_writer.print("safe_module_load '{s}' || ZENV_MOD_OK=0\n", .{module_name});
             } else {
                 // Load with error handling when not pre-verified
-                try module_writer.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
+                try module_writer.print("safe_module_load '{s}' || {{ handle_module_error '{s}'; ZENV_MOD_OK=0; }}\n", .{ module_name, module_name });
             }
         }
     } else {

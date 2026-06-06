@@ -6,6 +6,7 @@
     "fallback_python": null,
     "modules": [],
     "modules_file":null,
+    "module_cache": true,
     "dependencies": [],
     "dependency_file": @@DEV_DEPENDENCY_FILE@@,
     "setup": {

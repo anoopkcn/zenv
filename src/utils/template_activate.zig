@@ -127,37 +127,10 @@ fn createActivationScript(
     defer allocator.free(zenv_env_dir_export_line);
     try replacements.put("ZENV_ENV_DIR", zenv_env_dir_export_line);
 
-    // Generate the module loading block
-    var module_loading_block = std.array_list.Managed(u8).init(allocator);
-    defer module_loading_block.deinit();
-    const module_writer = &module_loading_block;
-
-    // Add module loading logic
-    if (env_config.modules.items.len > 0) {
-        // Build the module list string for display
-        var module_list_str = std.array_list.Managed(u8).init(allocator);
-        defer module_list_str.deinit();
-        for (env_config.modules.items, 0..) |module_name, idx| {
-            if (idx > 0) try module_list_str.appendSlice(", ");
-            try module_list_str.appendSlice(module_name);
-        }
-
-        try module_writer.print("echo 'Info: Loading {d} modules'\n", .{env_config.modules.items.len});
-        for (env_config.modules.items, 0..) |module_name, idx| {
-            try module_writer.print("echo '  - Module {d}: \"{s}\"'\n", .{ idx + 1, module_name });
-        }
-
-        for (env_config.modules.items) |module_name| {
-            // try module_writer.print("echo \"Info: Attempting to load module: '{s}'\"\n", .{module_name});
-            try module_writer.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
-        }
-    } else {
-        try module_writer.print("echo 'Info: No modules specified to load'\n", .{});
-    }
-
-    const module_loading_slice = try module_loading_block.toOwnedSlice();
-    defer allocator.free(module_loading_slice);
-    try replacements.put("MODULE_LOADING_BLOCK", module_loading_slice);
+    // Generate the module section: cache-aware replay, plain load, or a no-op.
+    const module_section = try buildModuleSection(allocator, env_config.modules.items, env_config.module_cache, venv_path);
+    defer allocator.free(module_section);
+    try replacements.put("MODULE_SECTION", module_section);
 
     // Create empty placeholders for template compatibility
     const exports_slice = try allocator.dupe(u8, "");
@@ -208,6 +181,101 @@ fn createActivationScript(
     try file.writeStreamingAll(runtime.io, processed_content);
 
     output.print(allocator, "Activation script created at {s}", .{script_abs_path}) catch {};
+}
+
+// Appends `value` to `buf` as a shell single-quoted string body, escaping any
+// embedded single quotes (the classic '\'' trick). Caller writes the wrapping
+// quotes around the call.
+fn appendSqEscaped(buf: *std.array_list.Managed(u8), value: []const u8) !void {
+    for (value) |c| {
+        if (c == '\'') {
+            try buf.appendSlice("'\\''");
+        } else {
+            try buf.append(c);
+        }
+    }
+}
+
+// Writes the per-module load lines (header echoes + `safe_module_load` calls)
+// shared by the no-cache path and the cache-miss fallback.
+fn writeModuleLoadLines(buf: *std.array_list.Managed(u8), modules: []const []const u8) !void {
+    try buf.print("echo 'Info: Loading {d} modules'\n", .{modules.len});
+    for (modules, 0..) |module_name, idx| {
+        try buf.print("echo '  - Module {d}: \"{s}\"'\n", .{ idx + 1, module_name });
+    }
+    for (modules) |module_name| {
+        try buf.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
+    }
+}
+
+/// Builds the `@@MODULE_SECTION@@` block for activate.sh. Three shapes:
+///   - no modules: a no-op notice;
+///   - modules without caching: the historical `module --force purge` + loads;
+///   - modules with caching: source the captured module-env cache when the stamp
+///     is fresh (version + `$SYSTEMNAME` match, not untrusted), else fall back to
+///     a real `module load` and hint to re-run `zenv setup`.
+/// The absolute venv path is baked in because `ZENV_ENV_DIR` is exported only
+/// AFTER this block runs in activate.sh, so it is not yet available here.
+/// Caller owns the returned slice.
+fn buildModuleSection(
+    allocator: Allocator,
+    modules: []const []const u8,
+    module_cache: bool,
+    venv_path: []const u8,
+) ![]u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    const w = &buf;
+
+    if (modules.len == 0) {
+        // Preserve the historical behavior: still purge on systems with Lmod.
+        try w.print("if command -v module >/dev/null 2>&1; then\n", .{});
+        try w.print("  module --force purge || echo \"WARNING: Failed to purge modules, continuing anyway\" >&2\n", .{});
+        try w.print("  echo 'Info: No modules specified to load'\n", .{});
+        try w.print("fi\n", .{});
+        return buf.toOwnedSlice();
+    }
+
+    if (!module_cache) {
+        try w.print("if command -v module >/dev/null 2>&1; then\n", .{});
+        try w.print("  module --force purge || echo \"WARNING: Failed to purge modules, continuing anyway\" >&2\n", .{});
+        try writeModuleLoadLines(w, modules);
+        try w.print("fi\n", .{});
+        return buf.toOwnedSlice();
+    }
+
+    // Cache-aware path. Bake absolute, shell-single-quoted cache paths.
+    try w.print("if command -v module >/dev/null 2>&1; then\n", .{});
+
+    try w.appendSlice("  __zenv_cache='");
+    try appendSqEscaped(w, venv_path);
+    try w.print("/{s}'\n", .{template.MODULE_CACHE_FILE});
+
+    try w.appendSlice("  __zenv_stamp='");
+    try appendSqEscaped(w, venv_path);
+    try w.print("/{s}'\n", .{template.MODULE_CACHE_STAMP});
+
+    try w.print("  __zenv_use_cache=0\n", .{});
+    try w.print("  if [ -f \"$__zenv_cache\" ] && [ -f \"$__zenv_stamp\" ]; then\n", .{});
+    try w.print("    __zenv_cv=$(sed -n 's/^version=//p' \"$__zenv_stamp\")\n", .{});
+    try w.print("    __zenv_cs=$(sed -n 's/^system=//p' \"$__zenv_stamp\")\n", .{});
+    try w.print("    __zenv_cu=$(sed -n 's/^untrusted=//p' \"$__zenv_stamp\")\n", .{});
+    try w.print("    __zenv_cur=\"${{SYSTEMNAME:-$(hostname 2>/dev/null)}}\"\n", .{});
+    try w.print("    if [ \"$__zenv_cv\" = \"{d}\" ] && [ \"$__zenv_cs\" = \"$__zenv_cur\" ] && [ \"$__zenv_cu\" != \"1\" ]; then\n", .{template.MODULE_CACHE_VERSION});
+    try w.print("      __zenv_use_cache=1\n", .{});
+    try w.print("    fi\n", .{});
+    try w.print("  fi\n", .{});
+    try w.print("  if [ \"$__zenv_use_cache\" = \"1\" ]; then\n", .{});
+    try w.print("    . \"$__zenv_cache\"\n", .{});
+    try w.print("  else\n", .{});
+    try w.print("    module --force purge || echo \"WARNING: Failed to purge modules, continuing anyway\" >&2\n", .{});
+    try writeModuleLoadLines(w, modules);
+    try w.print("    if [ -f \"$__zenv_stamp\" ]; then echo \"INFO: zenv module cache unusable (system/version mismatch); ran 'module load'. Re-run 'zenv setup' on this system to refresh.\" >&2; fi\n", .{});
+    try w.print("  fi\n", .{});
+    try w.print("  unset __zenv_cache __zenv_stamp __zenv_use_cache __zenv_cv __zenv_cs __zenv_cu __zenv_cur\n", .{});
+    try w.print("fi\n", .{});
+
+    return buf.toOwnedSlice();
 }
 
 // Helper function to copy hook scripts to the environment's scripts directory
@@ -265,4 +333,66 @@ fn copyHookScript(
 
     output.print(allocator, "Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
     return dest_path;
+}
+
+fn expectContains(haystack: []const u8, needle: []const u8) !void {
+    std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null) catch |err| {
+        std.debug.print("expected to find:\n  {s}\nin:\n{s}\n", .{ needle, haystack });
+        return err;
+    };
+}
+
+fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) == null);
+}
+
+test "buildModuleSection: no modules keeps historical purge, no cache machinery" {
+    const a = std.testing.allocator;
+    const out = try buildModuleSection(a, &[_][]const u8{}, true, "/venv/e");
+    defer a.free(out);
+    try expectContains(out, "No modules specified");
+    try expectContains(out, "module --force purge"); // historical behavior preserved
+    try expectNotContains(out, "__zenv_cache"); // but no cache when there are no modules
+    try expectNotContains(out, "safe_module_load");
+}
+
+test "buildModuleSection: modules without cache uses plain purge+load" {
+    const a = std.testing.allocator;
+    const mods = [_][]const u8{ "gcc", "cuda" };
+    const out = try buildModuleSection(a, &mods, false, "/venv/e");
+    defer a.free(out);
+    try expectContains(out, "if command -v module");
+    try expectContains(out, "module --force purge");
+    try expectContains(out, "safe_module_load 'gcc' || handle_module_error 'gcc'");
+    try expectContains(out, "safe_module_load 'cuda' || handle_module_error 'cuda'");
+    try expectNotContains(out, "__zenv_cache"); // no caching machinery
+}
+
+test "buildModuleSection: cache-aware replays when fresh, falls back otherwise" {
+    const a = std.testing.allocator;
+    const mods = [_][]const u8{"gcc"};
+    const out = try buildModuleSection(a, &mods, true, "/venv/e");
+    defer a.free(out);
+    // Baked absolute cache paths.
+    try expectContains(out, "__zenv_cache='/venv/e/.zenv_module_cache.sh'");
+    try expectContains(out, "__zenv_stamp='/venv/e/.zenv_module_cache.stamp'");
+    // Freshness gate: version + per-cluster system + untrusted.
+    try expectContains(out, "${SYSTEMNAME:-$(hostname 2>/dev/null)}");
+    try expectContains(out, "[ \"$__zenv_cv\" = \"1\" ]");
+    try expectContains(out, "$__zenv_cu\" != \"1\"");
+    // Fast path sources the cache.
+    try expectContains(out, ". \"$__zenv_cache\"");
+    // Fallback still runs the real load + hint.
+    try expectContains(out, "module --force purge");
+    try expectContains(out, "safe_module_load 'gcc' || handle_module_error 'gcc'");
+    try expectContains(out, "Re-run 'zenv setup'");
+}
+
+test "buildModuleSection: venv path with a single quote is escaped" {
+    const a = std.testing.allocator;
+    const mods = [_][]const u8{"gcc"};
+    const out = try buildModuleSection(a, &mods, true, "/ve'nv/e");
+    defer a.free(out);
+    // The embedded quote must be closed/escaped/reopened, not left raw.
+    try expectContains(out, "__zenv_cache='/ve'\\''nv/e/.zenv_module_cache.sh'");
 }

@@ -439,6 +439,20 @@ fn validateEnvironment(
         }
     }
 
+    // module_cache: optional boolean
+    if (value.object.get("module_cache")) |module_cache| {
+        if (module_cache != .bool and module_cache != .null) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "In environment '{s}', 'module_cache' must be a boolean or null",
+                    .{env_name},
+                ),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.module_cache", .{path}),
+            });
+        }
+    }
+
     // Whitelist approach: only allow specific fields in environment configuration
     const allowed_fields = [_][]const u8{
         "target_machines",
@@ -450,6 +464,7 @@ fn validateEnvironment(
         "fallback_python",
         "setup",
         "activate",
+        "module_cache",
     };
 
     // Check each field in the environment config
@@ -734,6 +749,29 @@ test "validateJsonContent: wrong-typed field gives exact path and line (repeat-p
     // Must point at line 4 (the "bad" env), not the identical ["*"] on line 3
     // that the old indexOf search would have matched.
     try testing.expectEqual(@as(usize, 4), e.line);
+}
+
+test "validateJsonContent: module_cache must be boolean" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "zenv",
+        \\  "good": { "target_machines": ["*"], "module_cache": false },
+        \\  "bad": { "target_machines": ["*"], "module_cache": "yes" }
+        \\}
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expectEqual(@as(usize, 1), errs.items.len);
+    try testing.expectEqualStrings("bad.module_cache", errs.items[0].field_path.?);
+}
+
+test "validateJsonContent: module_cache true/absent is valid" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "zenv", "e1": { "target_machines": ["*"], "module_cache": true } }
+    ;
+    try testing.expect((try validateJsonContent(a, content)) == null);
 }
 
 test "validateJsonContent: missing required base_dir is reported" {

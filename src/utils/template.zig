@@ -4,6 +4,15 @@ const fs = std.fs;
 const errors = @import("errors.zig");
 const output = @import("output.zig");
 
+/// On-disk format version of the module-environment cache. Written into the
+/// stamp at setup and checked at activation; bump this when the capture/replay
+/// format changes so existing caches are invalidated (fall back to `module load`).
+pub const MODULE_CACHE_VERSION: u32 = 1;
+
+/// Basenames of the cache artifacts written into the venv directory.
+pub const MODULE_CACHE_FILE = ".zenv_module_cache.sh";
+pub const MODULE_CACHE_STAMP = ".zenv_module_cache.stamp";
+
 /// Escapes a shell value by handling special characters, particularly single quotes.
 /// This ensures the value can be safely used in shell script strings.
 ///

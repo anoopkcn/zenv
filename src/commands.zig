@@ -11,6 +11,7 @@ const configurations = @import("utils/config.zig");
 const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
 const runtime = @import("utils/runtime.zig");
+const template = @import("utils/template.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
@@ -1413,6 +1414,15 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
         output.printError(allocator, "Failed to update scripts directory: {s}", .{@errorName(err)}) catch {};
         return err;
     };
+
+    // The module cache embeds absolute paths captured at setup; rather than
+    // rewrite them, drop it. Next activate falls back to `module load` and the
+    // next `zenv setup` regenerates a correct cache.
+    for ([_][]const u8{ template.MODULE_CACHE_FILE, template.MODULE_CACHE_STAMP }) |name| {
+        const cache_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, name });
+        defer allocator.free(cache_path);
+        runtime.deleteFile(cache_path) catch {}; // best-effort; missing is fine
+    }
 }
 
 fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {

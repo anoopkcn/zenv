@@ -62,6 +62,81 @@ safe_module_load() {
   return 0
 }
 
+# Compute the environment delta produced by `module load` (base snapshot vs
+# loaded snapshot, both from plain `env`) and write a POSIX replay file that
+# activate.sh can source instead of re-running Lmod. Path-list variables are
+# emitted as prepends so the live login environment is preserved; everything
+# else is emitted as an absolute export. Exported shell functions (BASH_FUNC_*)
+# are skipped. Any other unexpected (non-identifier) entry marks the cache
+# "untrusted" so activation falls back to a real `module load`.
+zenv_write_module_cache() {
+  local base="$1" loaded="$2" out="$3" stamp="$4" version="$5"
+  local tmp_out="${out}.tmp.$$" tmp_flag="${stamp}.flag.$$" untrusted=0
+  : > "$tmp_flag"
+
+  awk -v flagfile="$tmp_flag" '
+    function is_pathvar(n){ return (n=="PATH"||n=="LD_LIBRARY_PATH"||n=="LIBRARY_PATH"||n=="CPATH"||n=="MANPATH"||n=="PKG_CONFIG_PATH") }
+    function is_volatile(n){ return (n=="_"||n=="SHLVL"||n=="PWD"||n=="OLDPWD"||n=="PS1"||n=="PPID"||n=="BASHPID"||n=="RANDOM"||n=="SECONDS"||n=="LINENO"||n=="COLUMNS"||n=="LINES") }
+    function shq(s){ gsub(/\047/, "\047\\\047\047", s); return "\047" s "\047" }
+    function nm(line,  i){ i=index(line,"="); return substr(line,1,i-1) }
+    function vl(line,  i){ i=index(line,"="); return substr(line,i+1) }
+    FNR==NR {
+      if ($0 ~ /^BASH_FUNC_/) { bskip=1; next }
+      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { bskip=0; b[nm($0)]=vl($0) }
+      next
+    }
+    {
+      if ($0 ~ /^BASH_FUNC_/) { skip=1; next }
+      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+        skip=0
+        n=nm($0); v=vl($0)
+        if (is_volatile(n)) next
+        if ((n in b) && b[n]==v) next
+        if (is_pathvar(n)) {
+          base=(n in b)? b[n] : ""
+          added=v
+          if (base!="") {
+            suffix=":" base
+            if (length(v) > length(suffix) && substr(v, length(v)-length(suffix)+1)==suffix)
+              added=substr(v, 1, length(v)-length(suffix))
+            else if (v==base) next
+          }
+          if (added=="") next
+          printf "%s=%s\"${%s:+:${%s}}\"\nexport %s\n", n, shq(added), n, n, n
+        } else {
+          printf "export %s=%s\n", n, shq(v)
+        }
+      } else {
+        if (skip) next
+        untrusted=1
+      }
+    }
+    END { if (untrusted) print "1" > flagfile }
+  ' "$base" "$loaded" > "$tmp_out" || {
+    warn "Failed to compute module environment delta; skipping cache."
+    rm -f "$tmp_out" "$tmp_flag"
+    return 1
+  }
+
+  if [ -s "$tmp_flag" ]; then untrusted=1; fi
+  rm -f "$tmp_flag"
+
+  mv "$tmp_out" "$out" || { warn "Failed to write module cache file."; rm -f "$tmp_out"; return 1; }
+
+  {
+    printf 'version=%s\n' "$version"
+    printf 'system=%s\n' "${SYSTEMNAME:-$(hostname 2>/dev/null)}"
+    printf 'untrusted=%s\n' "$untrusted"
+  } > "$stamp"
+
+  if [ "$untrusted" = "1" ]; then
+    info "Module cache written but marked untrusted; activation will fall back to 'module load'."
+  else
+    success "Module environment cache written: $out"
+  fi
+  return 0
+}
+
 @@USE_DEFAULT_PYTHON_VALUE@@
 if [ "$USE_DEFAULT_PYTHON" = "true" ]; then
   ohai "Python flag (--python) detected"
@@ -90,13 +165,29 @@ if [ "$NO_CACHE" = "true" ]; then
   ohai "--no-cache flag detected. Will disable package cache during installation."
 fi
 
+@@MODULE_CACHE_ENABLED_VALUE@@
+if [ "$MODULE_CACHE_ENABLED" = "true" ]; then
+  ohai "Module environment caching enabled; activation will replay captured module env."
+fi
+
 if command -v module >/dev/null 2>&1; then
   ohai "Purging all modules"
   module --force purge
 
+  # Snapshot the clean (post-purge) environment so we can later capture exactly
+  # what `module load` adds. Only when module caching is enabled.
+  ZENV_CACHE_BASE=""
+  if [ "$MODULE_CACHE_ENABLED" = "true" ]; then
+    ZENV_CACHE_BASE=$(mktemp 2>/dev/null) || ZENV_CACHE_BASE=""
+    if [ -n "$ZENV_CACHE_BASE" ]; then
+      env > "$ZENV_CACHE_BASE" 2>/dev/null || { warn "Could not snapshot base environment; module cache disabled for this run."; rm -f "$ZENV_CACHE_BASE"; ZENV_CACHE_BASE=""; }
+    fi
+  fi
+
   set +e  # Don't exit on module load errors
 
   ohai "Beginning module loading process"
+  ZENV_MOD_OK=1
   if [ "$MODULES_VERIFIED" = "true" ]; then
     info "Modules were pre-verified, proceeding with loading"
     @@MODULE_LOADING_BLOCK@@
@@ -105,6 +196,23 @@ if command -v module >/dev/null 2>&1; then
   fi
 
   set -e
+
+  # Capture the module-produced environment delta into the activation cache.
+  if [ "$MODULE_CACHE_ENABLED" = "true" ] && [ -n "$ZENV_CACHE_BASE" ]; then
+    if [ "$ZENV_MOD_OK" = "1" ]; then
+      ZENV_CACHE_LOADED=$(mktemp 2>/dev/null) || ZENV_CACHE_LOADED=""
+      if [ -n "$ZENV_CACHE_LOADED" ] && env > "$ZENV_CACHE_LOADED" 2>/dev/null; then
+        zenv_write_module_cache "$ZENV_CACHE_BASE" "$ZENV_CACHE_LOADED" "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@CACHE_VERSION@@" || true
+      else
+        warn "Could not snapshot loaded environment; skipping module cache."
+      fi
+      [ -n "$ZENV_CACHE_LOADED" ] && rm -f "$ZENV_CACHE_LOADED"
+    else
+      warn "One or more modules failed to load; not writing module cache."
+      rm -f "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@"
+    fi
+    rm -f "$ZENV_CACHE_BASE"
+  fi
 
   MODULE_PYTHON=""
   if command -v python3 >/dev/null 2>&1; then

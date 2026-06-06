@@ -71,6 +71,10 @@ pub const EnvironmentConfig = struct {
     fallback_python: ?[]const u8 = null,
     setup: ?ScriptConfig = null,
     activate: ?ScriptConfig = null,
+    // When true (default), setup snapshots the environment that `module load`
+    // produces and activate replays it instead of re-running Lmod. Only has an
+    // effect when `modules` is non-empty.
+    module_cache: bool = true,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
@@ -83,6 +87,7 @@ pub const EnvironmentConfig = struct {
             .fallback_python = null,
             .setup = null,
             .activate = null,
+            .module_cache = true,
         };
     }
 
@@ -161,6 +166,13 @@ pub const ZenvConfig = struct {
 // =======================
 
 const Parse = struct {
+    fn getBool(value: json.Value, default: bool) bool {
+        return switch (value) {
+            .bool => |b| b,
+            else => default,
+        };
+    }
+
     fn getString(allocator: Allocator, value: json.Value, default: ?[]const u8) !?[]const u8 {
         return switch (value) {
             .string => |str| try allocator.dupe(u8, str),
@@ -287,6 +299,8 @@ pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
         env.modules_file = try Parse.getString(allocator, env_value.object.get("modules_file") orelse json.Value{ .null = {} }, null);
 
         env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
+
+        env.module_cache = Parse.getBool(env_value.object.get("module_cache") orelse json.Value{ .null = {} }, true);
 
         // Parse setup and activate script configs
         if (env_value.object.get("setup")) |setup_value| {
@@ -846,4 +860,13 @@ test "registry lookup by name, alias, and id prefix" {
     try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
     try testing.expect(reg.removeAlias("me"));
     try testing.expect(reg.resolveAlias("me") == null);
+}
+
+test "Parse.getBool reads booleans and falls back on non-bool" {
+    try testing.expectEqual(true, Parse.getBool(json.Value{ .bool = true }, false));
+    try testing.expectEqual(false, Parse.getBool(json.Value{ .bool = false }, true));
+    // Missing / null / wrong-typed values fall back to the default.
+    try testing.expectEqual(true, Parse.getBool(json.Value{ .null = {} }, true));
+    try testing.expectEqual(false, Parse.getBool(json.Value{ .null = {} }, false));
+    try testing.expectEqual(true, Parse.getBool(json.Value{ .string = "yes" }, true));
 }

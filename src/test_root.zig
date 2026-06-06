@@ -6,5 +6,6 @@ test {
     _ = @import("utils/parse_deps.zig");
     _ = @import("utils/template.zig");
     _ = @import("utils/config.zig");
+    _ = @import("utils/template_activate.zig");
     _ = @import("commands.zig");
 }

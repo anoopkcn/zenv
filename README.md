@@ -219,6 +219,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "description": "<optional description OR null>",
     "modules": ["<module1>", "<module2>"],
     "modules_file": "<path to modules file OR null>"
+    "module_cache": true,
     "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
     "dependencies": ["<package name with or without version>"],
     "setup": {
@@ -243,6 +244,18 @@ In the configuration `target_machines` is required key(If you want, you can disa
 For custom scripts, you can use `activate_hook` and `setup_hook` to specify paths to shell scripts that will be copied to the environment's directory and executed during activation or setup. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
 The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
+
+### Module caching
+
+On HPC systems, `module load` (Lmod) can be slow, and the generated `activate.sh` runs it on every activation. With `"module_cache": true` (the default), `zenv setup` captures the environment that `module load` produces and writes it to the environment directory (`.zenv_module_cache.sh` + `.zenv_module_cache.stamp`). Subsequent activations replay that captured environment instead of invoking Lmod, which is significantly faster.
+
+The cache is used only when it is trustworthy; otherwise activation transparently falls back to a real `module --force purge` + `module load`:
+
+- It is keyed to the **cluster** via `$SYSTEMNAME` (falling back to `hostname`), so it is reused across all nodes of a system but never replayed on a different one.
+- Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as *prepends*, so your live login environment is preserved.
+- If any module fails to load during setup, no cache is written.
+
+The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance (or you edit `modules` in `zenv.json`), re-run `zenv setup` to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
 
 ## Help
 
