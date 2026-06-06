@@ -396,7 +396,7 @@ pub fn getAndValidateEnvironment(
 
     // If modules_file is specified, read modules from the file
     if (env_config.modules_file) |modules_file_path| {
-        output.print(allocator, "Modules file specified: {s}", .{modules_file_path}) catch {};
+        errors.debugLog(allocator, "Modules file specified: {s}", .{modules_file_path});
 
         // Check if the file exists
         runtime.access(modules_file_path) catch |err| {
@@ -445,7 +445,7 @@ pub fn getAndValidateEnvironment(
 
         // Debug: Print actual loaded modules to verify content
         for (mutable_env_config.modules.items, 0..) |module, i| {
-            output.print(allocator, "Module #{d} loaded: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
+            errors.debugLog(allocator, "Module #{d} loaded: '{s}' (len={d})", .{ i + 1, module, module.len });
         }
     }
 
@@ -850,10 +850,10 @@ pub fn readModulesFromFile(
     const file_content = try runtime.readFileAlloc(allocator, file_path, 1024 * 1024);
     defer allocator.free(file_content);
 
-    output.print(allocator, "Reading modules from file: {s}", .{file_path}) catch {};
+    errors.debugLog(allocator, "Reading modules from file: {s}", .{file_path});
 
-    // Debug the file content with hex representation for all bytes
-    if (file_content.len > 0) {
+    // Debug the file content with hex representation for all bytes (debug only)
+    if (errors.isDebugEnabled(allocator) and file_content.len > 0) {
         const debug_len = @min(file_content.len, 100);
         var hex_buf = std.array_list.Managed(u8).init(allocator);
         defer hex_buf.deinit();
@@ -861,14 +861,14 @@ pub fn readModulesFromFile(
         for (file_content[0..debug_len]) |byte| {
             hex_buf.print("{X:0>2} ", .{byte}) catch {};
         }
-        output.print(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items}) catch {};
+        errors.debugLog(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items});
     }
 
     // Skip BOM if present
     var content_to_process = file_content;
     if (file_content.len >= 3 and file_content[0] == 0xEF and file_content[1] == 0xBB and file_content[2] == 0xBF) {
         content_to_process = file_content[3..];
-        output.print(allocator, "UTF-8 BOM detected and skipped", .{}) catch {};
+        errors.debugLog(allocator, "UTF-8 BOM detected and skipped", .{});
     }
 
     // Create a hashmap to ensure uniqueness and avoid duplicates
@@ -911,7 +911,7 @@ pub fn readModulesFromFile(
         // Process this line as a single module name without tokenizing
         if (trimmed.len > 0) {
             // Debug output for every line
-            output.print(allocator, "Line {d}: '{s}' (len={d})", .{ line_number, trimmed, trimmed.len }) catch {};
+            errors.debugLog(allocator, "Line {d}: '{s}' (len={d})", .{ line_number, trimmed, trimmed.len });
 
             // Create a fresh copy of the module name
             const module_name = try allocator.dupe(u8, trimmed);
@@ -937,7 +937,7 @@ pub fn readModulesFromFile(
 
                 // Add module to the list
                 try modules_list.append(module_name);
-                output.print(allocator, "  - Found module: '{s}'", .{module_name}) catch {};
+                errors.debugLog(allocator, "  - Found module: '{s}'", .{module_name});
             } else {
                 // Free the duplicate since we already have this module
                 allocator.free(module_name);
@@ -955,7 +955,7 @@ pub fn readModulesFromFile(
 
         // Additional debug: print the module list again to confirm what we're returning
         for (modules_list.items, 0..) |module, i| {
-            output.print(allocator, "Module #{d}: '{s}' (len={d})", .{ i + 1, module, module.len }) catch {};
+            errors.debugLog(allocator, "Module #{d}: '{s}' (len={d})", .{ i + 1, module, module.len });
         }
     }
     return modules_list;
@@ -1028,13 +1028,13 @@ pub fn validateModules(
         return true;
     }
 
-    output.print(allocator, "Module validation has been disabled. Assuming all {d} modules are available.", .{modules.len}) catch {};
+    errors.debugLog(allocator, "Module validation has been disabled. Assuming all {d} modules are available.", .{modules.len});
 
     // Log the modules being loaded from file for debugging purposes
     if (env_config.modules_file != null) {
-        output.print(allocator, "Modules loaded from file: {s}", .{env_config.modules_file.?}) catch {};
+        errors.debugLog(allocator, "Modules loaded from file: {s}", .{env_config.modules_file.?});
         for (modules) |module| {
-            output.print(allocator, "  - {s}", .{module}) catch {};
+            errors.debugLog(allocator, "  - {s}", .{module});
         }
     }
 

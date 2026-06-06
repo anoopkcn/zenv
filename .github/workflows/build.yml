@@ -21,9 +21,11 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Check formatting
+        run: zig fmt --check .
+
       - name: Build
         run: zig build
 
-      # Add test step when you have tests
-      # - name: Run tests
-      #   run: zig build test
+      - name: Run tests
+        run: zig build test

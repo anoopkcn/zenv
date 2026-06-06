@@ -95,7 +95,9 @@ pub fn isDebugEnabled(allocator: Allocator) bool {
 ///   - message: Format string for the debug message
 ///   - args: Arguments for the format string
 pub fn debugLog(allocator: Allocator, comptime message: []const u8, args: anytype) void {
-    if (isDebugEnabled(allocator)) {
-        std.log.debug(message, args);
-    }
+    if (!isDebugEnabled(allocator)) return;
+    // Write directly to stderr (gated on ZENV_DEBUG) rather than via std.log,
+    // whose debug level is compiled out in release builds. This keeps ZENV_DEBUG
+    // functional in the shipped (ReleaseSmall/ReleaseFast) binaries.
+    output.rawErr(allocator, "DEBUG: " ++ message ++ "\n", args) catch {};
 }

@@ -409,15 +409,13 @@ pub fn handleListCommand(
 
     if (use_hostname_filter) {
         // Get hostname directly using the utility function
-        current_hostname = env.getSystemHostname(allocator) catch |err| {
+        current_hostname = env.getSystemHostname(allocator) catch |err| blk: {
             output.print(allocator,
                 \\Could not determine current hostname for filtering: {s}
+                \\Listing all registered environments instead.
             , .{@errorName(err)}) catch {};
             use_hostname_filter = false;
-            current_hostname = null;
-            hostname_allocd = false; // Ensure flag is false if hostname fetch failed
-            // Explicitly return void to match the catch expression type
-            return void{};
+            break :blk null; // fall through and list everything
         };
         // This part only runs if the catch block wasn't executed
         if (current_hostname != null) {
