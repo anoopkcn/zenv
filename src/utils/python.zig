@@ -8,13 +8,6 @@ const runtime = @import("runtime.zig");
 // Define Python versions we know work well
 pub const DEFAULT_PYTHON_VERSION = "3.10.8";
 
-// Command result structure to hold subprocess output
-const CommandResult = struct {
-    success: bool,
-    stdout: []const u8,
-    stderr: []const u8,
-};
-
 // Default installation dir is in the zenv dir/python
 pub fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
     return paths.getPythonInstallDir(allocator);
@@ -207,40 +200,17 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
     return source_dir;
 }
 
-// Helper function to run a command and capture its output
-fn runCapturedCommand(args: []const []const u8, cwd: []const u8, allocator: Allocator) !CommandResult {
-    const result = try std.process.run(allocator, runtime.io, .{
+// Run a command with its output streamed straight to the user's terminal.
+// Returns true on a clean (status 0) exit.
+fn runStreamedCommand(args: []const []const u8, cwd: []const u8) !bool {
+    var child = try std.process.spawn(runtime.io, .{
         .argv = args,
         .cwd = .{ .path = cwd },
-        .stdout_limit = .limited(10 * 1024 * 1024),
-        .stderr_limit = .limited(1024 * 1024),
+        .stdout = .inherit,
+        .stderr = .inherit,
     });
-
-    return CommandResult{
-        .success = result.term == .exited and result.term.exited == 0,
-        .stdout = result.stdout,
-        .stderr = result.stderr,
-    };
-}
-
-// Display a progress bar for installation
-fn showInstallProgress(stage: []const u8, percent: usize) !void {
-    var buf: [256]u8 = undefined;
-    var fw = std.Io.File.stdout().writerStreaming(runtime.io, &buf);
-    const stdout = &fw.interface;
-
-    // Create progress bar
-    var progress_bar: [30]u8 = undefined;
-    const filled = progress_bar.len * percent / 100;
-
-    for (0..progress_bar.len) |i| {
-        progress_bar[i] = if (i < filled) '=' else ' ';
-    }
-
-    // Clear line and show progress
-    try stdout.writeAll("\r\x1b[K"); // ANSI escape code to clear line
-    try stdout.print("[{s}{s}] {d}% - {s}", .{ progress_bar[0..filled], progress_bar[filled..], percent, stage });
-    try stdout.flush();
+    const term = try child.wait(runtime.io);
+    return term == .exited and term.exited == 0;
 }
 
 // Configure and build Python
@@ -262,8 +232,8 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 
     const install_start = runtime.nowMillis();
 
-    // Run configure (typically 15% of total installation time)
-    try showInstallProgress("Configuring Python...", 5);
+    // Run configure
+    output.print(allocator, "Configuring Python (./configure)...", .{}) catch {};
 
     var config_args = [_][]const u8{
         "./configure",
@@ -274,19 +244,10 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         "--with-ensurepip=install",
     };
 
-    const configure_result = try runCapturedCommand(&config_args, source_dir, allocator);
-    defer allocator.free(configure_result.stdout);
-    defer allocator.free(configure_result.stderr);
-
-    if (!configure_result.success) {
-        // Show error output on failure
-        try output.rawOut(allocator, "\n", .{});
-        output.printError(allocator, "Configuration failed. Error output:", .{}) catch {};
-        output.rawErr(allocator, "{s}\n", .{configure_result.stderr}) catch {};
+    if (!try runStreamedCommand(&config_args, source_dir)) {
+        output.printError(allocator, "Configuration failed (see output above)", .{}) catch {};
         return error.ConfigureFailed;
     }
-
-    try showInstallProgress("Configuration complete", 15);
 
     // Determine the number of CPU cores for the parallel build, leaving one
     // core free to keep the system responsive (fall back to 1 on failure).
@@ -297,44 +258,25 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
     const cpu_count = try std.fmt.allocPrint(allocator, "{d}", .{cores_to_use});
     defer allocator.free(cpu_count);
 
-    // Run make (typically 70% of installation time)
-    try showInstallProgress("Building Python...", 20);
+    // Run make
+    output.print(allocator, "Building Python (make -j {s})...", .{cpu_count}) catch {};
 
     var make_args = [_][]const u8{ "make", "-j", cpu_count };
 
-    const make_result = try runCapturedCommand(&make_args, source_dir, allocator);
-    defer allocator.free(make_result.stdout);
-    defer allocator.free(make_result.stderr);
-
-    if (!make_result.success) {
-        try output.rawOut(allocator, "\n", .{});
-        output.printError(allocator, "Build failed. Error output:", .{}) catch {};
-        output.rawErr(allocator, "{s}\n", .{make_result.stderr}) catch {};
+    if (!try runStreamedCommand(&make_args, source_dir)) {
+        output.printError(allocator, "Build failed (see output above)", .{}) catch {};
         return error.BuildFailed;
     }
 
-    try showInstallProgress("Build complete", 85);
-
-    // Run make install (typically 15% of installation time)
-    try showInstallProgress("Installing Python...", 85);
+    // Run make install
+    output.print(allocator, "Installing Python (make install)...", .{}) catch {};
 
     var install_args = [_][]const u8{ "make", "install" };
 
-    const install_result = try runCapturedCommand(&install_args, source_dir, allocator);
-    defer allocator.free(install_result.stdout);
-    defer allocator.free(install_result.stderr);
-
-    if (!install_result.success) {
-        try output.rawOut(allocator, "\n", .{});
-        output.printError(allocator, "Installation failed. Error output:", .{}) catch {};
-        output.rawErr(allocator, "{s}\n", .{install_result.stderr}) catch {};
+    if (!try runStreamedCommand(&install_args, source_dir)) {
+        output.printError(allocator, "Installation failed (see output above)", .{}) catch {};
         return error.InstallFailed;
     }
-
-    try showInstallProgress("Installation complete", 100);
-
-    // Print newline after progress bar
-    try output.rawOut(allocator, "\n", .{});
 
     // Calculate total installation time
     const elapsed_ms = runtime.nowMillis() - install_start;
