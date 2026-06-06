@@ -800,21 +800,16 @@ pub fn handleRunCommand(
     };
     defer allocator.free(activate_path);
 
-    // Create temporary script
-    const temp_script_path = createTempRunScript(allocator, activate_path, command, command_args) catch |err| {
-        output.printError(allocator, "Failed to create temporary run script: {s}", .{@errorName(err)}) catch {};
+    // Build the argv that runs the command inside the activated environment
+    // without any temp file (see `buildRunArgv`).
+    const argv = buildRunArgv(allocator, activate_path, command, command_args) catch |err| {
+        output.printError(allocator, "Failed to build command: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    defer {
-        runtime.deleteFile(temp_script_path) catch |err| {
-            output.print(allocator, "Warning: Failed to delete temporary script: {s}", .{@errorName(err)}) catch {};
-        };
-        allocator.free(temp_script_path);
-    }
+    defer allocator.free(argv);
 
-    // Execute the script
     var child = std.process.spawn(runtime.io, .{
-        .argv = &[_][]const u8{ "/bin/bash", temp_script_path },
+        .argv = argv,
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -828,67 +823,76 @@ pub fn handleRunCommand(
         return err;
     };
 
-    // Check if the command was successful
-    const success = blk: {
-        if (term != .exited) break :blk false;
-        if (term.exited != 0) break :blk false;
-        break :blk true;
-    };
-
-    if (!success) {
-        if (term == .exited) {
-            output.printError(allocator, "Command exited with status: {d}", .{term.exited}) catch {};
-        } else {
-            output.printError(allocator, "Command terminated abnormally", .{}) catch {};
-        }
-        return error.ProcessError;
+    // Propagate the child's exit status as zenv's own, so callers (CI, scripts)
+    // see the real result instead of a flattened 0/1. A signalled child maps to
+    // the conventional 128 + signo.
+    switch (term) {
+        .exited => |code| std.process.exit(code),
+        .signal, .stopped => |sig| {
+            const signo: u8 = @truncate(@intFromEnum(sig));
+            output.printError(allocator, "Command terminated by signal {d}", .{signo}) catch {};
+            std.process.exit(128 +| signo);
+        },
+        .unknown => |status| {
+            output.printError(allocator, "Command terminated abnormally (status {d})", .{status}) catch {};
+            std.process.exit(1);
+        },
     }
 }
 
-// Helper function to create a temporary script that activates an environment and runs a command
-fn createTempRunScript(
+/// Shell snippet passed to `bash -c`. It sources the activation script (passed
+/// as the first positional parameter `$1`), drops it from the positionals, then
+/// `exec`s the user command (`$@`) so the command replaces the shell. Sourcing
+/// honors `module load` and any activate hooks; `exec` makes the command's exit
+/// status and signal disposition propagate directly back to zenv.
+const run_runner = "set -e; source \"$1\"; shift; exec \"$@\"";
+
+/// Builds the argv for `zenv run`: the user command and its arguments are passed
+/// to `bash -c` as positional parameters, never interpolated into a script. Because
+/// bash receives them as distinct argv entries it never re-parses them, so there is
+/// no quoting/escaping or command-injection surface (e.g. a backtick or `$VAR` in an
+/// argument stays literal). Caller owns the returned slice (free with `allocator.free`);
+/// the element strings are borrowed from the inputs and must outlive it.
+fn buildRunArgv(
     allocator: Allocator,
     activate_path: []const u8,
     command: []const u8,
-    args: []const []const u8,
-) ![]const u8 {
-    // Create temporary file with unique name
-    var temp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const temp_path = try std.fmt.bufPrint(&temp_path_buf, "/tmp/zenv_run_{d}.sh", .{runtime.nowMillis()});
-    const temp_path_owned = try allocator.dupe(u8, temp_path);
-    errdefer allocator.free(temp_path_owned);
+    command_args: []const []const u8,
+) ![]const []const u8 {
+    var argv = std.array_list.Managed([]const u8).init(allocator);
+    errdefer argv.deinit();
+    // `zenv` becomes $0 (used only in any bash error message); activate_path is $1.
+    try argv.appendSlice(&[_][]const u8{ "/bin/bash", "-c", run_runner, "zenv", activate_path, command });
+    try argv.appendSlice(command_args);
+    return argv.toOwnedSlice();
+}
 
-    var file = try runtime.createFile(temp_path_owned, .{ .permissions = .fromMode(0o755) });
-    defer file.close(runtime.io);
+test "buildRunArgv passes command and args through verbatim" {
+    const allocator = std.testing.allocator;
+    // An argument crafted to trigger shell expansion if it were ever re-parsed.
+    const nasty = "`whoami`$HOME \"q\" ; rm -rf /";
+    const args = [_][]const u8{ "pip", "install", nasty };
+    const argv = try buildRunArgv(allocator, "/envs/foo/activate.sh", "uv", &args);
+    defer allocator.free(argv);
 
-    var wbuf: [4096]u8 = undefined;
-    var fw = file.writer(runtime.io, &wbuf);
-    const writer = &fw.interface;
+    const expected = [_][]const u8{
+        "/bin/bash", "-c", run_runner, "zenv",
+        "/envs/foo/activate.sh", // $1: sourced
+        "uv", // the command
+        "pip", "install", nasty, // args, untouched
+    };
+    try std.testing.expectEqual(expected.len, argv.len);
+    for (expected, argv) |e, a| try std.testing.expectEqualStrings(e, a);
+}
 
-    // Write script content
-    try writer.writeAll("#!/bin/bash\nset -e\n\n");
-    try writer.print("source \"{s}\"\n\n", .{activate_path});
+test "buildRunArgv handles a command with no extra args" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{};
+    const argv = try buildRunArgv(allocator, "/a.sh", "python", &args);
+    defer allocator.free(argv);
 
-    // Add command with arguments, properly escaped
-    try writer.print("{s}", .{command});
-    for (args) |arg| {
-        // Escape quotes in arguments
-        var escaped_arg = std.array_list.Managed(u8).init(allocator);
-        defer escaped_arg.deinit();
-
-        for (arg) |char| {
-            if (char == '"' or char == '\\' or char == '$') {
-                try escaped_arg.append('\\');
-            }
-            try escaped_arg.append(char);
-        }
-
-        try writer.print(" \"{s}\"", .{escaped_arg.items});
-    }
-    try writer.writeAll("\n");
-    try writer.flush();
-
-    return temp_path_owned;
+    try std.testing.expectEqual(@as(usize, 6), argv.len);
+    try std.testing.expectEqualStrings("python", argv[5]);
 }
 
 pub fn handleLogCommand(
