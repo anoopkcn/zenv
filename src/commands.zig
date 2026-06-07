@@ -372,6 +372,23 @@ pub fn handleSetupCommand(
     , .{ env_name, env_name }) catch {};
 }
 
+/// Renders a resolution failure at the call site — preserving the ambiguous
+/// candidate list — and returns the error for main.zig to map to an exit
+/// message. Mirrors the messages the deleted lookupRegistryEntry printed.
+fn present(allocator: Allocator, registry: *const EnvironmentRegistry, identifier: []const u8, err: anyerror) anyerror {
+    if (err == error.AmbiguousIdentifier) {
+        const names = registry.candidates(allocator, identifier) catch return err;
+        defer allocator.free(names);
+        output.rawErr(allocator, "ERROR: Ambiguous identifier '{s}' matches multiple environments:\n", .{identifier}) catch {};
+        for (names) |n| output.rawErr(allocator, "  - {s}\n", .{n}) catch {};
+        output.rawErr(allocator, "Please use more characters to make the identifier unique.\n", .{}) catch {};
+    } else if (err == error.EnvironmentNotRegistered) {
+        output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
+        output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
+    }
+    return err;
+}
+
 pub fn handleActivateCommand(
     allocator: Allocator,
     registry: *const EnvironmentRegistry,
@@ -382,12 +399,9 @@ pub fn handleActivateCommand(
         return error.EnvironmentNotFound;
     }
 
-    const identifier = args[2];
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
 
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
-    const venv_path = entry.venv_path;
-
-    output.rawOut(allocator, "{s}/activate.sh\n", .{venv_path}) catch |e| {
+    output.rawOut(allocator, "{s}/activate.sh\n", .{registry.get(ref).venv_path}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -625,33 +639,17 @@ pub fn handleDeregisterCommand(
         return error.EnvironmentNotFound;
     }
 
-    const identifier = args[2];
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
 
-    // Look up environment in registry first to check if it exists
-    // We use lookupRegistryEntry utility which handles error reporting for ambiguous IDs
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
-
-    // Store name for the success message - make a copy to ensure it remains valid
-    const env_name = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        output.printError(allocator, "Failed to duplicate environment name: {s}", .{@errorName(err)}) catch {};
+    // Resolve once, then remove by handle. deregister returns the owned, detached
+    // entry (and persists), so the success message reads a valid name post-removal.
+    var removed = registry.deregister(ref) catch |err| {
+        output.printError(allocator, "Failed to unregister environment: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    defer registry.allocator.free(env_name);
+    defer removed.deinit(allocator);
 
-    // Remove the environment from the registry using the name
-    // We pass the actual environment name from the resolved entry
-    if (registry.deregister(entry.env_name)) {
-        // Save the registry
-        registry.save() catch |err| {
-            output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-            return err;
-        };
-
-        output.print(allocator, "Environment '{s}' unregistered successfully.", .{env_name}) catch {};
-    } else {
-        output.printError(allocator, "Failed to unregister environment '{s}'.", .{env_name}) catch {};
-        return error.EnvironmentNotRegistered;
-    }
+    output.print(allocator, "Environment '{s}' unregistered successfully.", .{removed.env_name}) catch {};
 }
 
 pub fn handleCdCommand(
@@ -667,15 +665,10 @@ pub fn handleCdCommand(
         return error.EnvironmentNotFound;
     }
 
-    const identifier = args[2];
-
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
-
-    // Get project directory from registry entry
-    const project_dir = entry.project_dir;
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
 
     // Output just the project directory path
-    output.rawOut(allocator, "{s}\n", .{project_dir}) catch |e| {
+    output.rawOut(allocator, "{s}\n", .{registry.get(ref).project_dir}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -747,41 +740,27 @@ pub fn handleRmCommand(
         return error.EnvironmentNotFound;
     }
 
-    const identifier = args[2];
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
 
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
-
-    const env_name_to_remove = registry.allocator.dupe(u8, entry.env_name) catch |err| {
-        output.printError(allocator, "Failed to duplicate environment name for removal: {s}", .{@errorName(err)}) catch {};
+    // Owned, detached entry: no raw identifier reaches the mutator (the old
+    // ambiguity bug is unrepresentable), and venv_path is read AFTER removal.
+    var removed = registry.deregister(ref) catch |err| {
+        output.printError(allocator, "Failed to deregister environment: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    defer registry.allocator.free(env_name_to_remove);
+    defer removed.deinit(allocator);
 
-    const venv_path_to_remove = registry.allocator.dupe(u8, entry.venv_path) catch |err| {
-        output.printError(allocator, "Failed to duplicate venv path for removal: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-    defer registry.allocator.free(venv_path_to_remove);
+    output.print(allocator, "Environment '{s}' deregistered successfully.", .{removed.env_name}) catch {};
 
-    if (registry.deregister(identifier)) {
-        output.print(allocator, "Environment '{s}' deregistered successfully.", .{env_name_to_remove}) catch {};
-        registry.save() catch |err| {
-            output.printError(allocator, "Failed to save registry after deregistering '{s}': {s}", .{ env_name_to_remove, @errorName(err) }) catch {};
-        };
-    } else {
-        output.printError(allocator, "Failed to find environment '{s}' for deregistration.", .{identifier}) catch {};
-        return error.EnvironmentNotRegistered;
-    }
-
-    output.print(allocator, "Attempting to remove: {s}", .{venv_path_to_remove}) catch {};
-    runtime.deleteTree(venv_path_to_remove) catch |err| {
-        output.printError(allocator, "Failed to remove '{s}': {s}", .{ venv_path_to_remove, @errorName(err) }) catch {};
+    output.print(allocator, "Attempting to remove: {s}", .{removed.venv_path}) catch {};
+    runtime.deleteTree(removed.venv_path) catch |err| {
+        output.printError(allocator, "Failed to remove '{s}': {s}", .{ removed.venv_path, @errorName(err) }) catch {};
         output.printError(allocator, "You may need to remove it manually.", .{}) catch {};
         return err;
     };
 
-    output.print(allocator, "Directory '{s}' removed successfully.", .{venv_path_to_remove}) catch {};
-    output.print(allocator, "Environment '{s}' removed.", .{env_name_to_remove}) catch {};
+    output.print(allocator, "Directory '{s}' removed successfully.", .{removed.venv_path}) catch {};
+    output.print(allocator, "Environment '{s}' removed.", .{removed.env_name}) catch {};
 }
 
 pub fn handleRunCommand(
@@ -795,12 +774,11 @@ pub fn handleRunCommand(
         return error.ArgsError;
     }
 
-    const identifier = args[2];
     const command = args[3];
     const command_args = args[4..];
 
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
-    const venv_path = entry.venv_path;
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    const venv_path = registry.get(ref).venv_path;
 
     const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
         output.printError(allocator, "Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
@@ -916,10 +894,8 @@ pub fn handleLogCommand(
         return error.EnvironmentNotFound;
     }
 
-    const identifier = args[2];
-
-    // Look up environment in registry
-    const entry = try env.lookupRegistryEntry(allocator, registry, identifier);
+    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    const entry = registry.get(ref);
 
     // Construct the path to the log file
     const log_file_path = std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
@@ -1075,8 +1051,8 @@ fn handleAliasCreate(
     }
 
     // Resolve environment identifier to get the actual environment name
-    const target_entry = try env.lookupRegistryEntry(allocator, registry, env_identifier);
-    const target_env_name = target_entry.env_name;
+    const target_ref = registry.resolve(allocator, env_identifier) catch |e| return present(allocator, registry, env_identifier, e);
+    const target_env_name = registry.get(target_ref).env_name;
 
     // Add alias to registry
     registry.addAlias(alias_name, target_env_name) catch |err| {
@@ -1287,15 +1263,14 @@ pub fn handleRenameCommand(
     const old_identifier = args[2];
     const new_name = args[3];
 
-    const old_entry = registry.lookup(old_identifier) orelse {
-        output.printError(allocator, "Environment '{s}' not found", .{old_identifier}) catch {};
-        return error.EnvironmentNotFound;
-    };
+    const ref = registry.resolve(allocator, old_identifier) catch |e| return present(allocator, registry, old_identifier, e);
 
-    const old_name = try allocator.dupe(u8, old_entry.env_name);
+    // Owned copies: the FS orchestration and rollback messages need old_name /
+    // old_venv_path to outlive registry.rename (which frees the entry's copies).
+    const old_name = try allocator.dupe(u8, registry.get(ref).env_name);
     defer allocator.free(old_name);
 
-    const old_venv_path = try allocator.dupe(u8, old_entry.venv_path);
+    const old_venv_path = try allocator.dupe(u8, registry.get(ref).venv_path);
     defer allocator.free(old_venv_path);
     const parent_dir = std.fs.path.dirname(old_venv_path) orelse {
         output.printError(allocator, "Invalid virtual environment path", .{}) catch {};
@@ -1333,7 +1308,7 @@ pub fn handleRenameCommand(
         return err;
     };
 
-    registry.renameEnvironment(old_identifier, new_name) catch |err| {
+    registry.rename(ref, new_name) catch |err| {
         _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
         runtime.rename(new_venv_path, old_venv_path) catch {};
 
@@ -1353,7 +1328,7 @@ pub fn handleRenameCommand(
 
     if (has_jupyter_kernel) {
         jupyter.renameKernel(allocator, old_name, new_name, new_venv_path) catch |err| {
-            _ = registry.renameEnvironment(new_name, old_name) catch {};
+            registry.rename(ref, old_name) catch {}; // ref stays valid; re-saves
             _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
             runtime.rename(new_venv_path, old_venv_path) catch {};
 
@@ -1369,18 +1344,7 @@ pub fn handleRenameCommand(
         };
     }
 
-    registry.save() catch |err| {
-        if (has_jupyter_kernel) {
-            _ = jupyter.renameKernel(allocator, new_name, old_name, old_venv_path) catch {};
-        }
-        _ = registry.renameEnvironment(new_name, old_name) catch {};
-        _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-        runtime.rename(new_venv_path, old_venv_path) catch {};
-
-        output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
-        return error.RegistryError;
-    };
-
+    // registry.rename above already persisted; no separate save step.
     // === ATOMIC OPERATIONS END ===
 
     output.print(allocator, "Environment renamed successfully!", .{}) catch {};
@@ -1393,7 +1357,7 @@ pub fn handleRenameCommand(
 
     output.print(allocator, "  Generated scripts updated", .{}) catch {};
 
-    updateLocalConfigs(allocator, old_name, new_name, old_entry.project_dir) catch |err| {
+    updateLocalConfigs(allocator, old_name, new_name, registry.get(ref).project_dir) catch |err| {
         output.printError(allocator, "Environment renamed successfully, but failed to update local config files: {s}", .{@errorName(err)}) catch {};
     };
 }
