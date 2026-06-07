@@ -9,6 +9,7 @@ const output = @import("utils/output.zig");
 const flags_module = @import("utils/flags.zig");
 const validation = @import("utils/validation.zig");
 const runtime = @import("utils/runtime.zig");
+const errors = @import("utils/errors.zig");
 
 pub const Command = enum {
     setup,
@@ -260,165 +261,10 @@ pub fn main(app: std.process.Init) anyerror!void {
     }
 
     const config_path = "zenv.json";
-
-    const handleError = struct {
-        pub fn func(alloc: Allocator, err: anyerror) void {
-            // Map the error to a single user-facing message, then exit.
-            switch (err) {
-                error.ConfigFileNotFound => {
-                    output.printError(alloc,
-                        \\Configuration file '{s}' not found
-                    , .{config_path}) catch {};
-                },
-                error.FileNotFound => {
-                    output.printError(alloc,
-                        \\zenv could not find a file required to complete this command
-                    , .{}) catch {};
-                },
-                error.ClusterNotFound => {
-                    output.printError(alloc,
-                        \\Target machine mismatch or environment not suitable for current machine
-                    , .{}) catch {};
-                },
-                error.EnvironmentNotFound => {
-                    output.printError(alloc,
-                        \\Environment name not found in configuration or argument missing
-                    , .{}) catch {};
-                },
-                error.JsonParseError => {
-                    output.printError(alloc,
-                        \\Invalid JSON format in '{s}'. Check syntax
-                    , .{config_path}) catch {};
-                },
-                error.InvalidFormat => {
-                    output.printError(alloc,
-                        \\Invalid JSON format in '{s}'. Check syntax for details above
-                    , .{config_path}) catch {};
-                },
-                error.ConfigInvalid => {
-                    output.printError(alloc,
-                        \\Invalid configuration structure in '{s}'. Check keys/types/required fields
-                    , .{config_path}) catch {};
-                },
-                error.MissingHostname => {
-                    output.printError(alloc,
-                        \\HOSTNAME is not set or inaccessible which is required for validation
-                    , .{}) catch {};
-                },
-                error.PathResolutionFailed => {
-                    output.printError(alloc,
-                        \\Failed to resolve a required file path (e.g., requirements file)
-                        \\
-                    , .{}) catch {};
-                },
-                error.TargetMachineMismatch => {
-                    output.printError(alloc,
-                        \\Current machine does not match the target specified for this environment
-                    , .{}) catch {};
-                },
-                error.AmbiguousIdentifier => {
-                    output.printError(alloc,
-                        \\The provided ID prefix matches multiple environments. Use more characters
-                    , .{}) catch {};
-                },
-                error.RegistryError => {
-                    output.printError(alloc,
-                        \\Failed to access the environment registry. Check permissions for ZENV_DIR
-                    , .{}) catch {};
-                },
-                error.ArgsError => {
-                    output.printError(alloc,
-                        \\Invalid command-line arguments provided. Check usage with 'zenv help'
-                    , .{}) catch {};
-                },
-                error.EnvironmentNotRegistered => {
-                    output.printError(alloc,
-                        \\The specified environment is not registered. Use 'zenv register <name>'
-                    , .{}) catch {};
-                },
-                error.MissingPythonExecutable => {
-                    output.printError(alloc,
-                        \\A required Python executable was not found or is not configured
-                    , .{}) catch {};
-                    output.printError(alloc,
-                        \\Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json
-                    , .{}) catch {};
-                },
-                error.InvalidRegistryFormat => {
-                    output.printError(alloc,
-                        \\The registry file (ZENV_DIR/registry.json) is corrupted or has an invalid format
-                    , .{}) catch {};
-                },
-                error.ConfigFileReadError => {
-                    output.printError(alloc,
-                        \\Error reading the configuration file '{s}'. Check permissions and file integrity
-                    , .{config_path}) catch {};
-                },
-                error.HostnameParseError => {
-                    output.printError(alloc,
-                        \\Failed to parse the system hostname
-                    , .{}) catch {};
-                },
-                error.IoError => {
-                    output.printError(alloc,
-                        \\An I/O error occurred. Check file system permissions and disk space
-                    , .{}) catch {};
-                },
-                error.OutOfMemory => {
-                    output.printError(alloc,
-                        \\The application ran out of memory. Try freeing up system resources
-                    , .{}) catch {};
-                },
-                error.PathTraversalAttempt => {
-                    output.printError(alloc,
-                        \\A path traversal attempt was detected and blocked for security reasons
-                    , .{}) catch {};
-                },
-                error.EnvironmentVariableNotFound => {
-                    output.printError(alloc,
-                        \\A required environment variable was not found. Please ensure it is set
-                    , .{}) catch {};
-                },
-                error.InvalidWtf8 => {
-                    output.printError(alloc,
-                        \\An environment variable contained invalid UTF-8 (WTF-8) characters
-                    , .{}) catch {};
-                },
-                error.ProcessError, error.ModuleLoadError => {
-                    // Already reported by the process / module loader; just exit.
-                },
-                error.EnvironmentAlreadyExists => {
-                    output.printError(alloc,
-                        \\An environment with that name already exists
-                    , .{}) catch {};
-                },
-                error.InvalidEnvironmentName => {
-                    output.printError(alloc,
-                        \\Invalid environment name. Use only alphanumeric characters, hyphens, underscores, and dots
-                    , .{}) catch {};
-                },
-                error.PathAlreadyExists => {
-                    output.printError(alloc,
-                        \\The target path already exists
-                    , .{}) catch {};
-                },
-                error.InvalidPath => {
-                    output.printError(alloc,
-                        \\Invalid file or directory path
-                    , .{}) catch {};
-                },
-                else => {
-                    output.printError(alloc, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {};
-                },
-            }
-            process.exit(1);
-        }
-    };
-
     // Load the environment registry first, as we'll need it for all commands
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
         output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
-        handleError.func(allocator, error.RegistryError);
+        errors.report(allocator, error.RegistryError);
         return;
     };
     defer registry.deinit();
@@ -440,7 +286,7 @@ pub fn main(app: std.process.Init) anyerror!void {
                 runtime.access(config_path) catch |err| {
                     if (err != error.FileNotFound) {
                         output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
-                        handleError.func(allocator, err);
+                        errors.report(allocator, err);
                         break :blk false;
                     }
                     // File doesn't exist
@@ -472,12 +318,12 @@ pub fn main(app: std.process.Init) anyerror!void {
 
         // Now load the config with validation
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError.func(allocator, err);
+            errors.report(allocator, err);
             return; // Exit after handling error
         };
     } else if (command == .register) {
         config = validation.validateAndParse(allocator, config_path) catch |err| {
-            handleError.func(allocator, err);
+            errors.report(allocator, err);
             return; // Exit after handling error
         };
     }
@@ -486,7 +332,7 @@ pub fn main(app: std.process.Init) anyerror!void {
     // Dispatch the command; any error it returns is mapped to a user-facing
     // message (and exits) by the single error handler.
     const config_ptr: ?*const configurations.ZenvConfig = if (config) |*c| c else null;
-    dispatch(command, allocator, config_ptr, &registry, args, config_path) catch |err| handleError.func(allocator, err);
+    dispatch(command, allocator, config_ptr, &registry, args, config_path) catch |err| errors.report(allocator, err);
 }
 
 /// Routes a parsed command to its handler. Handlers return errors rather than

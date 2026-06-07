@@ -6,13 +6,6 @@ const configurations = @import("config.zig");
 const runtime = @import("runtime.zig");
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
 
-pub const JupyterError = error{
-    JupyterNotFound,
-    KernelNotFound,
-    KernelExists,
-    InvalidPath,
-};
-
 pub const KernelSpec = struct {
     name: []const u8,
     display_name: []const u8,
@@ -83,7 +76,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, custom_name: ?[]
     // Check if Jupyter is available
     if (!isJupyterAvailable(allocator)) {
         try output.printError(allocator, "Jupyter is not installed or not available in PATH", .{});
-        return JupyterError.JupyterNotFound;
+        return error.JupyterNotFound;
     }
 
     // Get environment info from registry
@@ -124,7 +117,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, custom_name: ?[]
     if (runtime.access(kernel_dir)) |_| {
         // File exists, that's an error
         try output.printError(allocator, "Kernel '{s}' already exists", .{kernel_name});
-        return JupyterError.KernelExists;
+        return error.KernelExists;
     } else |err| switch (err) {
         error.FileNotFound => {
             // Good, kernel doesn't exist, continue
@@ -201,7 +194,7 @@ pub fn removeKernel(allocator: Allocator, env_name: []const u8) !void {
     runtime.access(kernel_dir) catch |err| switch (err) {
         error.FileNotFound => {
             try output.printError(allocator, "Kernel '{s}' not found", .{kernel_name});
-            return JupyterError.KernelNotFound;
+            return error.KernelNotFound;
         },
         else => {
             try output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)});
@@ -317,7 +310,7 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
 
     // Check if new kernel already exists
     if (runtime.access(new_kernel_dir)) |_| {
-        return JupyterError.KernelExists;
+        return error.KernelExists;
     } else |err| switch (err) {
         error.FileNotFound => {
             // Good, new kernel doesn't exist
