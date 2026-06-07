@@ -59,7 +59,7 @@ pub fn report(allocator: Allocator, err: anyerror) void {
         error.MissingHostname => output.printError(allocator, "HOSTNAME is not set or inaccessible which is required for validation", .{}) catch {},
         error.PathResolutionFailed => output.printError(allocator, "Failed to resolve a required file path (e.g., requirements file)", .{}) catch {},
         error.TargetMachineMismatch => output.printError(allocator, "Current machine does not match the target specified for this environment", .{}) catch {},
-        error.AmbiguousIdentifier => output.printError(allocator, "The provided ID prefix matches multiple environments. Use more characters", .{}) catch {},
+        error.AmbiguousIdentifier => output.printError(allocator, "Ambiguous identifier (see the candidates above). Use the exact env name or id", .{}) catch {},
         error.RegistryError => output.printError(allocator, "Failed to access the environment registry. Check permissions for ZENV_DIR", .{}) catch {},
         error.ArgsError => output.printError(allocator, "Invalid command-line arguments provided. Check usage with 'zenv help'", .{}) catch {},
         error.EnvironmentNotRegistered => output.printError(allocator, "The specified environment is not registered. Use 'zenv register <name>'", .{}) catch {},

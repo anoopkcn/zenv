@@ -378,11 +378,50 @@ pub fn handleSetupCommand(
 /// message. Mirrors the messages the deleted lookupRegistryEntry printed.
 fn present(allocator: Allocator, registry: *const EnvironmentRegistry, identifier: []const u8, err: anyerror) anyerror {
     if (err == error.AmbiguousIdentifier) {
-        const names = registry.candidates(allocator, identifier) catch return err;
-        defer allocator.free(names);
-        output.rawErr(allocator, "ERROR: Ambiguous identifier '{s}' matches multiple environments:\n", .{identifier}) catch {};
-        for (names) |n| output.rawErr(allocator, "  - {s}\n", .{n}) catch {};
-        output.rawErr(allocator, "Please use more characters to make the identifier unique.\n", .{}) catch {};
+        const cands = registry.candidates(allocator, identifier) catch return err;
+        defer allocator.free(cands);
+
+        output.rawErr(allocator, "ERROR: '{s}' matches multiple environments:\n", .{identifier}) catch {};
+
+        // Host framing applies only to the host-aware branches ("." and a shared
+        // alias). A non-unique id-prefix is host-irrelevant — advise more characters.
+        var host_relevant = std.mem.eql(u8, identifier, ".");
+        if (!host_relevant) {
+            outer: for (registry.entries.items) |entry| {
+                for (entry.aliases.items) |a| {
+                    if (std.mem.eql(u8, a, identifier)) {
+                        host_relevant = true;
+                        break :outer;
+                    }
+                }
+            }
+        }
+        if (!host_relevant) {
+            for (cands) |c| output.rawErr(allocator, "  - {s}\n", .{c.env_name}) catch {};
+            output.rawErr(allocator, "Use more characters of the id, or the exact env name.\n", .{}) catch {};
+            return err;
+        }
+
+        // Best-effort current host so we can explain WHY the tie wasn't broken:
+        // either none of the candidates target this host, or several do.
+        const current_host: ?[]const u8 = env.getSystemHostname(allocator) catch null;
+        defer if (current_host) |h| allocator.free(h);
+        var host_matches: usize = 0;
+        for (cands) |c| {
+            const m = if (current_host) |h| env.hostMatchesTargets(h, c.target_machines) else false;
+            if (m) host_matches += 1;
+            const mark = if (m) "  <- matches this host" else "";
+            output.rawErr(allocator, "  - {s} (target: {s}){s}\n", .{ c.env_name, c.target_machines, mark }) catch {};
+        }
+        if (current_host) |h| {
+            if (host_matches == 0) {
+                output.rawErr(allocator, "None of these target the current host '{s}'. Add this machine to one env's target_machines, or use the exact env name / id.\n", .{h}) catch {};
+            } else {
+                output.rawErr(allocator, "{d} target the current host '{s}'. Use the exact env name or id to choose one.\n", .{ host_matches, h }) catch {};
+            }
+        } else {
+            output.rawErr(allocator, "Could not determine the current host. Use the exact env name or id.\n", .{}) catch {};
+        }
     } else if (err == error.EnvironmentNotRegistered) {
         output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
         output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
@@ -1140,9 +1179,22 @@ fn handleAliasShow(
 
     const alias_name = args[3];
 
-    if (registry.resolveAlias(alias_name)) |target_env| {
-        output.print(allocator, "Alias '{s}' points to environment '{s}'.", .{ alias_name, target_env }) catch {};
-    } else {
+    // An alias may be shared across several per-machine environments, so list
+    // every holder with its target machines (resolution picks by current host).
+    var found = false;
+    for (registry.entries.items) |entry| {
+        for (entry.aliases.items) |alias| {
+            if (std.mem.eql(u8, alias, alias_name)) {
+                if (!found) {
+                    output.print(allocator, "Alias '{s}' resolves to:", .{alias_name}) catch {};
+                    found = true;
+                }
+                output.print(allocator, "  {s} (target: {s})", .{ entry.env_name, entry.target_machines_str }) catch {};
+                break;
+            }
+        }
+    }
+    if (!found) {
         output.printError(allocator, "Alias '{s}' not found.", .{alias_name}) catch {};
         return error.AliasNotFound;
     }

@@ -241,6 +241,8 @@ One can run `zenv validate` to validate the config file. If there are errors in 
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
+**Host-aware selection (shared filesystems).** When several machines share a filesystem (e.g. HPC login/compute nodes), you can register one environment per machine — distinct names like `env_machine1`, `env_machine2`, each with its own `target_machines` — and give them all the **same alias** (e.g. `zenv alias create dev env_machine1`, then `... dev env_machine2`). Resolving that alias, or the `.` current-directory shortcut, then auto-selects the environment whose `target_machines` matches the machine you are on, so the *same* command (`zenv run dev`, `zenv activate .`, `zenv cd .`) works on every node. If the current host matches none of the candidates — or more than one (e.g. two share a `*`/`any` target) — resolution reports an ambiguity listing each candidate and its target machines; use the exact environment name or id to disambiguate. A unique alias (one holder) still resolves regardless of host.
+
 For custom scripts, you can use `activate_hook` and `setup_hook` to specify paths to shell scripts that will be copied to the environment's directory and executed during activation or setup. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
 The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
@@ -310,10 +312,13 @@ Commands:
   log <name|id|.>            Displays the setup log file for the specified environment.
 
   alias <subcommand>         Manages environment aliases for easier access:
-    create <alias> <env>     Creates an alias for an environment.
+    create <alias> <env>     Creates an alias for an environment. The same alias may
+                             be given to several environments that target different
+                             machines (see "host-aware selection" below).
     remove <alias>           Removes an existing alias.
     list                     Lists all defined aliases.
-    show <alias>             Shows what environment an alias points to.
+    show <alias>             Shows the environment(s) the alias resolves to, with
+                             each one's target machines.
 
   jupyter <subcommand>       Manages Jupyter kernels for environments:
     create <env_name>        Creates a Jupyter kernel for the specified environment.

@@ -9,6 +9,7 @@ const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
+const host = @import("host.zig");
 
 fn generateSHA1ID(
     allocator: Allocator,
@@ -576,6 +577,10 @@ pub const EnvironmentRegistry = struct {
         return removed;
     }
 
+    // NOTE: shallow first-match resolver (no ambiguity error, host-BLIND for a
+    // shared alias — returns the first holder). Used only by jupyter (called with
+    // an explicit env_name) and the registry-lookup test. The host-aware path is
+    // `resolve`/`resolveAgainstCwd`; migrating jupyter onto it is future work.
     pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
         // Fast path: Direct lookup by env_name
         for (self.entries.items) |entry| {
@@ -629,17 +634,57 @@ pub const EnvironmentRegistry = struct {
     /// removal (deregister), and does not outlive a reload of the registry.
     pub const EnvRef = struct { idx: usize };
 
+    /// How a candidate set is recognized when host-disambiguating a tie.
+    const CandidateKind = enum { project_dir, alias };
+
+    /// Tie-breaker for the host-aware branches ("." and shared alias). Among the
+    /// candidates identified by (kind, key), return the single one whose
+    /// target_machines matches `hostname`. Pure, allocation-free. A tie the host
+    /// cannot break — null hostname, or 0 / >1 survivors — is `AmbiguousIdentifier`.
+    fn pickByHost(
+        self: *const EnvironmentRegistry,
+        kind: CandidateKind,
+        key: []const u8,
+        hostname: ?[]const u8,
+    ) error{AmbiguousIdentifier}!EnvRef {
+        const hn = hostname orelse return error.AmbiguousIdentifier;
+        var pick: ?usize = null;
+        var matches: usize = 0;
+        for (self.entries.items, 0..) |entry, i| {
+            const is_candidate = switch (kind) {
+                .project_dir => std.mem.eql(u8, entry.project_dir, key),
+                .alias => blk: {
+                    for (entry.aliases.items) |a| {
+                        if (std.mem.eql(u8, a, key)) break :blk true;
+                    }
+                    break :blk false;
+                },
+            };
+            if (is_candidate and host.hostMatchesTargets(hn, entry.target_machines_str)) {
+                matches += 1;
+                if (pick == null) pick = i;
+            }
+        }
+        if (matches == 1) return .{ .idx = pick.? };
+        return error.AmbiguousIdentifier;
+    }
+
     /// Pure resolution core (internal seam). No I/O, no printing. Maps an
     /// identifier to exactly one entry index, applying the load-bearing order:
     ///   "." (project_dir == cwd) -> name -> alias -> exact id -> unique 7+ prefix.
     /// `cwd` must be non-null when `identifier` is "."; pass null otherwise.
-    /// Ambiguity (a prefix or "." matching >1 entry) is distinct from not-found.
+    /// `hostname`, when non-null, breaks a tie in the host-aware branches ("." and
+    /// a shared alias) by selecting the candidate whose target_machines matches the
+    /// host (see `pickByHost`). Ambiguity (a prefix matching >1, or a "."/alias the
+    /// host can't narrow to one) is distinct from not-found.
     fn resolveAgainstCwd(
         self: *const EnvironmentRegistry,
         identifier: []const u8,
         cwd: ?[]const u8,
+        hostname: ?[]const u8,
     ) error{ EnvironmentNotRegistered, AmbiguousIdentifier }!EnvRef {
-        // 1. "." -> the unique entry whose project_dir == cwd
+        // 1. "." -> the entry whose project_dir == cwd (host-disambiguated when >1,
+        //    e.g. per-machine envs sharing one project on a shared filesystem).
         if (std.mem.eql(u8, identifier, ".")) {
             const dir = cwd orelse return error.EnvironmentNotRegistered;
             var found: ?usize = null;
@@ -651,8 +696,8 @@ pub const EnvironmentRegistry = struct {
                 }
             }
             if (count == 0) return error.EnvironmentNotRegistered;
-            if (count > 1) return error.AmbiguousIdentifier;
-            return .{ .idx = found.? };
+            if (count == 1) return .{ .idx = found.? };
+            return self.pickByHost(.project_dir, dir, hostname);
         }
 
         // 2. exact env_name
@@ -660,11 +705,23 @@ pub const EnvironmentRegistry = struct {
             if (std.mem.eql(u8, entry.env_name, identifier)) return .{ .idx = i };
         }
 
-        // 3. alias -> its entry
-        for (self.entries.items, 0..) |entry, i| {
-            for (entry.aliases.items) |alias| {
-                if (std.mem.eql(u8, alias, identifier)) return .{ .idx = i };
+        // 3. alias -> its entry (a single holder resolves regardless of host; a
+        //    shared alias is host-disambiguated, else ambiguous).
+        {
+            var found: ?usize = null;
+            var count: usize = 0;
+            for (self.entries.items, 0..) |entry, i| {
+                for (entry.aliases.items) |alias| {
+                    if (std.mem.eql(u8, alias, identifier)) {
+                        count += 1;
+                        if (found == null) found = i;
+                        break;
+                    }
+                }
             }
+            if (count == 1) return .{ .idx = found.? };
+            if (count > 1) return self.pickByHost(.alias, identifier, hostname);
+            // count == 0: not an alias; fall through to id matching.
         }
 
         // 4. exact id
@@ -672,7 +729,7 @@ pub const EnvironmentRegistry = struct {
             if (std.mem.eql(u8, entry.id, identifier)) return .{ .idx = i };
         }
 
-        // 5. unique 7+ char id prefix (>1 match -> ambiguous)
+        // 5. unique 7+ char id prefix (>1 match -> ambiguous; host-blind, a typo case)
         if (identifier.len >= 7) {
             var found: ?usize = null;
             var count: usize = 0;
@@ -692,20 +749,31 @@ pub const EnvironmentRegistry = struct {
     }
 
     /// Handler-facing entry point. Resolves a raw <name|id|.> to a stable EnvRef.
-    /// Touches the filesystem only for the "." branch (cwd realpath + zenv.json
-    /// presence); every other branch is pure. Prints nothing — failures are typed
-    /// errors that the caller renders (see commands.present) and main.zig maps.
+    /// Touches the filesystem for the "." branch (cwd realpath + zenv.json
+    /// presence) and, ONLY to break a tie, for the current hostname. Prints
+    /// nothing — failures are typed errors that the caller renders (see
+    /// commands.present) and main.zig maps.
+    ///
+    /// Hostname is fetched lazily: the first pass runs host-blind, and only an
+    /// `AmbiguousIdentifier` (the sole outcome a host can change) triggers a
+    /// `getSystemHostname` retry. So the common path never spawns `hostname`, and
+    /// a hostname that can't be determined degrades gracefully to the ambiguity.
     pub fn resolve(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) !EnvRef {
+        var cwd: ?[]const u8 = null;
+        defer if (cwd) |c| allocator.free(c);
         if (std.mem.eql(u8, identifier, ".")) {
             runtime.access("zenv.json") catch |err| {
                 if (err == error.FileNotFound) return error.ConfigFileNotFound;
                 return err;
             };
-            const cwd = try runtime.cwdRealpath(allocator);
-            defer allocator.free(cwd);
-            return self.resolveAgainstCwd(identifier, cwd);
+            cwd = try runtime.cwdRealpath(allocator);
         }
-        return self.resolveAgainstCwd(identifier, null);
+        return self.resolveAgainstCwd(identifier, cwd, null) catch |e| {
+            if (e != error.AmbiguousIdentifier) return e;
+            const hn = host.getSystemHostname(allocator) catch return e;
+            defer allocator.free(hn);
+            return self.resolveAgainstCwd(identifier, cwd, hn);
+        };
     }
 
     /// Just-in-time borrow through a handle. The returned pointer/slices are
@@ -714,25 +782,50 @@ pub const EnvironmentRegistry = struct {
         return &self.entries.items[ref.idx];
     }
 
+    /// One environment an ambiguous identifier matched, carried with its target
+    /// machines so the caller can show WHY the host couldn't pick a single one.
+    /// Both slices are registry-owned (borrowed); caller frees only the outer slice.
+    pub const Candidate = struct {
+        env_name: []const u8,
+        target_machines: []const u8,
+    };
+
     /// Names the candidates an ambiguous identifier matched, for the call-site
-    /// error message. Mirrors resolve's "." shell so it lists both ambiguity
-    /// kinds. Returns borrowed env_names; caller frees the outer slice only.
-    pub fn candidates(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) ![]const []const u8 {
-        var list = std.array_list.Managed([]const u8).init(allocator);
+    /// error message. Covers all three ambiguity kinds: "." (project_dir == cwd),
+    /// a shared alias, and a non-unique 7+ id-prefix. Returns borrowed slices;
+    /// caller frees the outer slice only.
+    pub fn candidates(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) ![]Candidate {
+        var list = std.array_list.Managed(Candidate).init(allocator);
         errdefer list.deinit();
 
         if (std.mem.eql(u8, identifier, ".")) {
             const cwd = runtime.cwdRealpath(allocator) catch return list.toOwnedSlice();
             defer allocator.free(cwd);
             for (self.entries.items) |entry| {
-                if (std.mem.eql(u8, entry.project_dir, cwd)) try list.append(entry.env_name);
+                if (std.mem.eql(u8, entry.project_dir, cwd))
+                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
             }
-        } else if (identifier.len >= 7) {
+            return list.toOwnedSlice();
+        }
+
+        // A shared alias matched by more than one environment.
+        for (self.entries.items) |entry| {
+            for (entry.aliases.items) |alias| {
+                if (std.mem.eql(u8, alias, identifier)) {
+                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
+                    break;
+                }
+            }
+        }
+        if (list.items.len > 0) return list.toOwnedSlice();
+
+        // A non-unique 7+ id-prefix.
+        if (identifier.len >= 7) {
             for (self.entries.items) |entry| {
                 if (entry.id.len >= identifier.len and
                     std.mem.eql(u8, entry.id[0..identifier.len], identifier))
                 {
-                    try list.append(entry.env_name);
+                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
                 }
             }
         }
@@ -748,18 +841,16 @@ pub const EnvironmentRegistry = struct {
             if (std.mem.eql(u8, entry.env_name, alias_name)) return error.AliasAlreadyExists;
         }
 
-        // Check if alias already exists across all entries
-        for (self.entries.items) |entry| {
-            for (entry.aliases.items) |alias| {
-                if (std.mem.eql(u8, alias, alias_name)) {
-                    return error.AliasAlreadyExists;
-                }
-            }
-        }
-
-        // Find the environment entry and add alias to it
+        // Find the target environment and attach the alias. A given alias MAY be
+        // shared across several environments — host-aware resolution disambiguates
+        // by the current machine (see resolveAgainstCwd) — so an alias already used
+        // by ANOTHER entry is no longer rejected; only re-adding it to the SAME
+        // entry is.
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
+                for (entry.aliases.items) |alias| {
+                    if (std.mem.eql(u8, alias, alias_name)) return error.AliasAlreadyExists;
+                }
                 const alias_name_owned = try self.allocator.dupe(u8, alias_name);
                 errdefer self.allocator.free(alias_name_owned);
 
@@ -772,16 +863,23 @@ pub const EnvironmentRegistry = struct {
         return error.EnvironmentNotFound;
     }
 
+    /// Removes the alias from EVERY environment that holds it (a shared alias spans
+    /// several per-machine envs, so removal is "drop this name everywhere"). Returns
+    /// true if at least one occurrence was removed.
     pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) bool {
+        var removed = false;
         for (self.entries.items) |*entry| {
-            for (entry.aliases.items, 0..) |alias, i| {
-                if (std.mem.eql(u8, alias, alias_name)) {
+            var i: usize = 0;
+            while (i < entry.aliases.items.len) {
+                if (std.mem.eql(u8, entry.aliases.items[i], alias_name)) {
                     self.allocator.free(entry.aliases.orderedRemove(i));
-                    return true;
+                    removed = true; // do not advance i; the next item shifted down
+                } else {
+                    i += 1;
                 }
             }
         }
-        return false;
+        return removed;
     }
 
     pub fn resolveAlias(self: *const EnvironmentRegistry, identifier: []const u8) ?[]const u8 {
@@ -821,10 +919,17 @@ pub const EnvironmentRegistry = struct {
             }
         }
         // Uniqueness: new_name must not already resolve to an entry (name, alias,
-        // exact id, or unique prefix), mirroring the old lookup() != null check.
-        if (self.resolveAgainstCwd(new_name, null)) |_| {
+        // exact id, or unique prefix). Host-blind (null hostname) — a rename target
+        // must be free on every host. Only a clean not-found means the name is
+        // available; an AmbiguousIdentifier (e.g. new_name equals an alias shared by
+        // several envs) means the name is taken, so it must also be rejected rather
+        // than swallowed (which would let an env_name collide with an alias).
+        if (self.resolveAgainstCwd(new_name, null, null)) |_| {
             return error.EnvironmentAlreadyExists;
-        } else |_| {}
+        } else |e| switch (e) {
+            error.AmbiguousIdentifier => return error.EnvironmentAlreadyExists,
+            error.EnvironmentNotRegistered => {},
+        }
 
         const entry = &self.entries.items[ref.idx];
         const parent_dir = std.fs.path.dirname(entry.venv_path) orelse return error.InvalidPath;
@@ -904,13 +1009,18 @@ test "registry lookup by name, alias, and id prefix" {
 
 // Appends a minimal entry for resolution tests (venv_path mirrors the dir; not asserted on).
 fn tAppend(reg: *EnvironmentRegistry, id: []const u8, name: []const u8, dir: []const u8) !void {
+    try tAppendT(reg, id, name, dir, "*");
+}
+
+// Like tAppend but with an explicit target_machines_str, for host-aware tests.
+fn tAppendT(reg: *EnvironmentRegistry, id: []const u8, name: []const u8, dir: []const u8, targets: []const u8) !void {
     const a = reg.allocator;
     try reg.entries.append(.{
         .id = try a.dupe(u8, id),
         .env_name = try a.dupe(u8, name),
         .project_dir = try a.dupe(u8, dir),
         .description = null,
-        .target_machines_str = try a.dupe(u8, "*"),
+        .target_machines_str = try a.dupe(u8, targets),
         .venv_path = try a.dupe(u8, dir),
         .aliases = std.array_list.Managed([]const u8).init(a),
     });
@@ -924,12 +1034,12 @@ test "resolveAgainstCwd: name, alias, exact id, unique prefix, not-found" {
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
     try reg.addAlias("w", "web");
 
-    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("web", null)).idx);
-    try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("api", null)).idx);
-    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null)).idx); // alias
-    try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("bbbbbbb2222222222222222222222222222222222", null)).idx); // exact id
-    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("aaaaaaa", null)).idx); // unique 7-char prefix
-    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("nope", null));
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("web", null, null)).idx);
+    try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("api", null, null)).idx);
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null, null)).idx); // alias
+    try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("bbbbbbb2222222222222222222222222222222222", null, null)).idx); // exact id
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("aaaaaaa", null, null)).idx); // unique 7-char prefix
+    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("nope", null, null));
 }
 
 test "resolveAgainstCwd: ambiguous id prefix is distinct from not-found" {
@@ -939,7 +1049,7 @@ test "resolveAgainstCwd: ambiguous id prefix is distinct from not-found" {
     try tAppend(&reg, "abcdef0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "one", "/p/one");
     try tAppend(&reg, "abcdef0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "two", "/p/two");
 
-    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("abcdef0", null));
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("abcdef0", null, null));
 }
 
 test "resolveAgainstCwd: '.' matches by cwd, ambiguous when two share a project_dir" {
@@ -948,12 +1058,151 @@ test "resolveAgainstCwd: '.' matches by cwd, ambiguous when two share a project_
     defer reg.deinit();
     try tAppend(&reg, "id1aaaa0000000000000000000000000000000000", "web", "/proj");
 
-    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd(".", "/proj")).idx);
-    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd(".", "/elsewhere"));
-    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd(".", null));
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd(".", "/proj", null)).idx);
+    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd(".", "/elsewhere", null));
+    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd(".", null, null));
 
     try tAppend(&reg, "id2bbbb0000000000000000000000000000000000", "worker", "/proj");
-    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd(".", "/proj"));
+    // Two envs share the project_dir and both target "*", so no host can pick one.
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd(".", "/proj", null));
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd(".", "/proj", "anyhost"));
+}
+
+// Builds a registry of two per-machine envs sharing one project_dir and one alias
+// "dev" — the user's HPC shared-filesystem setup.
+fn tSharedAliasReg(reg: *EnvironmentRegistry) !void {
+    try tAppendT(reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
+    try tAppendT(reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
+    try reg.addAlias("dev", "env_m1");
+    try reg.addAlias("dev", "env_m2");
+}
+
+test "resolveAgainstCwd: a shared alias is disambiguated by the current host" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tSharedAliasReg(&reg);
+
+    const r1 = try reg.resolveAgainstCwd("dev", null, "machine1");
+    try testing.expectEqualStrings("env_m1", reg.get(r1).env_name);
+    const r2 = try reg.resolveAgainstCwd("dev", null, "machine2");
+    try testing.expectEqualStrings("env_m2", reg.get(r2).env_name);
+}
+
+test "resolveAgainstCwd: a shared alias is ambiguous without a hostname" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tSharedAliasReg(&reg);
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, null));
+}
+
+test "resolveAgainstCwd: a shared alias matching no host is ambiguous" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tSharedAliasReg(&reg);
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, "machine3"));
+}
+
+test "resolveAgainstCwd: a shared alias whose holders both target '*' is ambiguous" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_a", "/proj", "*");
+    try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_b", "/proj", "*");
+    try reg.addAlias("dev", "env_a");
+    try reg.addAlias("dev", "env_b");
+    // Both holders match every host, so the host can never narrow to one.
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, "anyhost"));
+}
+
+test "resolveAgainstCwd: a single-holder alias resolves regardless of host" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web", "machine1");
+    try reg.addAlias("w", "web");
+    // The host does not match the target, but a lone alias holder still resolves
+    // (back-compat: host only breaks ties among >1 candidate).
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null, "other")).idx);
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null, null)).idx);
+}
+
+test "resolveAgainstCwd: '.' is disambiguated by host when envs share a project_dir" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
+    try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
+
+    const r1 = try reg.resolveAgainstCwd(".", "/proj", "machine1");
+    try testing.expectEqualStrings("env_m1", reg.get(r1).env_name);
+    const r2 = try reg.resolveAgainstCwd(".", "/proj", "machine2");
+    try testing.expectEqualStrings("env_m2", reg.get(r2).env_name);
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd(".", "/proj", "machine3"));
+}
+
+test "addAlias: shares an alias across entries, rejects same-entry dup and name-shadow" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
+    try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
+
+    try reg.addAlias("dev", "env_m1");
+    try reg.addAlias("dev", "env_m2"); // shared across entries: now allowed
+    // Re-adding the same alias to the SAME entry is still rejected.
+    try testing.expectError(error.AliasAlreadyExists, reg.addAlias("dev", "env_m1"));
+    // An alias equal to an existing env name is still rejected (name-shadow guard).
+    try testing.expectError(error.AliasAlreadyExists, reg.addAlias("env_m2", "env_m1"));
+}
+
+test "removeAlias: drops a shared alias from every holder" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tSharedAliasReg(&reg);
+    try testing.expect(reg.removeAlias("dev"));
+    // Gone from both holders: "dev" no longer resolves on any host.
+    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("dev", null, "machine1"));
+    try testing.expect(!reg.removeAlias("dev")); // nothing left to remove
+}
+
+test "rename: rejects a new name equal to a shared (ambiguous) alias" {
+    const a = testing.allocator;
+    var reg = EnvironmentRegistry.init(a);
+    defer reg.deinit();
+    try tSharedAliasReg(&reg);
+    const ref = try reg.resolveAgainstCwd("env_m1", null, null);
+    // "dev" resolves ambiguously (shared alias); rename must treat it as taken,
+    // not swallow the ambiguity and let an env_name collide with an alias.
+    try testing.expectError(error.EnvironmentAlreadyExists, reg.rename(ref, "dev"));
+}
+
+test "registry save/load round-trips a shared alias" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+
+    const zdir = ".zig-cache/tmp/zenv-shared-alias-roundtrip";
+    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
+    runtime.deleteTree(zdir) catch {};
+    defer runtime.deleteTree(zdir) catch {};
+
+    {
+        var reg = EnvironmentRegistry.init(a);
+        defer reg.deinit();
+        try tSharedAliasReg(&reg);
+        try reg.save();
+    }
+    {
+        var reg2 = try EnvironmentRegistry.load(a);
+        defer reg2.deinit();
+        const r1 = try reg2.resolveAgainstCwd("dev", null, "machine1");
+        try testing.expectEqualStrings("env_m1", reg2.get(r1).env_name);
+        const r2 = try reg2.resolveAgainstCwd("dev", null, "machine2");
+        try testing.expectEqualStrings("env_m2", reg2.get(r2).env_name);
+    }
 }
 
 test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {
@@ -974,13 +1223,13 @@ test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
 
     // rename: in-place field mutation keeps the ref valid and frees the old strings once.
-    const ref_web = try reg.resolveAgainstCwd("web", null);
+    const ref_web = try reg.resolveAgainstCwd("web", null, null);
     try reg.rename(ref_web, "web2");
     try testing.expectEqualStrings("web2", reg.get(ref_web).env_name);
-    try testing.expectEqual(ref_web.idx, (try reg.resolveAgainstCwd("web2", null)).idx);
+    try testing.expectEqual(ref_web.idx, (try reg.resolveAgainstCwd("web2", null, null)).idx);
 
     // deregister: the owned, detached entry is readable after removal, then freed once.
-    const ref_api = try reg.resolveAgainstCwd("api", null);
+    const ref_api = try reg.resolveAgainstCwd("api", null, null);
     var removed = try reg.deregister(ref_api);
     try testing.expectEqualStrings("api", removed.env_name);
     removed.deinit(a);
