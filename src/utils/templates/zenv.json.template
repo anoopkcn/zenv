@@ -1,5 +1,5 @@
 {
-  "base_dir": "zenv",
+  "base_dir": ".zenv",
   "@@ENV_NAME@@": {
     "target_machines": ["@@HOSTNAME@@"],
     "description": "@@ENV_DESCRIPTION@@",

@@ -110,7 +110,7 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     var config = config_module.ZenvConfig{
         .allocator = allocator,
         .environments = std.StringHashMap(config_module.EnvironmentConfig).init(allocator),
-        .base_dir = try allocator.dupe(u8, "zenv"), // safe default; always deinit-able
+        .base_dir = try allocator.dupe(u8, ".zenv"), // safe default; always deinit-able
     };
     errdefer config.deinit();
 
