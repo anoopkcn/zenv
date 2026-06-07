@@ -55,390 +55,344 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.arr
     return null;
 }
 
-/// Validates JSON content and returns a list of validation errors
-pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?std.array_list.Managed(ValidationError) {
-    var errors = std.array_list.Managed(ValidationError).init(allocator);
+const StrList = std.array_list.Managed([]const u8);
+const ErrorList = std.array_list.Managed(ValidationError);
+
+/// Outcome of the single parse-and-validate seam: either the built config or the
+/// full list of positioned errors, never both.
+pub const LoadResult = union(enum) {
+    config: config_module.ZenvConfig,
+    errors: ErrorList,
+};
+
+/// THE parse-and-validate seam. Parses `content` once (an owned tree, with
+/// Diagnostics for syntax positions), then walks it a single time to BOTH
+/// validate and build the typed `ZenvConfig`. The schema — every field name,
+/// type, required-ness, and the environment whitelist — is described exactly
+/// here and nowhere else. A passing result therefore guarantees the config also
+/// builds, which is the whole point of unifying the two former encodings.
+pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
+    var errors = ErrorList.init(allocator);
     errdefer {
-        for (errors.items) |*err| {
-            err.deinit(allocator);
-        }
+        for (errors.items) |*e| e.deinit(allocator);
         errors.deinit();
     }
 
-    // Parse with a Scanner whose Diagnostics tracks exact line/column during
-    // the parse itself, so a syntax error reports the precise position from the
-    // parser (no second hand-rolled scan).
     var scanner = json.Scanner.initCompleteInput(allocator, content);
     defer scanner.deinit();
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
-    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{}) catch |err| {
-        const err_msg = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{@errorName(err)});
-
+    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{
+        .allocate = .alloc_always,
+    }) catch |err| {
         try errors.append(ValidationError{
             .line = diag.getLine(),
             .column = diag.getColumn(),
-            .message = err_msg,
+            .message = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{@errorName(err)}),
             .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
-            // field_path left null: a syntax error has no schema path, and a
-            // non-null empty string would be freed by deinit (it isn't owned).
+            // field_path left null: a syntax error has no schema path.
         });
-
-        return errors;
+        return .{ .errors = errors };
     };
+    // Every built field is duped, so the tree is not needed beyond this walk.
     defer parsed.deinit();
 
-    // Validate the structure of the JSON. Each semantic error is recorded with
-    // its dotted field path; exact line/column/context are backfilled below.
-    try validateZenvConfig(allocator, &errors, parsed.value, "");
-
-    // If there are no errors, return null
-    if (errors.items.len == 0) {
-        errors.deinit();
-        return null;
-    }
-
-    // Backfill accurate positions for every semantic error from a single pass
-    // over the token stream (keyed by field path).
-    try fillPositions(allocator, content, errors.items);
-
-    return errors;
-}
-
-/// Validates the structure of a zenv.json configuration
-fn validateZenvConfig(
-    allocator: Allocator,
-    errors: *std.array_list.Managed(ValidationError),
-    value: json.Value,
-    path: []const u8,
-) !void {
-    // The root must be an object
-    if (value != .object) {
+    const root = parsed.value;
+    if (root != .object) {
         try errors.append(ValidationError{
             .message = try allocator.dupe(u8, "Root configuration must be a JSON object"),
-            .field_path = try allocator.dupe(u8, path),
+            .field_path = try allocator.dupe(u8, ""),
         });
-        return;
+        return .{ .errors = errors };
     }
 
-    // Check for required base_dir field
-    if (!value.object.contains("base_dir")) {
-        try errors.append(ValidationError{
-            .message = try allocator.dupe(u8, "Missing required 'base_dir' field"),
-            .field_path = try allocator.dupe(u8, path),
-        });
-    } else {
-        const base_dir = value.object.get("base_dir") orelse unreachable;
-        if (base_dir != .string) {
+    var config = config_module.ZenvConfig{
+        .allocator = allocator,
+        .environments = std.StringHashMap(config_module.EnvironmentConfig).init(allocator),
+        .base_dir = try allocator.dupe(u8, "zenv"), // safe default; always deinit-able
+    };
+    errdefer config.deinit();
+
+    // base_dir: required string.
+    if (root.object.get("base_dir")) |bd| {
+        if (bd == .string) {
+            const dup = try allocator.dupe(u8, bd.string);
+            allocator.free(config.base_dir);
+            config.base_dir = dup;
+        } else {
             try errors.append(ValidationError{
                 .message = try allocator.dupe(u8, "'base_dir' must be a string"),
                 .field_path = try allocator.dupe(u8, "base_dir"),
             });
         }
+    } else {
+        try errors.append(ValidationError{
+            .message = try allocator.dupe(u8, "Missing required 'base_dir' field"),
+            .field_path = try allocator.dupe(u8, ""),
+        });
     }
 
-    // Check that we have at least one environment
+    // Environments: every top-level key except base_dir.
     var has_envs = false;
-    var it = value.object.iterator();
+    var it = root.object.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         if (std.mem.eql(u8, key, "base_dir")) continue;
-
         has_envs = true;
-        // Validate each environment definition
-        try validateEnvironment(
-            allocator,
-            errors,
-            entry.value_ptr.*,
-            key,
-            if (path.len > 0) try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, key }) else key,
-        );
+
+        if (try validateAndBuildEnvironment(allocator, &errors, entry.value_ptr.*, key)) |env| {
+            var env_mut = env;
+            const env_key = allocator.dupe(u8, key) catch {
+                env_mut.deinit();
+                return error.OutOfMemory;
+            };
+            config.environments.put(env_key, env_mut) catch {
+                allocator.free(env_key);
+                env_mut.deinit();
+                return error.OutOfMemory;
+            };
+        }
     }
 
     if (!has_envs) {
         try errors.append(ValidationError{
             .message = try allocator.dupe(u8, "At least one environment must be defined"),
-            .field_path = try allocator.dupe(u8, path),
+            .field_path = try allocator.dupe(u8, ""),
         });
     }
+
+    if (errors.items.len > 0) {
+        fillPositions(allocator, content, errors.items) catch {}; // positions are best-effort
+        config.deinit();
+        return .{ .errors = errors };
+    }
+
+    errors.deinit();
+    return .{ .config = config };
 }
 
-/// Validates an environment configuration
-// Validates a `setup`/`activate`-style field: it must be an object or null, and
-// when present its `script` must be a string/null and its `commands` an array of
-// strings. `field` is the JSON key ("setup" or "activate"), used verbatim in the
-// error messages and field paths.
-fn validateScriptObject(
+/// Validates one environment AND builds its `EnvironmentConfig` in the same pass.
+/// Records positioned errors for any problem and returns the always-deinit-safe
+/// env (the caller discards it if the overall config has any errors), or null
+/// when the value isn't an object.
+fn validateAndBuildEnvironment(
     allocator: Allocator,
-    errors: *std.array_list.Managed(ValidationError),
+    errors: *ErrorList,
     value: json.Value,
     env_name: []const u8,
-    path: []const u8,
-    field: []const u8,
-) !void {
-    const obj = value.object.get(field) orelse return;
-    if (obj != .object and obj != .null) {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
-            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, field }),
-        });
-        return;
-    }
-    if (obj != .object) return;
-
-    // script: optional string
-    if (obj.object.get("script")) |script| {
-        if (script != .string and script != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.script' must be a string or null", .{ env_name, field }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.script", .{ path, field }),
-            });
-        }
-    }
-
-    // commands: optional array of strings
-    if (obj.object.get("commands")) |commands| {
-        if (commands != .array and commands != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands", .{ path, field }),
-            });
-        } else if (commands == .array) {
-            for (commands.array.items, 0..) |cmd, i| {
-                if (cmd != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands[{d}]' must be a string", .{ env_name, field, i }),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands[{d}]", .{ path, field, i }),
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn validateEnvironment(
-    allocator: Allocator,
-    errors: *std.array_list.Managed(ValidationError),
-    value: json.Value,
-    env_name: []const u8,
-    path: []const u8,
-) !void {
+) !?config_module.EnvironmentConfig {
     if (value != .object) {
         try errors.append(ValidationError{
             .message = try std.fmt.allocPrint(allocator, "Environment '{s}' must be an object", .{env_name}),
-            .field_path = try allocator.dupe(u8, path),
+            .field_path = try allocator.dupe(u8, env_name),
         });
-        return;
+        return null;
     }
 
-    // Check for required 'target_machines' field
-    if (!value.object.contains("target_machines")) {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(
-                allocator,
-                "Environment '{s}' is missing required 'target_machines' field",
-                .{env_name},
-            ),
-            .field_path = try allocator.dupe(u8, path),
-        });
+    var env = config_module.EnvironmentConfig.init(allocator);
+    errdefer env.deinit();
+
+    // target_machines: required, non-empty array of strings.
+    if (value.object.get("target_machines")) |tm| {
+        if (tm != .array) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines' must be an array", .{env_name}),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{env_name}),
+            });
+        } else {
+            if (tm.array.items.len == 0) {
+                try errors.append(ValidationError{
+                    .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines' must not be empty", .{env_name}),
+                    .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{env_name}),
+                });
+            }
+            for (tm.array.items, 0..) |m, i| {
+                if (m != .string) {
+                    try errors.append(ValidationError{
+                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines[{d}]' must be a string", .{ env_name, i }),
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines[{d}]", .{ env_name, i }),
+                    });
+                }
+            }
+            const built = try config_module.Parse.getStringArray(allocator, tm);
+            env.target_machines.deinit();
+            env.target_machines = built;
+        }
     } else {
-        const target_machines = value.object.get("target_machines") orelse unreachable;
-        if (target_machines != .array) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'target_machines' must be an array",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{path}),
-            });
-        } else {
-            // Validate all items in target_machines are strings
-            for (target_machines.array.items, 0..) |machine, i| {
-                if (machine != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'target_machines[{d}]' must be a string",
-                            .{ env_name, i },
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines[{d}]", .{ path, i }),
-                    });
-                }
-            }
-        }
+        try errors.append(ValidationError{
+            .message = try std.fmt.allocPrint(allocator, "Environment '{s}' is missing required 'target_machines' field", .{env_name}),
+            .field_path = try allocator.dupe(u8, env_name),
+        });
     }
 
-    // Validate optional fields
-    // description: optional string
-    if (value.object.get("description")) |desc| {
-        if (desc != .string and desc != .null) {
+    // Optional string fields.
+    try buildOptString(allocator, errors, value, env_name, "description", &env.description);
+    try buildOptString(allocator, errors, value, env_name, "fallback_python", &env.fallback_python);
+    try buildOptString(allocator, errors, value, env_name, "modules_file", &env.modules_file);
+    try buildOptString(allocator, errors, value, env_name, "dependency_file", &env.dependency_file);
+
+    // Optional string arrays.
+    try buildOptStringArray(allocator, errors, value, env_name, "modules", &env.modules);
+    try buildOptStringArray(allocator, errors, value, env_name, "dependencies", &env.dependencies);
+
+    // module_cache: optional boolean.
+    if (value.object.get("module_cache")) |mc| {
+        if (mc == .bool) {
+            env.module_cache = mc.bool;
+        } else if (mc != .null) {
             try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'description' must be a string or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.description", .{path}),
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'module_cache' must be a boolean or null", .{env_name}),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.module_cache", .{env_name}),
             });
         }
     }
 
-    // fallback_python: optional string
-    if (value.object.get("fallback_python")) |python| {
-        if (python != .string and python != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'fallback_python' must be a string or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.fallback_python", .{path}),
-            });
-        }
-    }
+    // setup / activate: optional script objects.
+    env.setup = try validateAndBuildScriptObject(allocator, errors, value, env_name, "setup");
+    env.activate = try validateAndBuildScriptObject(allocator, errors, value, env_name, "activate");
 
-    // modules: array of strings
-    if (value.object.get("modules")) |modules| {
-        if (modules != .array) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'modules' must be an array",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.modules", .{path}),
-            });
-        } else {
-            for (modules.array.items, 0..) |module, i| {
-                if (module != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'modules[{d}]' must be a string",
-                            .{ env_name, i },
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.modules[{d}]", .{ path, i }),
-                    });
-                }
-            }
-        }
-    }
-
-    // modules_file: optional string
-    if (value.object.get("modules_file")) |modules_file| {
-        if (modules_file != .string and modules_file != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'modules_file' must be a string or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.modules_file", .{path}),
-            });
-        }
-    }
-
-    // dependencies: array of strings
-    if (value.object.get("dependencies")) |dependencies| {
-        if (dependencies != .array) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'dependencies' must be an array",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.dependencies", .{path}),
-            });
-        } else {
-            for (dependencies.array.items, 0..) |dep, i| {
-                if (dep != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'dependencies[{d}]' must be a string",
-                            .{ env_name, i },
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.dependencies[{d}]", .{ path, i }),
-                    });
-                }
-            }
-        }
-    }
-
-    // dependency_file: optional string
-    if (value.object.get("dependency_file")) |dep_file| {
-        if (dep_file != .string and dep_file != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'dependency_file' must be a string or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.dependency_file", .{path}),
-            });
-        }
-    }
-
-    // setup / activate: optional objects, each with an optional `script` (string
-    // or null) and optional `commands` (array of strings). Same shape, so one helper.
-    try validateScriptObject(allocator, errors, value, env_name, path, "setup");
-    try validateScriptObject(allocator, errors, value, env_name, path, "activate");
-
-    // module_cache: optional boolean
-    if (value.object.get("module_cache")) |module_cache| {
-        if (module_cache != .bool and module_cache != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'module_cache' must be a boolean or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.module_cache", .{path}),
-            });
-        }
-    }
-
-    // Whitelist approach: only allow specific fields in environment configuration
-    const allowed_fields = [_][]const u8{
-        "target_machines",
-        "description",
-        "modules",
-        "modules_file",
-        "dependencies",
-        "dependency_file",
-        "fallback_python",
-        "setup",
-        "activate",
-        "module_cache",
+    // Whitelist: every other field is unrecognized.
+    const allowed = [_][]const u8{
+        "target_machines", "description",     "modules", "modules_file", "dependencies",
+        "dependency_file", "fallback_python", "setup",   "activate",     "module_cache",
     };
-
-    // Check each field in the environment config
-    var field_iter = value.object.iterator();
-    while (field_iter.next()) |entry| {
-        const field_name = entry.key_ptr.*;
-
-        // Check if field is in the allowed list
-        var is_allowed = false;
-        for (allowed_fields) |allowed| {
-            if (std.mem.eql(u8, field_name, allowed)) {
-                is_allowed = true;
+    var fi = value.object.iterator();
+    while (fi.next()) |e| {
+        const fname = e.key_ptr.*;
+        var ok = false;
+        for (allowed) |a| {
+            if (std.mem.eql(u8, fname, a)) {
+                ok = true;
                 break;
             }
         }
-
-        // If not allowed, add validation error
-        if (!is_allowed) {
+        if (!ok) {
             try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', '{s}' is not a recognized field.",
-                    .{ env_name, field_name },
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, field_name }),
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' is not a recognized field.", .{ env_name, fname }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, fname }),
             });
         }
+    }
+
+    return env;
+}
+
+// Validates+builds an optional string field directly into `out`.
+fn buildOptString(
+    allocator: Allocator,
+    errors: *ErrorList,
+    value: json.Value,
+    env_name: []const u8,
+    field: []const u8,
+    out: *?[]const u8,
+) !void {
+    const v = value.object.get(field) orelse return;
+    switch (v) {
+        .string => |s| out.* = try allocator.dupe(u8, s),
+        .null => {},
+        else => try errors.append(ValidationError{
+            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be a string or null", .{ env_name, field }),
+            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        }),
+    }
+}
+
+// Validates+builds an optional array-of-strings field directly into `out`.
+fn buildOptStringArray(
+    allocator: Allocator,
+    errors: *ErrorList,
+    value: json.Value,
+    env_name: []const u8,
+    field: []const u8,
+    out: *StrList,
+) !void {
+    const v = value.object.get(field) orelse return;
+    if (v != .array) {
+        try errors.append(ValidationError{
+            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an array", .{ env_name, field }),
+            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        });
+        return;
+    }
+    for (v.array.items, 0..) |item, i| {
+        if (item != .string) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}[{d}]' must be a string", .{ env_name, field, i }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}[{d}]", .{ env_name, field, i }),
+            });
+        }
+    }
+    const built = try config_module.Parse.getStringArray(allocator, v);
+    out.deinit();
+    out.* = built;
+}
+
+// Validates+builds an optional `setup`/`activate` object into a ScriptConfig.
+fn validateAndBuildScriptObject(
+    allocator: Allocator,
+    errors: *ErrorList,
+    value: json.Value,
+    env_name: []const u8,
+    field: []const u8,
+) !?config_module.ScriptConfig {
+    const v = value.object.get(field) orelse return null;
+    if (v == .null) return null;
+    if (v != .object) {
+        try errors.append(ValidationError{
+            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
+            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        });
+        return null;
+    }
+
+    var sc = config_module.ScriptConfig.init();
+    errdefer sc.deinit(allocator);
+
+    if (v.object.get("script")) |script| {
+        switch (script) {
+            .string => |s| sc.script = try allocator.dupe(u8, s),
+            .null => {},
+            else => try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.script' must be a string or null", .{ env_name, field }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.script", .{ env_name, field }),
+            }),
+        }
+    }
+
+    if (v.object.get("commands")) |cmds| {
+        if (cmds == .array) {
+            for (cmds.array.items, 0..) |c, i| {
+                if (c != .string) {
+                    try errors.append(ValidationError{
+                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands[{d}]' must be a string", .{ env_name, field, i }),
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands[{d}]", .{ env_name, field, i }),
+                    });
+                }
+            }
+            sc.commands = try config_module.Parse.getStringArray(allocator, cmds);
+        } else if (cmds != .null) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands", .{ env_name, field }),
+            });
+        }
+    }
+
+    return sc;
+}
+
+/// Validates JSON content and returns positioned errors, or null when valid.
+/// The validate-only path (`zenv validate`): a thin shim over `loadConfig` that
+/// builds-and-discards, so a clean result is a real guarantee the config parses.
+pub fn validateJsonContent(allocator: Allocator, content: []const u8) !?ErrorList {
+    switch (try loadConfig(allocator, content)) {
+        .config => |c| {
+            var cfg = c;
+            cfg.deinit();
+            return null;
+        },
+        .errors => |errs| return errs,
     }
 }
 
@@ -624,10 +578,10 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Manage
     }
 }
 
-/// Validates a JSON configuration file and returns a ZenvConfig if valid
+/// Reads `config_path` and returns the built `ZenvConfig`, or prints positioned
+/// errors and fails. The production parse path (setup/register): a single call
+/// to the parse-and-validate seam — one read, one parse, one walk.
 pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_module.ZenvConfig {
-    // Read the file once and reuse the same bytes for validation and parsing,
-    // rather than reading + JSON-parsing the file twice (validate then parse).
     const content = runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
             var errors = std.array_list.Managed(ValidationError).init(allocator);
@@ -646,18 +600,18 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
     };
     defer allocator.free(content);
 
-    // Validate the content; errors are printed here, same as validateConfigFile.
-    if (try validateJsonContent(allocator, content)) |errors| {
-        defer {
-            for (errors.items) |*e| e.deinit(allocator);
-            errors.deinit();
-        }
-        printValidationErrors(allocator, errors);
-        return error.InvalidFormat;
+    switch (try loadConfig(allocator, content)) {
+        .errors => |errs| {
+            var e = errs;
+            defer {
+                for (e.items) |*x| x.deinit(allocator);
+                e.deinit();
+            }
+            printValidationErrors(allocator, e);
+            return error.InvalidFormat;
+        },
+        .config => |c| return c,
     }
-
-    // Validation passed: build the config from the same bytes.
-    return config_module.parseFromContent(allocator, content);
 }
 
 // ============================ Tests ============================
@@ -667,6 +621,103 @@ const testing = std.testing;
 fn freeErrors(a: Allocator, errs: *std.array_list.Managed(ValidationError)) void {
     for (errs.items) |*e| e.deinit(a);
     errs.deinit();
+}
+
+test "loadConfig builds a valid config (the formerly-untested build path)" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "venvs",
+        \\  "dev": {
+        \\    "target_machines": ["*", "jureca"],
+        \\    "description": "d",
+        \\    "modules": ["Python", "GCC"],
+        \\    "module_cache": false,
+        \\    "setup": { "commands": ["echo hi"], "script": "s.sh" }
+        \\  }
+        \\}
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .errors => |*e| {
+            freeErrors(a, e);
+            return error.TestUnexpectedResult;
+        },
+        .config => |*cfg| {
+            defer cfg.deinit();
+            try testing.expectEqualStrings("venvs", cfg.base_dir);
+            const env = cfg.getEnvironment("dev").?;
+            try testing.expectEqual(@as(usize, 2), env.target_machines.items.len);
+            try testing.expectEqualStrings("*", env.target_machines.items[0]);
+            try testing.expectEqual(@as(usize, 2), env.modules.items.len);
+            try testing.expectEqual(false, env.module_cache);
+            try testing.expect(env.setup != null);
+            try testing.expectEqualStrings("s.sh", env.setup.?.script.?);
+            try testing.expectEqual(@as(usize, 1), env.setup.?.commands.?.items.len);
+        },
+    }
+}
+
+test "loadConfig: empty target_machines is now an error (validate == setup)" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "z", "e": { "target_machines": [] } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .config => |*cfg| {
+            cfg.deinit();
+            return error.TestUnexpectedResult;
+        },
+        .errors => |*e| {
+            defer freeErrors(a, e);
+            try testing.expect(e.items.len >= 1);
+        },
+    }
+}
+
+test "loadConfig: a non-string array item is rejected (strict; was silently skipped)" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "z", "e": { "target_machines": ["ok"], "modules": ["a", 5, "b"] } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .config => |*cfg| {
+            cfg.deinit();
+            return error.TestUnexpectedResult;
+        },
+        .errors => |*e| {
+            defer freeErrors(a, e);
+            var found = false;
+            for (e.items) |it| {
+                if (std.mem.indexOf(u8, it.message, "modules[1]") != null) found = true;
+            }
+            try testing.expect(found);
+        },
+    }
+}
+
+test "loadConfig: an unknown environment field is rejected by the whitelist" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "z", "e": { "target_machines": ["*"], "bogus": 1 } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .config => |*cfg| {
+            cfg.deinit();
+            return error.TestUnexpectedResult;
+        },
+        .errors => |*e| {
+            defer freeErrors(a, e);
+            var found = false;
+            for (e.items) |it| {
+                if (std.mem.indexOf(u8, it.message, "bogus") != null) found = true;
+            }
+            try testing.expect(found);
+        },
+    }
 }
 
 test "validateJsonContent: valid config returns null" {

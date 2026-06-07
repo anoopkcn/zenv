@@ -119,7 +119,6 @@ pub const EnvironmentConfig = struct {
 pub const ZenvConfig = struct {
     allocator: Allocator,
     environments: StringHashMap(EnvironmentConfig),
-    value_tree: json.Parsed(json.Value),
     base_dir: []const u8,
 
     pub fn deinit(self: *ZenvConfig) void {
@@ -129,7 +128,6 @@ pub const ZenvConfig = struct {
             entry.value_ptr.deinit();
         }
         self.environments.deinit();
-        self.value_tree.deinit();
         self.allocator.free(self.base_dir);
     }
 
@@ -149,15 +147,17 @@ pub const ZenvConfig = struct {
 // Parsing Helpers
 // =======================
 
-const Parse = struct {
-    fn getBool(value: json.Value, default: bool) bool {
+// Field-extraction primitives shared by the single parse-and-validate seam in
+// validation.zig. Generic (no schema knowledge); the schema lives in that walk.
+pub const Parse = struct {
+    pub fn getBool(value: json.Value, default: bool) bool {
         return switch (value) {
             .bool => |b| b,
             else => default,
         };
     }
 
-    fn getString(allocator: Allocator, value: json.Value, default: ?[]const u8) !?[]const u8 {
+    pub fn getString(allocator: Allocator, value: json.Value, default: ?[]const u8) !?[]const u8 {
         return switch (value) {
             .string => |str| try allocator.dupe(u8, str),
             .null => default,
@@ -168,7 +168,7 @@ const Parse = struct {
         };
     }
 
-    fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
+    pub fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
         var result = ArrayList([]const u8).init(allocator);
         errdefer {
             for (result.items) |item| allocator.free(item);
@@ -192,164 +192,7 @@ const Parse = struct {
 
         return result;
     }
-
-    fn getStringMap(allocator: Allocator, value: json.Value) !StringHashMap([]const u8) {
-        var result = StringHashMap([]const u8).init(allocator);
-        errdefer {
-            var it = result.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                allocator.free(entry.value_ptr.*);
-            }
-            result.deinit();
-        }
-
-        if (value == .object) {
-            var it = value.object.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.* == .string) {
-                    const key_dupe = try allocator.dupe(u8, entry.key_ptr.*);
-                    const value_dupe = try allocator.dupe(u8, entry.value_ptr.string);
-                    try result.put(key_dupe, value_dupe);
-                }
-            }
-        }
-
-        return result;
-    }
 };
-
-// =======================
-// Main Parse Function
-// =======================
-
-pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
-    // Read the whole config file, then parse the bytes.
-    const json_content = try runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024);
-    defer allocator.free(json_content);
-    return parseFromContent(allocator, json_content);
-}
-
-/// Parses already-read config bytes into a ZenvConfig. Callers that have already
-/// read the file (e.g. validateAndParse, which validates the very same bytes) use
-/// this to avoid a redundant read+parse. The returned config owns its data through
-/// an internal parsed value tree (alloc_always), so `json_content` may be freed
-/// once this returns.
-pub fn parseFromContent(allocator: Allocator, json_content: []const u8) !ZenvConfig {
-    const value_tree = try json.parseFromSlice(json.Value, allocator, json_content, .{
-        .allocate = .alloc_always,
-    });
-
-    var config = ZenvConfig{
-        .allocator = allocator,
-        .environments = StringHashMap(EnvironmentConfig).init(allocator),
-        .value_tree = value_tree,
-        .base_dir = undefined,
-    };
-    errdefer config.deinit();
-
-    const root = value_tree.value;
-    if (root != .object) return error.ConfigInvalid;
-
-    // Parse base_dir
-    if (root.object.get("base_dir")) |base_dir| {
-        config.base_dir = try Parse.getString(allocator, base_dir, "zenv") orelse try allocator.dupe(u8, "zenv");
-    } else {
-        config.base_dir = try allocator.dupe(u8, "zenv");
-    }
-
-    // Pre-calculate the capacity for environments
-    try config.environments.ensureTotalCapacity(@intCast(root.object.count()));
-
-    // Parse environments
-    var env_iter = root.object.iterator();
-    while (env_iter.next()) |entry| {
-        const env_name = entry.key_ptr.*;
-        const env_value = entry.value_ptr.*;
-
-        if (std.mem.eql(u8, env_name, "base_dir")) continue;
-        if (env_value != .object) continue;
-
-        var env = EnvironmentConfig.init(allocator);
-        errdefer env.deinit();
-
-        // Required fields
-        if (env_value.object.get("target_machines")) |tm_val| {
-            env.target_machines = try Parse.getStringArray(allocator, tm_val);
-            if (env.target_machines.items.len == 0) return error.ConfigInvalid;
-        } else return error.ConfigInvalid;
-
-        // Optional fields with direct retrieval
-        env.fallback_python = try Parse.getString(allocator, env_value.object.get("fallback_python") orelse json.Value{ .null = {} }, null);
-
-        env.description = try Parse.getString(allocator, env_value.object.get("description") orelse json.Value{ .null = {} }, null);
-
-        env.modules_file = try Parse.getString(allocator, env_value.object.get("modules_file") orelse json.Value{ .null = {} }, null);
-
-        env.dependency_file = try Parse.getString(allocator, env_value.object.get("dependency_file") orelse json.Value{ .null = {} }, null);
-
-        env.module_cache = Parse.getBool(env_value.object.get("module_cache") orelse json.Value{ .null = {} }, true);
-
-        // Parse setup and activate script configs
-        if (env_value.object.get("setup")) |setup_value| {
-            if (setup_value == .object) {
-                var setup_config = ScriptConfig.init();
-
-                // Parse script field
-                if (setup_value.object.get("script")) |script_value| {
-                    setup_config.script = try Parse.getString(allocator, script_value, null);
-                }
-
-                // Parse commands array
-                if (setup_value.object.get("commands")) |cmds_value| {
-                    if (cmds_value != .null) {
-                        setup_config.commands = try Parse.getStringArray(allocator, cmds_value);
-                    }
-                }
-
-                env.setup = setup_config;
-            }
-        }
-
-        if (env_value.object.get("activate")) |activate_value| {
-            if (activate_value == .object) {
-                var activate_config = ScriptConfig.init();
-
-                // Parse script field
-                if (activate_value.object.get("script")) |script_value| {
-                    activate_config.script = try Parse.getString(allocator, script_value, null);
-                }
-
-                // Parse commands array
-                if (activate_value.object.get("commands")) |cmds_value| {
-                    if (cmds_value != .null) {
-                        activate_config.commands = try Parse.getStringArray(allocator, cmds_value);
-                    }
-                }
-
-                env.activate = activate_config;
-            }
-        }
-
-        // Optional arrays
-        if (env_value.object.get("modules")) |mods| {
-            env.modules = try Parse.getStringArray(allocator, mods);
-        }
-
-        if (env_value.object.get("dependencies")) |deps| {
-            env.dependencies = try Parse.getStringArray(allocator, deps);
-        }
-
-        // Setup and activate fields are now handled by the ScriptConfig parsing above
-
-        // Add to environments with duped key
-        const env_key = try allocator.dupe(u8, env_name);
-        try config.environments.put(env_key, env);
-    }
-
-    if (config.environments.count() == 0) return error.ConfigInvalid;
-    return config;
-}
 
 // =======================
 // RegistryEntry & Registry
