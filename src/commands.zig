@@ -794,18 +794,8 @@ pub fn handleRunCommand(
     };
     defer allocator.free(argv);
 
-    var child = std.process.spawn(runtime.io, .{
-        .argv = argv,
-        .stdin = .inherit,
-        .stdout = .inherit,
-        .stderr = .inherit,
-    }) catch |err| {
-        output.printError(allocator, "Failed to spawn command: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-
-    const term = child.wait(runtime.io) catch |err| {
-        output.printError(allocator, "Failed to wait for command: {s}", .{@errorName(err)}) catch {};
+    const term = runtime.exec(argv, .{}) catch |err| {
+        output.printError(allocator, "Failed to run command: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 

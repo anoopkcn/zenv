@@ -30,13 +30,7 @@ pub fn executeShellScript(
     script_abs_path: []const u8,
 ) !void {
     output.print(allocator, "Running script: {s}", .{script_abs_path}) catch {};
-    var child = try std.process.spawn(runtime.io, .{
-        .argv = &[_][]const u8{ "/bin/bash", script_abs_path },
-        .stdin = .inherit,
-        .stdout = .inherit,
-        .stderr = .inherit,
-    });
-    const term = try child.wait(runtime.io);
+    const term = try runtime.exec(&[_][]const u8{ "/bin/bash", script_abs_path }, .{});
 
     // Check if the command was successful
     const success = blk: {
@@ -236,4 +230,21 @@ pub fn setupEnvironment(
     };
 
     output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
+}
+
+// ============================ Tests ============================
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "executeShellScript maps the child's exit status to success/ProcessError" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const prev = test_support.useFakeExec();
+    defer runtime.exec_backend = prev;
+
+    test_support.fake_exec_exit = 0; // clean exit -> ok (the fake ignores the path)
+    try executeShellScript(a, "/tmp/ignored.sh");
+
+    test_support.fake_exec_exit = 1; // non-zero exit -> ProcessError
+    try testing.expectError(error.ProcessError, executeShellScript(a, "/tmp/ignored.sh"));
 }

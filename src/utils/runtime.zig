@@ -100,3 +100,76 @@ pub fn openDir(path: []const u8, options: Dir.OpenOptions) !Dir {
 pub fn cwdRealpath(allocator: Allocator) ![]u8 {
     return std.process.currentPathAlloc(io, allocator);
 }
+
+// --- Process execution -------------------------------------------------------
+//
+// One seam for spawning child processes. Concentrates the stdio/cwd policy and,
+// crucially, is swappable: unlike the filesystem (fakeable by pointing `io` at a
+// temp dir), an OS process spawn cannot be faked through `io`, so tests install a
+// fake `exec_backend` and restore it after. Two adapters — the real one below and
+// the test fake — make this a genuine seam rather than mere indirection.
+
+pub const Term = std.process.Child.Term;
+
+/// Result of a captured run. Caller owns `stdout` and `stderr`.
+pub const RunResult = struct {
+    term: Term,
+    stdout: []u8,
+    stderr: []u8,
+};
+
+pub const RunOptions = struct {
+    stdout_limit: Io.Limit = .unlimited,
+    stderr_limit: Io.Limit = .unlimited,
+    cwd: ?[]const u8 = null,
+};
+
+pub const ExecOptions = struct {
+    cwd: ?[]const u8 = null,
+};
+
+pub const ExecBackend = struct {
+    run: *const fn (allocator: Allocator, argv: []const []const u8, opts: RunOptions) anyerror!RunResult,
+    exec: *const fn (argv: []const []const u8, opts: ExecOptions) anyerror!Term,
+};
+
+/// The active backend. Set once to the real impl; tests swap it and restore.
+pub var exec_backend: ExecBackend = .{ .run = realRun, .exec = realExec };
+
+/// Runs `argv` to completion capturing stdout/stderr (caller owns both).
+/// Mirrors `std.process.run`. Dispatches through `exec_backend`.
+pub fn run(allocator: Allocator, argv: []const []const u8, opts: RunOptions) !RunResult {
+    return exec_backend.run(allocator, argv, opts);
+}
+
+/// Runs `argv` to completion with inherited stdio, returning the child's `Term`
+/// for the caller to interpret (check `.exited`, propagate a signal, etc.).
+/// Dispatches through `exec_backend`.
+pub fn exec(argv: []const []const u8, opts: ExecOptions) !Term {
+    return exec_backend.exec(argv, opts);
+}
+
+fn toCwd(cwd: ?[]const u8) std.process.Child.Cwd {
+    return if (cwd) |c| .{ .path = c } else .inherit;
+}
+
+fn realRun(allocator: Allocator, argv: []const []const u8, opts: RunOptions) anyerror!RunResult {
+    const r = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .stdout_limit = opts.stdout_limit,
+        .stderr_limit = opts.stderr_limit,
+        .cwd = toCwd(opts.cwd),
+    });
+    return .{ .term = r.term, .stdout = r.stdout, .stderr = r.stderr };
+}
+
+fn realExec(argv: []const []const u8, opts: ExecOptions) anyerror!Term {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = toCwd(opts.cwd),
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    return child.wait(io);
+}

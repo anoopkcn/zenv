@@ -182,8 +182,7 @@ pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostn
 // Helper function to get hostname using the `hostname` command (internal)
 pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Executing 'hostname' command", .{});
-    const result = std.process.run(allocator, runtime.io, .{
-        .argv = &[_][]const u8{"hostname"},
+    const result = runtime.run(allocator, &[_][]const u8{"hostname"}, .{
         .stdout_limit = .limited(128),
         .stderr_limit = .limited(512),
     }) catch |err| {
@@ -627,4 +626,32 @@ pub fn validateModules(
     }
 
     return true;
+}
+
+// ============================ Tests ============================
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "getHostnameFromCommand trims output and rejects empty/failed runs" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const prev = test_support.useFakeExec();
+    defer runtime.exec_backend = prev;
+
+    // happy path: surrounding whitespace is trimmed off the captured stdout
+    test_support.fake_run_stdout = "  jrlogin01.jureca \n";
+    test_support.fake_run_stderr = "";
+    test_support.fake_run_exit = 0;
+    const h = try getHostnameFromCommand(a);
+    defer a.free(h);
+    try testing.expectEqualStrings("jrlogin01.jureca", h);
+
+    // whitespace-only output -> MissingHostname
+    test_support.fake_run_stdout = "   \n";
+    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a));
+
+    // non-zero exit -> ProcessError
+    test_support.fake_run_stdout = "ignored";
+    test_support.fake_run_exit = 1;
+    try testing.expectError(error.ProcessError, getHostnameFromCommand(a));
 }

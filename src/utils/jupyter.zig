@@ -22,8 +22,7 @@ pub const KernelSpec = struct {
 
 /// Check if Jupyter is installed and available
 pub fn isJupyterAvailable(allocator: Allocator) bool {
-    const result = std.process.run(allocator, runtime.io, .{
-        .argv = &[_][]const u8{ "jupyter", "--version" },
+    const result = runtime.run(allocator, &[_][]const u8{ "jupyter", "--version" }, .{
         .stdout_limit = .limited(1024),
         .stderr_limit = .limited(1024),
     }) catch return false;
@@ -369,4 +368,22 @@ pub fn hasKernel(allocator: Allocator, env_name: []const u8) bool {
 
     runtime.access(kernel_dir) catch return false;
     return true;
+}
+
+// ============================ Tests ============================
+const testing = std.testing;
+const test_support = @import("../test_support.zig");
+
+test "isJupyterAvailable maps exit status to a bool" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const prev = test_support.useFakeExec();
+    defer runtime.exec_backend = prev;
+
+    test_support.fake_run_stdout = "jupyter 7.0.0";
+    test_support.fake_run_exit = 0;
+    try testing.expect(isJupyterAvailable(a));
+
+    test_support.fake_run_exit = 1; // `jupyter` present but errored
+    try testing.expect(!isJupyterAvailable(a));
 }

@@ -184,12 +184,7 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
     output.print(allocator, "Extracting {s} to {s}", .{ tarball_path, target_dir }) catch {};
 
     // Run tar to extract the file
-    var child = try std.process.spawn(runtime.io, .{
-        .argv = &[_][]const u8{ "tar", "-xzf", tarball_path, "-C", target_dir },
-        .stdout = .inherit,
-        .stderr = .inherit,
-    });
-    _ = try child.wait(runtime.io);
+    _ = try runtime.exec(&[_][]const u8{ "tar", "-xzf", tarball_path, "-C", target_dir }, .{});
 
     // Get the extracted directory name (Python-VERSION)
     const filename = std.fs.path.basename(tarball_path);
@@ -202,13 +197,7 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
 // Run a command with its output streamed straight to the user's terminal.
 // Returns true on a clean (status 0) exit.
 fn runStreamedCommand(args: []const []const u8, cwd: []const u8) !bool {
-    var child = try std.process.spawn(runtime.io, .{
-        .argv = args,
-        .cwd = .{ .path = cwd },
-        .stdout = .inherit,
-        .stderr = .inherit,
-    });
-    const term = try child.wait(runtime.io);
+    const term = try runtime.exec(args, .{ .cwd = cwd });
     return term == .exited and term.exited == 0;
 }
 
