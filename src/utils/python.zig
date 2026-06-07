@@ -19,7 +19,9 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
     defer allocator.free(base_install_dir);
 
     const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version });
+    errdefer allocator.free(install_dir); // returned on success; freed on the error path
     const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
+    defer allocator.free(python_bin);
 
     // Check if the Python binary exists
     const python_exists = blk: {
@@ -40,7 +42,6 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
         return error.FileNotFound;
     }
 
-    allocator.free(python_bin);
     return install_dir;
 }
 
@@ -68,8 +69,6 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
     var installed_count: usize = 0;
     const default_path = try getDefaultPythonPath(allocator);
     defer if (default_path) |path| allocator.free(path);
-
-    // output.print(allocator,"Installed Python versions:", .{}) catch {};
 
     var it = dir.iterate();
     while (try it.next(runtime.io)) |entry| {
@@ -113,9 +112,6 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         output.print(allocator, "No Python versions installed yet", .{}) catch {};
         output.print(allocator, "Use 'zenv python install <version>' to install a Python version", .{}) catch {};
     }
-    // else {
-    //     output.print(allocator,"Use 'zenv python use <version>' to set a version as default", .{}) catch {};
-    // }
 }
 
 // Write the default Python path to a file
@@ -152,8 +148,13 @@ pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
         output.printError(allocator, "Failed to read default-python file: {s}", .{@errorName(err)}) catch {}; // Keep user informed
         return err; // Propagate the error
     };
+    defer allocator.free(content);
 
-    return std.mem.trim(u8, content, "\n\r\t ");
+    // Return an independently-owned copy: trimming yields a sub-slice of `content`
+    // whose pointer/len no longer match the original allocation, so callers could
+    // not safely free it otherwise.
+    const trimmed = std.mem.trim(u8, content, "\n\r\t ");
+    return try allocator.dupe(u8, trimmed);
 }
 
 // Download the Python source code for the specified version
@@ -163,8 +164,6 @@ pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const 
 
     const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
     defer allocator.free(filename);
-
-    // output.print(allocator,"Downloading Python {s} from {s}", .{ version, url }) catch {};
 
     // Use our download utility instead of curl
     const dl_path = try download.downloadToTemp(allocator, url, filename, .{
@@ -289,8 +288,6 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
 // Main function to install Python
 pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const python_version = version orelse DEFAULT_PYTHON_VERSION;
-
-    // output.print(allocator,"Installing Python version {s}", .{python_version}) catch {};
 
     // Get the installation directory
     const base_install_dir = try getDefaultInstallDir(allocator);

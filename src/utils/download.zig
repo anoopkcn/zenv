@@ -4,30 +4,10 @@ const http = std.http;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
-/// Error set for download operations
-pub const DownloadError = error{
-    HttpError,
-    FileCreationError,
-    WriteError,
-    StatusError,
-    OutOfMemory,
-    FileNotFound,
-    ReadError,
-};
-
 /// Options for downloading files
 pub const DownloadOptions = struct {
     /// Show progress output
     show_progress: bool = true,
-
-    /// Follow redirects
-    follow_redirects: bool = true,
-
-    /// Maximum number of redirects to follow
-    max_redirects: u8 = 10,
-
-    /// Additional HTTP headers
-    headers: ?[]const http.Header = null,
 };
 
 /// Downloads a file from a URL to a local path

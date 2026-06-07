@@ -10,8 +10,6 @@ pub const JupyterError = error{
     JupyterNotFound,
     KernelNotFound,
     KernelExists,
-    InvalidKernelName,
-    PermissionDenied,
     InvalidPath,
 };
 

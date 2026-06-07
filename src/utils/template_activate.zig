@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
-const errors = @import("errors.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
@@ -37,12 +36,16 @@ fn createActivationScript(
     // Check if base_dir is absolute
     const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
 
-    // Create scripts directory for hook scripts if needed
-    const scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
-    defer allocator.free(scripts_rel_path);
+    // Create scripts directory for hook scripts (absolute, so it can be baked into
+    // the generated activate.sh and passed to the shared copyHookScript helper).
+    const scripts_dir = if (is_absolute_base_dir)
+        try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" })
+    else
+        try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "scripts" });
+    defer allocator.free(scripts_dir);
 
     // Create the scripts directory (idempotent, works for absolute and relative)
-    runtime.makePath(scripts_rel_path) catch |err| {
+    runtime.makePath(scripts_dir) catch |err| {
         if (err != error.PathAlreadyExists) {
             output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, as this is not a critical error
@@ -58,7 +61,7 @@ fn createActivationScript(
     if (env_config.activate != null and env_config.activate.?.script != null) {
         const hook_path = env_config.activate.?.script.?;
         // Copy the script to the environment's scripts directory
-        if (copyHookScript(allocator, hook_path, scripts_rel_path, "activate_hook.sh", is_absolute_base_dir, cwd_path)) |dest_path| {
+        if (template.copyHookScript(allocator, hook_path, scripts_dir, "activate_hook.sh", cwd_path)) |dest_path| {
             defer allocator.free(dest_path);
             activate_hook_path = try allocator.dupe(u8, dest_path);
 
@@ -132,15 +135,6 @@ fn createActivationScript(
     defer allocator.free(module_section);
     try replacements.put("MODULE_SECTION", module_section);
 
-    // Create empty placeholders for template compatibility
-    const exports_slice = try allocator.dupe(u8, "");
-    defer allocator.free(exports_slice);
-    const unset_slice = try allocator.dupe(u8, "");
-    defer allocator.free(unset_slice);
-
-    try replacements.put("CUSTOM_VAR_EXPORTS", exports_slice);
-    try replacements.put("CUSTOM_VAR_UNSET", unset_slice);
-
     // Generate activate commands block
     var activate_commands_block = std.array_list.Managed(u8).init(allocator);
     defer activate_commands_block.deinit();
@@ -162,16 +156,6 @@ fn createActivationScript(
     defer allocator.free(activate_hook_slice);
     try replacements.put("ACTIVATE_HOOK_BLOCK", activate_hook_slice);
 
-    // Add optional description
-    var description_text = std.array_list.Managed(u8).init(allocator);
-    defer description_text.deinit();
-    if (env_config.description) |desc| {
-        try description_text.print(": {s}", .{desc});
-    }
-    const desc_slice = try description_text.toOwnedSlice();
-    defer allocator.free(desc_slice);
-    try replacements.put("ENV_DESCRIPTION", desc_slice);
-
     const processed_content = try template.processTemplateString(allocator, ACTIVATION_TEMPLATE, replacements);
     defer allocator.free(processed_content);
 
@@ -183,28 +167,23 @@ fn createActivationScript(
     output.print(allocator, "Activation script created at {s}", .{script_abs_path}) catch {};
 }
 
-// Appends `value` to `buf` as a shell single-quoted string body, escaping any
-// embedded single quotes (the classic '\'' trick). Caller writes the wrapping
-// quotes around the call.
-fn appendSqEscaped(buf: *std.array_list.Managed(u8), value: []const u8) !void {
-    for (value) |c| {
-        if (c == '\'') {
-            try buf.appendSlice("'\\''");
-        } else {
-            try buf.append(c);
-        }
-    }
-}
-
 // Writes the per-module load lines (header echoes + `safe_module_load` calls)
-// shared by the no-cache path and the cache-miss fallback.
+// shared by the no-cache path and the cache-miss fallback. Module names come
+// from zenv.json, so they go through appendSqEscaped to stay safe inside the
+// single-quoted shell strings.
 fn writeModuleLoadLines(buf: *std.array_list.Managed(u8), modules: []const []const u8) !void {
     try buf.print("echo 'Info: Loading {d} modules'\n", .{modules.len});
     for (modules, 0..) |module_name, idx| {
-        try buf.print("echo '  - Module {d}: \"{s}\"'\n", .{ idx + 1, module_name });
+        try buf.print("echo '  - Module {d}: \"", .{idx + 1});
+        try template.appendSqEscaped(buf, module_name);
+        try buf.appendSlice("\"'\n");
     }
     for (modules) |module_name| {
-        try buf.print("safe_module_load '{s}' || handle_module_error '{s}'\n", .{ module_name, module_name });
+        try buf.appendSlice("safe_module_load '");
+        try template.appendSqEscaped(buf, module_name);
+        try buf.appendSlice("' || handle_module_error '");
+        try template.appendSqEscaped(buf, module_name);
+        try buf.appendSlice("'\n");
     }
 }
 
@@ -248,11 +227,11 @@ fn buildModuleSection(
     try w.print("if command -v module >/dev/null 2>&1; then\n", .{});
 
     try w.appendSlice("  __zenv_cache='");
-    try appendSqEscaped(w, venv_path);
+    try template.appendSqEscaped(w, venv_path);
     try w.print("/{s}'\n", .{template.MODULE_CACHE_FILE});
 
     try w.appendSlice("  __zenv_stamp='");
-    try appendSqEscaped(w, venv_path);
+    try template.appendSqEscaped(w, venv_path);
     try w.print("/{s}'\n", .{template.MODULE_CACHE_STAMP});
 
     try w.print("  __zenv_use_cache=0\n", .{});
@@ -276,63 +255,6 @@ fn buildModuleSection(
     try w.print("fi\n", .{});
 
     return buf.toOwnedSlice();
-}
-
-// Helper function to copy hook scripts to the environment's scripts directory
-fn copyHookScript(
-    allocator: Allocator,
-    hook_path: []const u8,
-    scripts_dir: []const u8,
-    dest_filename: []const u8,
-    is_absolute_base_dir: bool,
-    cwd_path: []const u8,
-) ![]const u8 {
-    // Determine if the hook_path is absolute or relative
-    const resolved_hook_path = if (std.fs.path.isAbsolute(hook_path))
-        hook_path
-    else
-        try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
-
-    defer if (!std.fs.path.isAbsolute(hook_path)) allocator.free(resolved_hook_path);
-
-    output.print(allocator, "Looking for hook script at: {s}", .{resolved_hook_path}) catch {};
-
-    // Check if hook script exists
-    const source_exists = blk: {
-        runtime.access(resolved_hook_path) catch |err| {
-            if (err == error.FileNotFound) {
-                output.printError(allocator, "Hook script not found: {s}", .{resolved_hook_path}) catch {};
-                return err;
-            }
-            output.printError(allocator, "Error accessing hook script {s}: {s}", .{ resolved_hook_path, @errorName(err) }) catch {};
-            return err;
-        };
-        break :blk true;
-    };
-
-    if (!source_exists) {
-        return error.FileNotFound;
-    }
-
-    // Construct destination path
-    var dest_path: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
-    } else {
-        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, scripts_dir, dest_filename });
-    }
-    errdefer allocator.free(dest_path);
-
-    // Copy the script file (read whole source, write to an executable dest)
-    const content = try runtime.readFileAlloc(allocator, resolved_hook_path, 10 * 1024 * 1024);
-    defer allocator.free(content);
-
-    var dest_file = try runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) });
-    defer dest_file.close(runtime.io);
-    try dest_file.writeStreamingAll(runtime.io, content);
-
-    output.print(allocator, "Copied hook script from {s} to {s}", .{ resolved_hook_path, dest_path }) catch {};
-    return dest_path;
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

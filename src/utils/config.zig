@@ -4,7 +4,6 @@ const ArrayList = std.array_list.Managed;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
-const environment = @import("environment.zig");
 const mem = std.mem;
 const json = std.json;
 const paths = @import("paths.zig");
@@ -122,7 +121,6 @@ pub const ZenvConfig = struct {
     environments: StringHashMap(EnvironmentConfig),
     value_tree: json.Parsed(json.Value),
     base_dir: []const u8,
-    cached_hostname: ?[]const u8 = null,
 
     pub fn deinit(self: *ZenvConfig) void {
         var iter = self.environments.iterator();
@@ -133,7 +131,6 @@ pub const ZenvConfig = struct {
         self.environments.deinit();
         self.value_tree.deinit();
         self.allocator.free(self.base_dir);
-        if (self.cached_hostname) |h| self.allocator.free(h);
     }
 
     pub fn getEnvironment(self: *const ZenvConfig, env_name: []const u8) ?*const EnvironmentConfig {
@@ -145,19 +142,6 @@ pub const ZenvConfig = struct {
         if (env_config.target_machines.items.len == 0) return ZenvError.ConfigInvalid;
         // python_executable is now optional, no validation needed
         return null;
-    }
-
-    pub fn getHostname(self: *const ZenvConfig) ![]const u8 {
-        if (self.cached_hostname) |cached| {
-            return try self.allocator.dupe(u8, cached);
-        }
-        var mutable_self = @constCast(self);
-        const hostname = environment.getSystemHostname(mutable_self.allocator) catch |err| {
-            return errors.logAndReturn(err, "Failed to get system hostname: {s}", .{@errorName(err)});
-        };
-        errdefer mutable_self.allocator.free(hostname);
-        mutable_self.cached_hostname = try mutable_self.allocator.dupe(u8, hostname);
-        return hostname;
     }
 };
 
@@ -240,14 +224,18 @@ const Parse = struct {
 // =======================
 
 pub fn parse(allocator: Allocator, config_path: []const u8) !ZenvConfig {
-    // Use ArenaAllocator only for the JSON parsing phase
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    // Read the whole config file
+    // Read the whole config file, then parse the bytes.
     const json_content = try runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024);
     defer allocator.free(json_content);
+    return parseFromContent(allocator, json_content);
+}
 
+/// Parses already-read config bytes into a ZenvConfig. Callers that have already
+/// read the file (e.g. validateAndParse, which validates the very same bytes) use
+/// this to avoid a redundant read+parse. The returned config owns its data through
+/// an internal parsed value tree (alloc_always), so `json_content` may be freed
+/// once this returns.
+pub fn parseFromContent(allocator: Allocator, json_content: []const u8) !ZenvConfig {
     const value_tree = try json.parseFromSlice(json.Value, allocator, json_content, .{
         .allocate = .alloc_always,
     });

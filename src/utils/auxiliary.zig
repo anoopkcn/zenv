@@ -213,7 +213,6 @@ pub fn setupEnvironment(
         env_name,
         base_dir,
         req_abs_path,
-        valid_deps_list.items.len,
         flags,
         modules_verified,
         command_str,
@@ -229,13 +228,9 @@ pub fn setupEnvironment(
     }
     output.print(allocator, "Created setup script: {s}", .{script_abs_path}) catch {};
 
-    // Execute setup script
-    executeShellScript(allocator, script_abs_path) catch |err| {
-        if (err == error.ModuleLoadError) {
-            // Let this error propagate up as is
-            return err;
-        }
-        // For other errors, propagate as ProcessError
+    // Execute setup script. Any failure (non-zero exit or spawn error) surfaces
+    // as ProcessError; executeShellScript never returns ModuleLoadError.
+    executeShellScript(allocator, script_abs_path) catch {
         output.printError(allocator, "Setup script execution failed.", .{}) catch {};
         return error.ProcessError;
     };

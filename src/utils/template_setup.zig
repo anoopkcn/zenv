@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
-const errors = @import("errors.zig");
 const output = @import("output.zig");
 const template = @import("template.zig");
 const runtime = @import("runtime.zig");
@@ -18,7 +17,6 @@ pub fn createSetupScriptFromTemplate(
     env_name: []const u8,
     base_dir: []const u8,
     req_abs_path: []const u8,
-    valid_deps_list_len: usize,
     flags: CommandFlags,
     modules_verified: bool,
     command_str: ?[]const u8,
@@ -29,105 +27,10 @@ pub fn createSetupScriptFromTemplate(
         env_name,
         base_dir,
         req_abs_path,
-        valid_deps_list_len,
         flags,
         modules_verified,
         command_str,
     );
-}
-
-fn fileExists(path: []const u8) bool {
-    runtime.access(path) catch {
-        return false;
-    };
-    return true;
-}
-
-// Helper function to copy hook scripts to the environment's scripts directory
-fn copyHookScript(
-    allocator: Allocator,
-    hook_path: []const u8,
-    scripts_dir: []const u8,
-    dest_filename: []const u8,
-    is_absolute_base_dir: bool,
-    cwd_path: []const u8,
-) ![]const u8 {
-    var source_path: []const u8 = undefined;
-    var path_allocd = false;
-
-    // 1. Try hook_path as-is (if absolute)
-    if (std.fs.path.isAbsolute(hook_path)) {
-        source_path = hook_path;
-        path_allocd = false;
-    } else {
-        // 2. Try relative to cwd (where zenv.json is)
-        const rel_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
-        defer allocator.free(rel_path);
-
-        if (accessFile(rel_path)) {
-            source_path = try allocator.dupe(u8, rel_path);
-            path_allocd = true;
-        } else {
-            // 3. Try just the filename in current directory
-            if (accessFile(hook_path)) {
-                source_path = hook_path;
-                path_allocd = false;
-            } else {
-                // No path worked, report error
-                output.printError(allocator, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
-                return error.FileNotFound;
-            }
-        }
-    }
-    defer if (path_allocd) allocator.free(source_path);
-
-    output.print(allocator, "Found hook script at: {s}", .{source_path}) catch {};
-
-    // Ensure the source file really exists and is readable before proceeding
-    if (!accessFile(source_path)) {
-        output.printError(allocator, "Hook script found but cannot be read: {s}", .{source_path}) catch {};
-        return error.FileNotFound;
-    }
-
-    // Construct destination path
-    var dest_path: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
-    } else {
-        // For relative paths, scripts_dir is already joined with cwd_path earlier
-        // so we should not include cwd_path again
-        dest_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, dest_filename });
-    }
-    errdefer allocator.free(dest_path);
-
-    // Copy the script file (read whole source, write to an executable dest)
-    output.print(allocator, "Copying hook script {s} -> {s}", .{ source_path, dest_path }) catch {};
-    const content = runtime.readFileAlloc(allocator, source_path, 10 * 1024 * 1024) catch |err| {
-        output.printError(allocator, "Failed to read source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
-    defer allocator.free(content);
-
-    var dest_file = runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) }) catch |err| {
-        output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
-    defer dest_file.close(runtime.io);
-
-    dest_file.writeStreamingAll(runtime.io, content) catch |err| {
-        output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
-
-    output.print(allocator, "Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
-    return dest_path;
-}
-
-fn accessFile(path: []const u8) bool {
-    runtime.access(path) catch {
-        return false;
-    };
-    return true;
 }
 
 fn createSetupScript(
@@ -136,7 +39,6 @@ fn createSetupScript(
     env_name: []const u8,
     base_dir: []const u8,
     req_abs_path: []const u8,
-    valid_deps_list_len: usize,
     flags: CommandFlags,
     modules_verified: bool,
     command_str: ?[]const u8,
@@ -160,17 +62,6 @@ fn createSetupScript(
         venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
     }
     defer allocator.free(venv_dir);
-
-    // Activation script path
-    var activate_script_path: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        // For absolute base_dir, paths are already absolute
-        activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
-    } else {
-        // For relative base_dir, combine with cwd for absolute paths
-        activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "activate.sh" });
-    }
-    defer allocator.free(activate_script_path);
 
     // Create scripts directory for hook scripts if needed
     var scripts_rel_path: []const u8 = undefined;
@@ -201,17 +92,11 @@ fn createSetupScript(
         output.print(allocator, "Processing setup script: '{s}'", .{hook_path}) catch {};
 
         // Copy the script to the environment's scripts directory
-        const dest_path = copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", is_absolute_base_dir, cwd_path) catch |err| {
+        const dest_path = template.copyHookScript(allocator, hook_path, scripts_rel_path, "setup_hook.sh", cwd_path) catch |err| {
+            // A configured setup script that can't be copied is a hard error: the
+            // environment would otherwise be set up without the user's setup steps,
+            // silently diverging from zenv.json. Fail loudly instead.
             output.printError(allocator, "Failed to copy setup script '{s}': {s}", .{ hook_path, @errorName(err) }) catch {};
-            // Continue anyway, but add a warning in the script
-            try setup_hook_block.print(
-                \\
-                \\# Warning: Failed to copy setup script from '{s}'
-                \\echo "Warning: Failed to copy setup script from '{s}'"
-                \\
-            , .{ hook_path, hook_path });
-
-            // Skip the rest of this hook processing
             return error.FileNotFound;
         };
         defer allocator.free(dest_path);
@@ -249,8 +134,13 @@ fn createSetupScript(
         try replacements.put("COMMAND_STRING", "unknown");
     }
 
-    // Get the fallback python to use
+    // Get the fallback python to use. Track ownership separately: only the two
+    // duped branches below allocate, so only those may be freed. The config-
+    // provided branch borrows from env_config and the "python3" branches are
+    // static — freeing either would be an invalid free.
     var fallback_python: []const u8 = undefined;
+    var fallback_python_owned: ?[]const u8 = null;
+    defer if (fallback_python_owned) |p| allocator.free(p);
 
     // When --python flag is used, try to get the default Python
     if (flags.use_default_python) {
@@ -261,10 +151,12 @@ fn createSetupScript(
         };
 
         if (default_python) |path| {
+            defer allocator.free(path); // getDefaultPythonPath returns an owned copy
             // Build the full path to the Python binary
             const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
             defer allocator.free(python_bin);
             fallback_python = try allocator.dupe(u8, python_bin);
+            fallback_python_owned = fallback_python;
             try output.print(allocator, "Using default Python from ZENV_DIR/default-python: {s}", .{fallback_python});
         } else {
             output.printError(allocator, "--python flag specified but no default Python configured", .{}) catch {};
@@ -274,16 +166,18 @@ fn createSetupScript(
     } else {
         // Normal behavior without --python flag
         if (env_config.fallback_python) |py| {
-            // Use the explicitly configured fallback Python
+            // Use the explicitly configured fallback Python (borrowed; do not free)
             fallback_python = py;
         } else {
             // Try to get the default Python path
             if (@import("python.zig").getDefaultPythonPath(allocator)) |default_python| {
                 if (default_python) |path| {
+                    defer allocator.free(path); // owned copy from getDefaultPythonPath
                     // Build the full path to the Python binary
                     const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
                     defer allocator.free(python_bin);
                     fallback_python = try allocator.dupe(u8, python_bin);
+                    fallback_python_owned = fallback_python;
                 } else {
                     fallback_python = "python3"; // No default Python path found
                 }
@@ -295,7 +189,6 @@ fn createSetupScript(
     }
 
     try replacements.put("FALLBACK_PYTHON", fallback_python);
-    try replacements.put("ACTIVATE_SCRIPT_PATH", activate_script_path);
     try replacements.put("REQUIREMENTS_PATH", req_abs_path);
 
     // Set modules_verified flag for the template
@@ -334,29 +227,12 @@ fn createSetupScript(
     defer allocator.free(module_cache_stamp);
     try replacements.put("MODULE_CACHE_STAMP", module_cache_stamp);
 
-    // Create the pip install command based on whether we have dependencies
-    const pip_install_cmd = if (valid_deps_list_len > 0)
-        try std.fmt.allocPrint(allocator, "python -m pip install -r {s}", .{req_abs_path})
-    else
-        "echo 'Info: No dependencies in requirements file to install.'";
-    defer if (valid_deps_list_len > 0) allocator.free(pip_install_cmd);
-
-    try replacements.put("PIP_INSTALL_COMMAND", pip_install_cmd);
-
     // Generate the module loading block
     var module_loading_block = std.array_list.Managed(u8).init(allocator);
     defer module_loading_block.deinit();
     const module_writer = &module_loading_block;
 
     if (env_config.modules.items.len > 0) {
-        // Build the module list string for display
-        var module_list_str = std.array_list.Managed(u8).init(allocator);
-        defer module_list_str.deinit();
-        for (env_config.modules.items, 0..) |module_name, idx| {
-            if (idx > 0) try module_list_str.appendSlice(", ");
-            try module_list_str.appendSlice(module_name);
-        }
-
         if (env_config.modules_file) |modules_file| {
             try module_writer.print("echo 'Info: Loading required modules from file: {s}'\n", .{modules_file});
         } else {
@@ -364,7 +240,11 @@ fn createSetupScript(
         }
         try module_writer.print("echo 'Info: Loading {d} modules'\n", .{env_config.modules.items.len});
         for (env_config.modules.items, 0..) |module_name, idx| {
-            try module_writer.print("echo '  - Module #{d}: \"{s}\"'\n", .{ idx + 1, module_name });
+            // Module names come from zenv.json; escape them inside the quoted
+            // shell strings so a stray quote can't break the generated script.
+            try module_writer.print("echo '  - Module #{d}: \"", .{idx + 1});
+            try template.appendSqEscaped(module_writer, module_name);
+            try module_writer.appendSlice("\"'\n");
         }
 
         // The set +e and error checking are now in the template itself, based on modules_verified
@@ -372,15 +252,23 @@ fn createSetupScript(
         // Load each module
         for (env_config.modules.items) |module_name| {
             // Add debug information before loading
-            try module_writer.print("info \"Attempting to load module: '{s}'\"\n", .{module_name});
+            try module_writer.appendSlice("info \"Attempting to load module: '");
+            try template.appendSqEscaped(module_writer, module_name);
+            try module_writer.appendSlice("'\"\n");
 
             if (modules_verified) {
                 // Just load the module when pre-verified, we already checked they exist.
                 // A failure still flips ZENV_MOD_OK so a half-loaded env is never cached.
-                try module_writer.print("safe_module_load '{s}' || ZENV_MOD_OK=0\n", .{module_name});
+                try module_writer.appendSlice("safe_module_load '");
+                try template.appendSqEscaped(module_writer, module_name);
+                try module_writer.appendSlice("' || ZENV_MOD_OK=0\n");
             } else {
                 // Load with error handling when not pre-verified
-                try module_writer.print("safe_module_load '{s}' || {{ handle_module_error '{s}'; ZENV_MOD_OK=0; }}\n", .{ module_name, module_name });
+                try module_writer.appendSlice("safe_module_load '");
+                try template.appendSqEscaped(module_writer, module_name);
+                try module_writer.appendSlice("' || { handle_module_error '");
+                try template.appendSqEscaped(module_writer, module_name);
+                try module_writer.appendSlice("'; ZENV_MOD_OK=0; }\n");
             }
         }
     } else {

@@ -182,14 +182,23 @@ pub fn parsePyprojectToml(
                     continue;
                 } else if (isStandaloneDepArray(trimmed)) {
                     output.print(allocator, "Found standalone dependencies array at line {d}", .{line_number}) catch {};
-                    state = ParseState.in_deps_array;
-                    bracket_depth = 1; // We're inside one array bracket
 
                     // Process any deps on this line
                     const opening_bracket = std.mem.indexOf(u8, trimmed, "[") orelse continue;
                     const line_after_bracket = trimmed[opening_bracket + 1 ..];
                     try parseDependenciesLine(allocator, line_after_bracket, deps_list, &count);
                     found_content = true;
+
+                    // The bracket scan at the top of the loop already updated
+                    // bracket_depth for this line. A single-line array such as
+                    // `dependencies = ["a", "b"]` balances back to 0, so we stay
+                    // in .searching; only a still-open (multi-line) array enters
+                    // .in_deps_array. Previously this hard-set bracket_depth = 1,
+                    // which left a single-line array "open" forever and made every
+                    // following line (e.g. `name = "proj"`) parse as a dependency.
+                    if (bracket_depth > 0) {
+                        state = ParseState.in_deps_array;
+                    }
                     continue;
                 } else if (isStandaloneDepTable(trimmed)) {
                     output.print(allocator, "Found dependencies table at line {d}", .{line_number}) catch {};
@@ -354,10 +363,6 @@ pub fn parseRequirementsTxt(
     output.print(allocator, "Parsing requirements.txt for dependencies...", .{}) catch {};
     var count: usize = 0;
 
-    // Create a reusable buffer to minimize allocations
-    var line_buffer = std.array_list.Managed(u8).init(allocator);
-    defer line_buffer.deinit();
-
     // Split lines more efficiently with iterator directly
     var line_iter = std.mem.splitScalar(u8, content, '\n');
 
@@ -398,9 +403,14 @@ pub fn validateDependencies(
         valid_deps.deinit();
     }
 
-    // Create a hashmap to track seen package names (case-insensitive)
+    // Create a hashmap to track seen package names (case-insensitive). The keys
+    // are owned dupes (see below), so free them before tearing down the table.
     var seen_packages = StringHashMap.init(allocator);
-    defer seen_packages.deinit();
+    defer {
+        var key_it = seen_packages.keyIterator();
+        while (key_it.next()) |k| allocator.free(k.*);
+        seen_packages.deinit();
+    }
 
     // Reuse a buffer for lowercase string conversion to reduce allocations
     var lowercase_buf = std.array_list.Managed(u8).init(allocator);
@@ -552,12 +562,7 @@ test "isLikelyPythonPackageName filters TOML metadata fields" {
 
 test "validateDependencies keeps multi-constraint specifiers" {
     test_support.setupRuntime();
-    // validateDependencies has a pre-existing leak (lowercase keys duped into its
-    // seen-packages map are not freed), so use an arena to keep this test focused
-    // on the validation behaviour rather than that unrelated leak.
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    const a = testing.allocator;
     const raw = [_][]const u8{
         "numpy>=1.26.0,<2.0",
         "requests>=2.8.1, <3.0",
@@ -567,6 +572,31 @@ test "validateDependencies keeps multi-constraint specifiers" {
     try testing.expectEqual(@as(usize, 2), valid.items.len);
     try testing.expectEqualStrings("numpy>=1.26.0,<2.0", valid.items[0]);
     try testing.expectEqualStrings("requests>=2.8.1, <3.0", valid.items[1]);
+}
+
+test "parsePyprojectToml: single-line dependencies array does not swallow later keys" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    // Regression: a single-line `dependencies = [...]` used to leave the parser
+    // stuck in the in_deps_array state, so following lines like `name = "proj"`
+    // were captured as bogus dependencies.
+    const content =
+        \\[project]
+        \\dependencies = ["requests", "flask>=2.0"]
+        \\name = "proj"
+        \\version = "1.2.3"
+    ;
+    var deps = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (deps.items) |d| a.free(d);
+        deps.deinit();
+    }
+    const count = try parsePyprojectToml(a, content, &deps);
+    try testing.expectEqual(@as(usize, 2), count);
+    for (deps.items) |d| {
+        try testing.expect(std.mem.indexOf(u8, d, "proj") == null);
+        try testing.expect(std.mem.indexOf(u8, d, "1.2.3") == null);
+    }
 }
 
 test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {

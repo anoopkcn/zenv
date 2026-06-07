@@ -36,41 +36,6 @@ pub const ZenvError = error{
     InvalidPath, // Added for invalid paths
 };
 
-/// Logs an error message and returns the provided error.
-/// Useful for standardizing error logging and handling across the application.
-///
-/// Params:
-///   - err: The error to return
-///   - message: Format string for the error message
-///   - args: Arguments for the format string
-///
-/// Returns: The original error for propagation
-pub fn logAndReturn(allocator: Allocator, err: anyerror, comptime message: []const u8, args: anytype) anyerror {
-    output.printError(allocator, message, args) catch {};
-    return err;
-}
-
-/// Helper function for consistent error handling when dealing with file operations.
-/// Logs the error with the path information and returns an appropriate error.
-///
-/// Params:
-///   - err: The error that occurred
-///   - path: The file path that was being accessed
-///   - operation: Description of what operation was being performed
-///
-/// Returns: A mapped error or the original error
-pub fn handleFileError(allocator: Allocator, err: anyerror, path: []const u8, operation: []const u8) anyerror {
-    output.printError(allocator, "File operation error: {s} '{s}': {s}", .{ operation, path, @errorName(err) }) catch {};
-
-    // Map common file errors to our error set
-    return switch (err) {
-        error.FileNotFound => ZenvError.ConfigFileNotFound,
-        error.IsDir => ZenvError.IoError,
-        error.AccessDenied => ZenvError.IoError,
-        else => err,
-    };
-}
-
 /// Check if debug mode is enabled by examining the ZENV_DEBUG environment variable.
 /// Debug statements should only be printed if ZENV_DEBUG is set to "1", "true", or "yes".
 ///

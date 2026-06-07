@@ -12,14 +12,6 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const RegistryEntry = config_module.RegistryEntry;
 const CommandFlags = flags_module.CommandFlags;
 
-// Normalizes a hostname for better matching
-// Handles common variations like ".local" suffix on macOS
-fn normalizeHostname(hostname: []const u8) []const u8 {
-    // When the target pattern is explicitly "local", we want to keep the ".local" suffix
-    // to allow for pattern matching "local" to match hosts with ".local" suffix
-    return hostname;
-}
-
 // Checks if pattern with wildcards matches a string
 // Supports * (any characters) and ? (single character)
 fn patternMatches(pattern: []const u8, str: []const u8) bool {
@@ -176,72 +168,14 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     return false;
 }
 
-// Validate environment for a specific hostname
+// Validate environment for a specific hostname. An environment matches when ANY
+// of its target_machines matches the hostname; an empty target list matches any
+// machine. The per-target rules live in checkHostnameMatch (single source of truth).
 pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostname: []const u8) bool {
-    // Special case: No target machines means any machine is valid
-    if (env_config.target_machines.items.len == 0) {
-        return true;
-    }
-
-    // Check against each target machine in the list
+    if (env_config.target_machines.items.len == 0) return true;
     for (env_config.target_machines.items) |target| {
-        // Special cases for universal targets
-        if (std.mem.eql(u8, target, "localhost") or
-            std.mem.eql(u8, target, "any") or
-            std.mem.eql(u8, target, "*"))
-        {
-            return true;
-        }
-
-        // Special case for "local" which should match any hostname with ".local" suffix
-        if (std.mem.eql(u8, target, "local") and std.mem.endsWith(u8, hostname, ".local")) {
-            return true;
-        }
-
-        // Normalize the hostname
-        const norm_hostname = normalizeHostname(hostname);
-
-        // Check if the target contains wildcard characters
-        const has_wildcards = std.mem.indexOfAny(u8, target, "*?") != null;
-
-        // If target has wildcards, use pattern matching
-        if (has_wildcards) {
-            if (patternMatches(target, norm_hostname)) {
-                return true;
-            }
-            continue; // Try next target
-        }
-
-        // Otherwise, try various matching strategies in order of specificity
-
-        // 1. Exact match (most specific)
-        if (std.mem.eql(u8, norm_hostname, target)) {
-            return true;
-        }
-
-        // 2. Domain component match (e.g., matching "jureca" in "jrlogin08.jureca")
-        if (matchDomainComponent(norm_hostname, target)) {
-            return true;
-        }
-
-        // 3. Check if target is a domain suffix like ".example.com"
-        // (Ensuring hostname is longer than the suffix)
-        if (target.len > 0 and target[0] == '.' and norm_hostname.len > target.len and
-            std.mem.endsWith(u8, norm_hostname, target))
-        {
-            return true;
-        }
-
-        // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
-        if (norm_hostname.len > target.len + 1 and norm_hostname[norm_hostname.len - target.len - 1] == '.') {
-            const suffix = norm_hostname[norm_hostname.len - target.len ..];
-            if (std.mem.eql(u8, suffix, target)) {
-                return true;
-            }
-        }
+        if (checkHostnameMatch(hostname, target)) return true;
     }
-
-    // No match found with any target machine
     return false;
 }
 
@@ -318,8 +252,7 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
         return true;
     }
 
-    // Normalize the hostname
-    const norm_hostname = normalizeHostname(hostname);
+    const norm_hostname = hostname;
 
     // Check if the target contains wildcard characters
     const has_wildcards = std.mem.indexOfAny(u8, target_machine, "*?") != null;
@@ -669,170 +602,6 @@ pub fn lookupRegistryEntry(
     return entry_copy;
 }
 
-// pub fn checkModulesAvailability(
-//     allocator: Allocator,
-//     modules: []const []const u8,
-// ) !struct { available: bool, missing: ?[]const []const u8 } {
-//     // First check if module command exists
-//     const check_cmd = "command -v module";
-//     const check_argv = [_][]const u8{ "sh", "-c", check_cmd };
-//     var check_child = std.process.Child.init(&check_argv, allocator);
-//     check_child.stdout_behavior = .Ignore;
-//     check_child.stderr_behavior = .Ignore;
-//     try check_child.spawn();
-//     const check_term = try check_child.wait();
-
-//     // Check if module command exists
-//     const module_exists = blk: {
-//         if (check_term != .Exited) break :blk false;
-//         if (check_term.Exited != 0) break :blk false;
-//         break :blk true;
-//     };
-
-//     if (!module_exists) {
-//         try output.print(allocator,"Warning: "'module' command not found, skipping module availability check.", .{});
-//         return .{ .available = false, .missing = null };
-//     }
-
-//     // Check if any modules are already loaded
-//     var modules_loaded = false;
-//     {
-//         const list_cmd = "module list 2>&1";
-//         const list_argv = [_][]const u8{ "sh", "-c", list_cmd };
-//         var list_child = std.process.Child.init(&list_argv, allocator);
-//         list_child.stdout_behavior = .Pipe;
-//         list_child.stderr_behavior = .Pipe;
-//         try list_child.spawn();
-
-//         var list_output: []const u8 = "";
-//         var has_output = false;
-//         defer if (has_output) allocator.free(list_output);
-
-//         if (list_child.stdout) |stdout_pipe| {
-//             list_output = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
-//             has_output = true;
-//         }
-
-//         const list_term = try list_child.wait();
-
-//         // Check if any modules are loaded
-//         if (list_term.Exited == 0 and has_output) {
-//             // Module list output usually contains "No modules loaded" when empty
-//             // or the list of modules if any are loaded
-//             const no_modules_str = std.mem.indexOf(u8, list_output, "No modules loaded");
-//             modules_loaded = no_modules_str == null;
-//             errors.debugLog(allocator, "Current modules loaded: {}", .{modules_loaded});
-//         }
-//     }
-
-//     // If modules list is empty, nothing to check
-//     if (modules.len == 0) {
-//         return .{ .available = true, .missing = null };
-//     }
-
-//     // Create list to track missing modules
-//     var missing_modules = std.array_list.Managed([]const u8).init(allocator);
-//     defer missing_modules.deinit();
-
-//     // Track if we loaded the first module ourselves during this check
-//     var we_loaded_first_module = false;
-
-//     // If no modules are loaded, we need to try loading the first module
-//     if (!modules_loaded and modules.len > 0) {
-//         const first_module = modules[0];
-//         try output.print(allocator,"No modules currently loaded. Attempting to load first module '{s}' to verify dependencies...", .{first_module});
-
-//         // Try to load the first module
-//         const load_cmd = try std.fmt.allocPrint(allocator, "module load {s} 2>&1", .{first_module});
-//         defer allocator.free(load_cmd);
-
-//         const load_argv = [_][]const u8{ "sh", "-c", load_cmd };
-//         var load_child = std.process.Child.init(&load_argv, allocator);
-//         load_child.stdout_behavior = .Pipe;
-//         load_child.stderr_behavior = .Pipe;
-//         try load_child.spawn();
-
-//         var load_output: []const u8 = "";
-//         var has_load_output = false;
-//         defer if (has_load_output) allocator.free(load_output);
-
-//         if (load_child.stdout) |stdout_pipe| {
-//             load_output = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
-//             has_load_output = true;
-//         }
-
-//         const load_term = try load_child.wait();
-
-//         // Check if the first module loaded successfully
-//         // We consider success if exit code is 0 and there's no ERROR in the output
-//         const error_in_output = has_load_output and std.mem.indexOf(u8, load_output, "ERROR") != null;
-//         const first_module_loaded = load_term.Exited == 0 and !error_in_output;
-
-//         errors.debugLog(allocator, "First module '{s}' load status: {}", .{ first_module, first_module_loaded });
-
-//         if (!first_module_loaded) {
-//             output.printError(allocator,"Failed to load first module '{s}'. This is required to check dependent modules.", .{first_module}) catch {};
-//             try missing_modules.append(first_module);
-//             const missing = try missing_modules.toOwnedSlice();
-//             return .{ .available = false, .missing = missing };
-//         }
-
-//         // First module loaded successfully, now we can check the other modules
-//         we_loaded_first_module = true;
-//     }
-
-//     // Check each module's availability
-//     for (modules) |module_name| {
-//         // If we just loaded the first module for testing and this is that module,
-//         // skip checking it again as we know it's available
-//         if (we_loaded_first_module and std.mem.eql(u8, module_name, modules[0])) {
-//             errors.debugLog(allocator, "Skipping availability check for first module '{s}' as we already loaded it", .{module_name});
-//             continue;
-//         }
-
-//         const avail_cmd = try std.fmt.allocPrint(allocator, "module --terse avail {s} 2>&1", .{module_name});
-//         defer allocator.free(avail_cmd);
-//         errors.debugLog(allocator, "Checking module: {s}", .{avail_cmd});
-
-//         const avail_argv = [_][]const u8{ "sh", "-c", avail_cmd };
-//         var avail_child = std.process.Child.init(&avail_argv, allocator);
-//         avail_child.stdout_behavior = .Pipe;
-//         avail_child.stderr_behavior = .Pipe;
-//         try avail_child.spawn();
-
-//         var stdout_content: []const u8 = "";
-//         var has_stdout = false;
-//         defer if (has_stdout) allocator.free(stdout_content);
-
-//         if (avail_child.stdout) |stdout_pipe| {
-//             stdout_content = try stdout_pipe.reader().readAllAlloc(allocator, 10 * 1024);
-//             has_stdout = true;
-//         }
-
-//         const term = try avail_child.wait();
-
-//         errors.debugLog(allocator, "stdout for module '{s}': '{s}'", .{ module_name, stdout_content });
-//         errors.debugLog(allocator, "Module '{s}' command exit code: {}", .{ module_name, term.Exited });
-
-//         // Based on observed behavior: for --terse avail
-//         // 1. If module exists: Returns output with module info
-//         // 2. If module doesn't exist: Returns no output (exit code 0)
-//         const module_available = stdout_content.len > 0;
-
-//         if (!module_available) {
-//             try missing_modules.append(module_name);
-//         }
-//     }
-
-//     // Return results
-//     if (missing_modules.items.len > 0) {
-//         const missing = try missing_modules.toOwnedSlice();
-//         return .{ .available = false, .missing = missing };
-//     }
-
-//     return .{ .available = true, .missing = null };
-// }
-
 // Function to read modules from a file
 pub fn readModulesFromFile(
     allocator: Allocator,
@@ -977,51 +746,13 @@ fn skipNewline(content: []const u8, pos: usize) usize {
     return pos; // No newline to skip
 }
 
-// pub fn validateModules(
-//     allocator: Allocator,
-//     env_config: *const EnvironmentConfig,
-//     force_deps: bool,
-// ) !bool {
-//     const modules = env_config.modules.items;
-//     if (modules.len == 0) {
-//         // No modules required, that's fine
-//         return true;
-//     }
-
-//     try output.print(allocator,"Step 0: Checking availability of {} required modules...", .{modules.len});
-//     const result = try checkModulesAvailability(allocator, modules);
-
-//     if (!result.available) {
-//         // If force_deps is true, we can continue even with missing modules
-//         if (force_deps) {
-//             try output.print(allocator,"Warning: "The following modules are not available but will be skipped due to --force:", .{});
-//             for (result.missing.?) |module| {
-//                 try output.print(allocator,"Warning: "  - {s}", .{module});
-//             }
-//             return true;
-//         }
-
-//         // Otherwise, error out
-//         output.printError(allocator,"The following modules are not available:", .{}) catch {};
-//         for (result.missing.?) |module| {
-//             output.printError(allocator,"  - {s}", .{module}) catch {};
-//         }
-//         output.printError(allocator,"Aborting setup because required modules are not available.", .{}) catch {};
-//         output.printError(allocator,"Please ensure the specified modules are installed on this system.", .{}) catch {};
-//         return error.ModuleLoadError;
-//     }
-
-//     return true;
-// }
-
 pub fn validateModules(
     allocator: Allocator,
     env_config: *const EnvironmentConfig,
-    force_deps: bool,
 ) !bool {
-    // Skip all module validation and always return true
-    _ = force_deps;
-
+    // Module availability is no longer probed at setup time (Lmod is slow and
+    // unreliable to query); modules are loaded lazily at activation instead. This
+    // always reports success and only logs.
     const modules = env_config.modules.items;
     if (modules.len == 0) {
         output.print(allocator, "No modules to validate.", .{}) catch {};

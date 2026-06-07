@@ -165,6 +165,58 @@ fn validateZenvConfig(
 }
 
 /// Validates an environment configuration
+// Validates a `setup`/`activate`-style field: it must be an object or null, and
+// when present its `script` must be a string/null and its `commands` an array of
+// strings. `field` is the JSON key ("setup" or "activate"), used verbatim in the
+// error messages and field paths.
+fn validateScriptObject(
+    allocator: Allocator,
+    errors: *std.array_list.Managed(ValidationError),
+    value: json.Value,
+    env_name: []const u8,
+    path: []const u8,
+    field: []const u8,
+) !void {
+    const obj = value.object.get(field) orelse return;
+    if (obj != .object and obj != .null) {
+        try errors.append(ValidationError{
+            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
+            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ path, field }),
+        });
+        return;
+    }
+    if (obj != .object) return;
+
+    // script: optional string
+    if (obj.object.get("script")) |script| {
+        if (script != .string and script != .null) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.script' must be a string or null", .{ env_name, field }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.script", .{ path, field }),
+            });
+        }
+    }
+
+    // commands: optional array of strings
+    if (obj.object.get("commands")) |commands| {
+        if (commands != .array and commands != .null) {
+            try errors.append(ValidationError{
+                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
+                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands", .{ path, field }),
+            });
+        } else if (commands == .array) {
+            for (commands.array.items, 0..) |cmd, i| {
+                if (cmd != .string) {
+                    try errors.append(ValidationError{
+                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands[{d}]' must be a string", .{ env_name, field, i }),
+                        .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands[{d}]", .{ path, field, i }),
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn validateEnvironment(
     allocator: Allocator,
     errors: *std.array_list.Managed(ValidationError),
@@ -329,115 +381,10 @@ fn validateEnvironment(
         }
     }
 
-    // setup: optional object with commands and script
-    if (value.object.get("setup")) |setup_obj| {
-        if (setup_obj != .object and setup_obj != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'setup' must be an object or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup", .{path}),
-            });
-        } else if (setup_obj == .object) {
-            // Validate script field
-            if (setup_obj.object.get("script")) |script| {
-                if (script != .string and script != .null) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'setup.script' must be a string or null",
-                            .{env_name},
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.script", .{path}),
-                    });
-                }
-            }
-
-            // Validate commands field
-            if (setup_obj.object.get("commands")) |commands| {
-                if (commands != .array and commands != .null) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'setup.commands' must be an array or null",
-                            .{env_name},
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands", .{path}),
-                    });
-                } else if (commands == .array) {
-                    for (commands.array.items, 0..) |cmd, i| {
-                        if (cmd != .string) {
-                            try errors.append(ValidationError{
-                                .message = try std.fmt.allocPrint(
-                                    allocator,
-                                    "In environment '{s}', 'setup.commands[{d}]' must be a string",
-                                    .{ env_name, i },
-                                ),
-                                .field_path = try std.fmt.allocPrint(allocator, "{s}.setup.commands[{d}]", .{ path, i }),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // activate: optional object with commands and script
-    if (value.object.get("activate")) |activate_obj| {
-        if (activate_obj != .object and activate_obj != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(
-                    allocator,
-                    "In environment '{s}', 'activate' must be an object or null",
-                    .{env_name},
-                ),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate", .{path}),
-            });
-        } else if (activate_obj == .object) {
-            // Validate script field
-            if (activate_obj.object.get("script")) |script| {
-                if (script != .string and script != .null) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'activate.script' must be a string or null",
-                            .{env_name},
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.script", .{path}),
-                    });
-                }
-            }
-
-            // Validate commands field
-            if (activate_obj.object.get("commands")) |commands| {
-                if (commands != .array and commands != .null) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "In environment '{s}', 'activate.commands' must be an array or null",
-                            .{env_name},
-                        ),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands", .{path}),
-                    });
-                } else if (commands == .array) {
-                    for (commands.array.items, 0..) |cmd, i| {
-                        if (cmd != .string) {
-                            try errors.append(ValidationError{
-                                .message = try std.fmt.allocPrint(
-                                    allocator,
-                                    "In environment '{s}', 'activate.commands[{d}]' must be a string",
-                                    .{ env_name, i },
-                                ),
-                                .field_path = try std.fmt.allocPrint(allocator, "{s}.activate.commands[{d}]", .{ path, i }),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // setup / activate: optional objects, each with an optional `script` (string
+    // or null) and optional `commands` (array of strings). Same shape, so one helper.
+    try validateScriptObject(allocator, errors, value, env_name, path, "setup");
+    try validateScriptObject(allocator, errors, value, env_name, path, "activate");
 
     // module_cache: optional boolean
     if (value.object.get("module_cache")) |module_cache| {
@@ -679,23 +626,38 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Manage
 
 /// Validates a JSON configuration file and returns a ZenvConfig if valid
 pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_module.ZenvConfig {
-    // First validate the configuration
-    const validation_errors = try validateConfigFile(allocator, config_path);
-
-    if (validation_errors) |errors| {
-        defer {
-            for (errors.items) |*err| {
-                err.deinit(allocator);
+    // Read the file once and reuse the same bytes for validation and parsing,
+    // rather than reading + JSON-parsing the file twice (validate then parse).
+    const content = runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) {
+            var errors = std.array_list.Managed(ValidationError).init(allocator);
+            defer {
+                for (errors.items) |*e| e.deinit(allocator);
+                errors.deinit();
             }
+            try errors.append(ValidationError{
+                .message = try allocator.dupe(u8, "Configuration file not found"),
+                .context = try allocator.dupe(u8, config_path),
+            });
+            printValidationErrors(allocator, errors);
+            return error.InvalidFormat;
+        }
+        return err;
+    };
+    defer allocator.free(content);
+
+    // Validate the content; errors are printed here, same as validateConfigFile.
+    if (try validateJsonContent(allocator, content)) |errors| {
+        defer {
+            for (errors.items) |*e| e.deinit(allocator);
             errors.deinit();
         }
-
-        // Error messages already printed in validateConfigFile
+        printValidationErrors(allocator, errors);
         return error.InvalidFormat;
     }
 
-    // If validation passed, parse the configuration
-    return config_module.parse(allocator, config_path);
+    // Validation passed: build the config from the same bytes.
+    return config_module.parseFromContent(allocator, content);
 }
 
 // ============================ Tests ============================

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const fs = std.fs;
 const errors = @import("errors.zig");
 const output = @import("output.zig");
+const runtime = @import("runtime.zig");
 
 /// On-disk format version of the module-environment cache. Written into the
 /// stamp at setup and checked at activation; bump this when the capture/replay
@@ -13,22 +14,91 @@ pub const MODULE_CACHE_VERSION: u32 = 1;
 pub const MODULE_CACHE_FILE = ".zenv_module_cache.sh";
 pub const MODULE_CACHE_STAMP = ".zenv_module_cache.stamp";
 
-/// Escapes a shell value by handling special characters, particularly single quotes.
-/// This ensures the value can be safely used in shell script strings.
-///
-/// Params:
-///   - value: The string value to escape
-///   - writer: Any writer that implements std.io.Writer
-///
-/// Returns: Error if writing fails
-pub fn escapeShellValue(value: []const u8, writer: anytype) !void {
-    for (value) |char| {
-        if (char == '\'') {
-            try writer.writeAll("\'\\'''"); // Handle single quotes in shell: close quote, escaped quote, reopen quote
+/// Appends `value` to `buf` as the body of a shell single-quoted string,
+/// escaping any embedded single quotes with the classic `'\''` trick. The
+/// caller writes the wrapping single quotes around the call. Use this for any
+/// config-sourced value (venv paths, module names) interpolated into generated
+/// shell so a stray `'` can't break or rewrite the script.
+pub fn appendSqEscaped(buf: *std.array_list.Managed(u8), value: []const u8) !void {
+    for (value) |c| {
+        if (c == '\'') {
+            try buf.appendSlice("'\\''");
         } else {
-            try writer.writeByte(char);
+            try buf.append(c);
         }
     }
+}
+
+fn accessFile(path: []const u8) bool {
+    runtime.access(path) catch return false;
+    return true;
+}
+
+/// Copies a user hook script into the environment's scripts directory and returns
+/// the absolute destination path (caller owns it). Shared by setup and activate.
+///
+/// Source resolution tries, in order: `hook_path` as-is when absolute, then
+/// `cwd_path/hook_path`, then the bare `hook_path` (relative to the process cwd).
+/// `dest_dir` MUST already be the absolute scripts directory (callers resolve any
+/// cwd join before calling); the script is written to `dest_dir/dest_filename`
+/// with mode 0755.
+pub fn copyHookScript(
+    allocator: Allocator,
+    hook_path: []const u8,
+    dest_dir: []const u8,
+    dest_filename: []const u8,
+    cwd_path: []const u8,
+) ![]const u8 {
+    var source_path: []const u8 = undefined;
+    var path_allocd = false;
+
+    if (std.fs.path.isAbsolute(hook_path)) {
+        source_path = hook_path;
+    } else {
+        // Try relative to cwd (where zenv.json is), then the bare filename.
+        const rel_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
+        defer allocator.free(rel_path);
+
+        if (accessFile(rel_path)) {
+            source_path = try allocator.dupe(u8, rel_path);
+            path_allocd = true;
+        } else if (accessFile(hook_path)) {
+            source_path = hook_path;
+        } else {
+            output.printError(allocator, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
+            return error.FileNotFound;
+        }
+    }
+    defer if (path_allocd) allocator.free(source_path);
+
+    if (!accessFile(source_path)) {
+        output.printError(allocator, "Hook script found but cannot be read: {s}", .{source_path}) catch {};
+        return error.FileNotFound;
+    }
+
+    const dest_path = try std.fs.path.join(allocator, &[_][]const u8{ dest_dir, dest_filename });
+    errdefer allocator.free(dest_path);
+
+    output.print(allocator, "Copying hook script {s} -> {s}", .{ source_path, dest_path }) catch {};
+    const content = runtime.readFileAlloc(allocator, source_path, 10 * 1024 * 1024) catch |err| {
+        output.printError(allocator, "Failed to read source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
+    };
+    defer allocator.free(content);
+
+    var dest_file = runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) }) catch |err| {
+        output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
+    };
+    defer dest_file.close(runtime.io);
+
+    dest_file.writeStreamingAll(runtime.io, content) catch |err| {
+        output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
+        return error.FileNotFound;
+    };
+
+    output.print(allocator, "Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
+    return dest_path;
 }
 
 /// Process a template string by replacing placeholders with actual values.

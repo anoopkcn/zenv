@@ -217,7 +217,7 @@ pub fn handleSetupCommand(
     var modules_verified = false;
     if (env_config.modules.items.len > 0) {
         // Use the improved validateModules function
-        const modules_available = env.validateModules(allocator, env_config, flags.force_deps) catch |err| {
+        const modules_available = env.validateModules(allocator, env_config) catch |err| {
             output.printError(allocator, "Failed to validate modules: {s}", .{@errorName(err)}) catch {};
             return error.ModuleLoadError;
         };
@@ -426,8 +426,6 @@ pub fn handleListCommand(
     // Ensure hostname is freed if allocated using optional chaining
     defer if (hostname_allocd) if (current_hostname) |hostname| allocator.free(hostname);
 
-    // stdout.print("Available zenv environments:\n", .{}) catch {};
-
     var count: usize = 0;
     for (registry.entries.items) |entry| {
         const env_name = entry.env_name;
@@ -453,10 +451,7 @@ pub fn handleListCommand(
             }
         }
 
-        // Get short ID (first 7 characters)
-        // const short_id = if (entry.id.len >= 7) entry.id[0..7] else entry.id;
-
-        // Print environment name, short ID, and target machine string
+        // Print environment name, ID, and target machine string
         stdout.print("- {s}", .{env_name}) catch {};
         stdout.print("\n  id      : {s}", .{entry.id}) catch {};
         stdout.print("\n  target  : {s}", .{target_machines_str}) catch {};

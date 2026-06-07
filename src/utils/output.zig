@@ -41,11 +41,6 @@ pub fn stopLogging() void {
     }
 }
 
-/// Returns whether logging is currently enabled
-pub fn isLoggingEnabled() bool {
-    return log_enabled;
-}
-
 /// Writes a message to the log file if logging is enabled
 fn logMessage(message: []const u8) !void {
     if (log_enabled and log_file != null) {
@@ -83,13 +78,11 @@ pub fn rawErr(allocator: Allocator, comptime fmt: []const u8, args: anytype) !vo
 
 pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
     var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) blk: {
-        // Use stack buffer for small messages
-        break :blk try std.fmt.bufPrint(&buf, "INFO: " ++ fmt ++ "\n", args);
-    } else {
-        // Use allocator for larger messages
+    // Prefer the stack buffer, but fall back to the heap when the *formatted*
+    // output doesn't fit. The previous guard measured only the format string
+    // length, so a long argument (e.g. a venv path) overflowed bufPrint.
+    const message = std.fmt.bufPrint(&buf, "INFO: " ++ fmt ++ "\n", args) catch
         try std.fmt.allocPrint(allocator, "INFO: " ++ fmt ++ "\n", args);
-    };
     defer if (message.ptr != &buf) allocator.free(message);
 
     try writeStd(File.stdout(), message);
@@ -99,31 +92,12 @@ pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !voi
 /// Prints a formatted error message to stderr with a newline appended
 pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
     var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) blk: {
-        // Use stack buffer for small messages
-        break :blk try std.fmt.bufPrint(&buf, "ERROR: " ++ fmt ++ "\n", args);
-    } else {
-        // Use allocator for larger messages
+    // Fall back to the heap when the formatted output exceeds the stack buffer
+    // (see `print` above for why the old format-string-length guard was wrong).
+    const message = std.fmt.bufPrint(&buf, "ERROR: " ++ fmt ++ "\n", args) catch
         try std.fmt.allocPrint(allocator, "ERROR: " ++ fmt ++ "\n", args);
-    };
     defer if (message.ptr != &buf) allocator.free(message);
 
     try writeStd(File.stderr(), message);
-    try logMessage(message);
-}
-
-/// Prints a formatted message to stdout, and doesn't append a newline
-pub fn printNoNewline(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    const message = if (fmt.len + 50 < buf.len) blk: {
-        // Use stack buffer for small messages
-        break :blk try std.fmt.bufPrint(&buf, fmt, args);
-    } else {
-        // Use allocator for larger messages
-        try std.fmt.allocPrint(allocator, fmt, args);
-    };
-    defer if (message.ptr != &buf) allocator.free(message);
-
-    try writeStd(File.stdout(), message);
     try logMessage(message);
 }
