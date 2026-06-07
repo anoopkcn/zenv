@@ -43,8 +43,9 @@ pub fn handleInitCommand(
     // Use a static string as the default target_machine
     const hostname = "*";
 
-    // Import the template module for JSON
-    const template_json = @import("utils/template_json.zig");
+    // The init config is a plain template: build the replacements below and run
+    // them through the shared engine directly (no per-template wrapper needed).
+    const JSON_CONFIG_TEMPLATE = @embedFile("utils/templates/zenv.json.template");
 
     // Create a map for template replacements
     var replacements = std.StringHashMap([]const u8).init(allocator);
@@ -122,7 +123,7 @@ pub fn handleInitCommand(
     };
 
     // Process the custom template
-    const processed_content = template_json.createCustomJsonConfigFromTemplate(allocator, replacements) catch |err| {
+    const processed_content = template.processTemplateString(allocator, JSON_CONFIG_TEMPLATE, replacements) catch |err| {
         output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
         std.process.exit(1);
     };
