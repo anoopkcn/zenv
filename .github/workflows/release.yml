@@ -33,3 +33,30 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+
+      - name: Update Homebrew tap
+        if: github.repository == 'anoopkcn/zenv'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          REL=./zig-out/releases
+          sha() { sha256sum "$REL/$1" | awk '{print $1}'; }
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/anoopkcn/homebrew-zenv.git" tap
+          mkdir -p tap/Formula
+          sed \
+            -e "s|{{VERSION}}|${VERSION}|g" \
+            -e "s|{{SHA_MACOS_ARM64}}|$(sha zenv-aarch64-macos-small.tar.gz)|g" \
+            -e "s|{{SHA_MACOS_X64}}|$(sha zenv-x86_64-macos-small.tar.gz)|g" \
+            -e "s|{{SHA_LINUX_ARM64}}|$(sha zenv-aarch64-linux-musl-small.tar.gz)|g" \
+            -e "s|{{SHA_LINUX_X64}}|$(sha zenv-x86_64-linux-musl-small.tar.gz)|g" \
+            .github/templates/zenv.rb > tap/Formula/zenv.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/zenv.rb
+          git diff --staged --quiet || git commit -m "zenv ${VERSION}"
+          git push
