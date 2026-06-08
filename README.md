@@ -40,7 +40,7 @@ Run the same command to update already insalled `zenv` version
 <details>
 <summary>Manual download of stable release</summary>
 
-**Change the <tag> according to the latest version**
+**Change the `<tag>` according to the latest version**
 
 ```bash
 # Replace <tag> with last stable release version:
