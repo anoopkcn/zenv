@@ -18,12 +18,6 @@ The tool provides several key features:
 
 ## Installation
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
-```
-
-Run the same command to update already insalled `zenv` version
-
 ### Homebrew (macOS / Linux)
 
 ```sh
@@ -32,10 +26,21 @@ brew install anoopkcn/zenv/zenv
 
 Upgrade later with `brew upgrade zenv`.
 
+### Use install script
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
+```
+
+Run the same command to update already insalled `zenv` version
+
+
 ### Alternative methods of installation
 
 <details>
 <summary>Manual download of stable release</summary>
+
+**Change the <tag> according to the latest version**
 
 ```bash
 # Replace <tag> with last stable release version:
