@@ -29,7 +29,7 @@ Upgrade later with `brew upgrade zenv`.
 ### Use install script
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | bash
 ```
 
 Run the same command to update already insalled `zenv` version
