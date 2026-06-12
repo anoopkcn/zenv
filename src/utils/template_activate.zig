@@ -4,6 +4,7 @@ const config_module = @import("config.zig");
 const EnvironmentConfig = config_module.EnvironmentConfig;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
+const paths = @import("paths.zig");
 
 const template = @import("template.zig");
 
@@ -33,15 +34,15 @@ fn createActivationScript(
     const cwd_path = try runtime.cwdRealpath(allocator);
     defer allocator.free(cwd_path);
 
-    // Check if base_dir is absolute
-    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
+    // Single venv-path derivation; every path below joins onto it. Activation
+    // scripts are generated during setup, which runs in the project dir, so
+    // cwd anchors a relative base_dir.
+    const venv_path = try paths.venvPath(allocator, cwd_path, base_dir, env_name);
+    defer allocator.free(venv_path);
 
-    // Create scripts directory for hook scripts (absolute, so it can be baked into
+    // Scripts directory for hook scripts (absolute, so it can be baked into
     // the generated activate.sh and passed to the shared copyHookScript helper).
-    const scripts_dir = if (is_absolute_base_dir)
-        try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" })
-    else
-        try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "scripts" });
+    const scripts_dir = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
     defer allocator.free(scripts_dir);
 
     // Create the scripts directory (idempotent, works for absolute and relative)
@@ -85,35 +86,8 @@ fn createActivationScript(
         }
     }
 
-    // Generate the activation script path using base_dir
-    var script_rel_path: []const u8 = undefined;
-    var script_abs_path: []const u8 = undefined;
-
-    if (is_absolute_base_dir) {
-        // For absolute base_dir, paths are already absolute
-        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
-        script_abs_path = try allocator.dupe(u8, script_rel_path); // Use same path for both
-    } else {
-        // For relative base_dir, combine with cwd for absolute paths
-        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "activate.sh" });
-        script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
-    }
-
-    defer allocator.free(script_rel_path);
+    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" });
     defer allocator.free(script_abs_path);
-
-    // Virtual environment absolute path
-    var venv_path: []const u8 = undefined;
-
-    if (is_absolute_base_dir) {
-        // For absolute base_dir, simply join with env_name
-        venv_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
-    } else {
-        // For relative base_dir, combine with cwd for absolute path
-        venv_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
-    }
-
-    defer allocator.free(venv_path);
 
     // Create a map for template replacements
     var replacements = std.StringHashMap([]const u8).init(allocator);
@@ -126,7 +100,8 @@ fn createActivationScript(
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_PATH", venv_path);
 
-    const zenv_env_dir_export_line = try std.fmt.allocPrint(allocator, "export ZENV_ENV_DIR={s}", .{venv_path});
+    // Quoted so a venv path containing spaces survives the shell.
+    const zenv_env_dir_export_line = try std.fmt.allocPrint(allocator, "export ZENV_ENV_DIR=\"{s}\"", .{venv_path});
     defer allocator.free(zenv_env_dir_export_line);
     try replacements.put("ZENV_ENV_DIR", zenv_env_dir_export_line);
 
@@ -160,7 +135,7 @@ fn createActivationScript(
     defer allocator.free(processed_content);
 
     // Write the processed content to the file (executable)
-    var file = try runtime.createFile(script_rel_path, .{ .permissions = .fromMode(0o755) });
+    var file = try runtime.createFile(script_abs_path, .{ .permissions = .fromMode(0o755) });
     defer file.close(runtime.io);
     try file.writeStreamingAll(runtime.io, processed_content);
 

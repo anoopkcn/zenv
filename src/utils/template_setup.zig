@@ -5,6 +5,7 @@ const EnvironmentConfig = config_module.EnvironmentConfig;
 const output = @import("output.zig");
 const template = @import("template.zig");
 const runtime = @import("runtime.zig");
+const paths = @import("paths.zig");
 const CommandFlags = @import("flags.zig").CommandFlags;
 
 // Embed the template file at compile time
@@ -50,26 +51,11 @@ fn createSetupScript(
     defer allocator.free(cwd_path);
     output.print(allocator, "Current working directory: {s}", .{cwd_path}) catch {};
 
-    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
-
-    // Virtual environment absolute path
-    var venv_dir: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        // For absolute base_dir, simply join with env_name
-        venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
-    } else {
-        // For relative base_dir, combine with cwd for absolute path
-        venv_dir = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name });
-    }
+    // Single venv-path derivation; the scripts dir joins onto it.
+    const venv_dir = try paths.venvPath(allocator, cwd_path, base_dir, env_name);
     defer allocator.free(venv_dir);
 
-    // Create scripts directory for hook scripts if needed
-    var scripts_rel_path: []const u8 = undefined;
-    if (is_absolute_base_dir) {
-        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "scripts" });
-    } else {
-        scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, base_dir, env_name, "scripts" });
-    }
+    const scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "scripts" });
     defer allocator.free(scripts_rel_path);
 
     // Create the scripts directory

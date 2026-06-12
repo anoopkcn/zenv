@@ -296,3 +296,46 @@ pub fn hostMatchesTargets(hostname: []const u8, target_machines_str: []const u8)
     }
     return false;
 }
+
+// ============================ Tests ============================
+const testing = std.testing;
+
+test "checkHostnameMatch: universal targets match any host" {
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*"));
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "any"));
+    try testing.expect(checkHostnameMatch("whatever", "localhost"));
+}
+
+test "checkHostnameMatch: exact and domain-component matching" {
+    try testing.expect(checkHostnameMatch("jureca", "jureca"));
+    try testing.expect(!checkHostnameMatch("juwels", "jureca"));
+    // A target naming any dot-separated component of the FQDN matches.
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jureca"));
+    try testing.expect(checkHostnameMatch("node1.cluster.example.com", "cluster"));
+    try testing.expect(!checkHostnameMatch("node1.cluster.example.com", "uster"));
+}
+
+test "checkHostnameMatch: wildcard patterns" {
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jrlogin*"));
+    try testing.expect(!checkHostnameMatch("jwlogin01.juwels", "jrlogin*"));
+    try testing.expect(checkHostnameMatch("node1.cluster", "*.cluster"));
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*jureca*"));
+    try testing.expect(checkHostnameMatch("node1", "node?"));
+    try testing.expect(!checkHostnameMatch("node12", "node?"));
+    // Mixed wildcard pattern goes through the DP matcher.
+    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jr*0?.jureca"));
+}
+
+test "checkHostnameMatch: domain suffix forms" {
+    try testing.expect(checkHostnameMatch("node1.example.com", ".example.com"));
+    try testing.expect(!checkHostnameMatch("example.com", ".example.com"));
+    try testing.expect(checkHostnameMatch("mymac.local", "local"));
+}
+
+test "hostMatchesTargets: comma-separated list, blank, and no-match" {
+    try testing.expect(hostMatchesTargets("machine2", "machine1, machine2"));
+    try testing.expect(!hostMatchesTargets("machine3", "machine1, machine2"));
+    try testing.expect(hostMatchesTargets("anything", "")); // blank = any
+    try testing.expect(hostMatchesTargets("anything", "machine1, *"));
+    try testing.expect(hostMatchesTargets("jrlogin01.jureca", "juwels, jureca"));
+}

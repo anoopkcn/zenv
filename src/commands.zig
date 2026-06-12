@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const CommandFlags = @import("utils/flags.zig").CommandFlags;
+const positional = @import("utils/flags.zig").positional;
+const paths = @import("utils/paths.zig");
 const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
@@ -177,18 +179,17 @@ pub fn handleSetupCommand(
 
     // Get and validate the environment config
     const env_config = try env.getAndValidateEnvironment(allocator, config, args, flags);
-    const env_name = args[2];
+    // Non-null: getAndValidateEnvironment just errored otherwise.
+    const env_name = positional(args, 0).?;
 
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
 
-    // Set up logging to a file inside the environment directory
-    const base_dir_path = if (std.fs.path.isAbsolute(config.base_dir))
-        config.base_dir
-    else
-        try std.fs.path.join(allocator, &[_][]const u8{ try runtime.cwdRealpath(allocator), config.base_dir });
-    defer if (!std.fs.path.isAbsolute(config.base_dir)) allocator.free(base_dir_path);
+    // Set up logging to a file inside the environment directory. Setup runs in
+    // the project directory, so cwd is the anchor for a relative base_dir.
+    const setup_cwd = try runtime.cwdRealpath(allocator);
+    defer allocator.free(setup_cwd);
 
-    const env_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir_path, env_name });
+    const env_dir_path = try paths.venvPath(allocator, setup_cwd, config.base_dir, env_name);
     defer allocator.free(env_dir_path);
 
     const log_path = try std.fs.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
@@ -351,6 +352,7 @@ pub fn handleSetupCommand(
     };
     defer allocator.free(cwd_path);
 
+    // register() persists registry.json itself (like deregister/rename).
     try registry.register(
         env_name,
         cwd_path,
@@ -358,13 +360,17 @@ pub fn handleSetupCommand(
         env_config.description,
         env_config.target_machines.items,
     );
-    try registry.save();
 
-    // Create Jupyter kernel if requested
+    // Create Jupyter kernel if requested, from the entry we just registered.
     if (flags.create_jupyter_kernel) {
-        jupyter.createKernel(allocator, env_name, null, null) catch |err| {
+        if (registry.resolve(allocator, env_name)) |jref| {
+            const jentry = registry.get(jref);
+            jupyter.createKernel(allocator, jentry.env_name, jentry.venv_path, null, null) catch |err| {
+                output.printError(allocator, "Failed to create Jupyter kernel: {s}", .{@errorName(err)}) catch {};
+            };
+        } else |err| {
             output.printError(allocator, "Failed to create Jupyter kernel: {s}", .{@errorName(err)}) catch {};
-        };
+        }
     }
 
     output.print(allocator,
@@ -485,23 +491,11 @@ pub fn handleListCommand(
         const env_name = entry.env_name;
         const target_machines_str = entry.target_machines_str; // Renamed
 
-        // Filter by target machine if requested and hostname was successfully obtained
+        // Filter by target machine if requested and hostname was successfully
+        // obtained. hostMatchesTargets owns the comma-list matching rules.
         if (use_hostname_filter and current_hostname != null) {
-            // Check if the current hostname matches ANY of the target patterns
-            var matches_any_target = false;
-            var targets_iter = std.mem.splitScalar(u8, target_machines_str, ','); // Use the renamed variable
-            while (targets_iter.next()) |target_pattern_raw| {
-                const target_pattern = std.mem.trim(u8, target_pattern_raw, " ");
-                if (target_pattern.len == 0) continue; // Skip empty patterns
-
-                if (env.checkHostnameMatch(current_hostname.?, target_pattern)) {
-                    matches_any_target = true;
-                    break; // Found a match, no need to check further patterns for this entry
-                }
-            }
-
-            if (!matches_any_target) {
-                continue; // Skip this environment if no pattern matched
+            if (!env.hostMatchesTargets(current_hostname.?, target_machines_str)) {
+                continue;
             }
         }
 
@@ -586,12 +580,12 @@ pub fn handleRegisterCommand(
     registry: *EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
-    if (args.len < 3) {
-        output.printError(allocator, "Missing environment name argument. Usage: zenv register <n>", .{}) catch {};
+    // First positional, not args[2]: `zenv register --no-host myenv` must not
+    // treat the flag as the environment name.
+    const env_name = positional(args, 0) orelse {
+        output.printError(allocator, "Missing environment name argument. Usage: zenv register <name>", .{}) catch {};
         return error.EnvironmentNotFound;
-    }
-
-    const env_name = args[2];
+    };
 
     const flags = CommandFlags.fromArgs(args);
 
@@ -642,7 +636,7 @@ pub fn handleRegisterCommand(
     // Get the base_dir from the loaded config
     const base_dir = config.base_dir;
 
-    // Register the environment in the global registry, passing base_dir
+    // Register the environment in the global registry (persists internally).
     registry.register(
         env_name,
         cwd_path,
@@ -651,12 +645,6 @@ pub fn handleRegisterCommand(
         env_config.target_machines.items,
     ) catch |err| {
         output.printError(allocator, "Failed to register environment: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-
-    // Save the registry
-    registry.save() catch |err| {
-        output.printError(allocator, "Failed to save registry: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 
@@ -845,7 +833,9 @@ pub fn handleRunCommand(
     switch (term) {
         .exited => |code| std.process.exit(code),
         .signal, .stopped => |sig| {
-            const signo: u8 = @truncate(@intFromEnum(sig));
+            // Saturate rather than truncate: an out-of-range signo must not
+            // wrap into a small (success-looking) exit code.
+            const signo: u8 = std.math.cast(u8, @intFromEnum(sig)) orelse 255;
             output.printError(allocator, "Command terminated by signal {d}", .{signo}) catch {};
             std.process.exit(128 +| signo);
         },
@@ -1202,6 +1192,7 @@ fn handleAliasShow(
 
 pub fn handleJupyterCommand(
     allocator: Allocator,
+    registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
     if (args.len < 3) {
@@ -1215,9 +1206,9 @@ pub fn handleJupyterCommand(
     const subcommand = args[2];
 
     if (std.mem.eql(u8, subcommand, "create")) {
-        try handleJupyterCreate(allocator, args);
+        try handleJupyterCreate(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "remove")) {
-        try handleJupyterRemove(allocator, args);
+        try handleJupyterRemove(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "list")) {
         try handleJupyterList(allocator);
     } else if (std.mem.eql(u8, subcommand, "check")) {
@@ -1233,17 +1224,18 @@ pub fn handleJupyterCommand(
 
 fn handleJupyterCreate(
     allocator: Allocator,
+    registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
     if (args.len < 4) {
         output.printError(allocator,
             \\Missing environment name argument.
-            \\Usage: zenv jupyter create <env_name> [--name <kernel_name>] [--display-name <display_name>]
+            \\Usage: zenv jupyter create <name|id|.> [--name <kernel_name>] [--display-name <display_name>]
         , .{}) catch {};
         return error.ArgsError;
     }
 
-    const env_name = args[3];
+    const identifier = args[3];
     var custom_name: ?[]const u8 = null;
     var custom_display_name: ?[]const u8 = null;
 
@@ -1262,11 +1254,17 @@ fn handleJupyterCreate(
         }
     }
 
-    try jupyter.createKernel(allocator, env_name, custom_name, custom_display_name);
+    // Same host-aware resolver as every other command: ids, aliases and "."
+    // work, and on a shared filesystem the kernel binds to THIS machine's env.
+    const ref = registry.resolve(allocator, identifier) catch |e| return present(allocator, registry, identifier, e);
+    const entry = registry.get(ref);
+
+    try jupyter.createKernel(allocator, entry.env_name, entry.venv_path, custom_name, custom_display_name);
 }
 
 fn handleJupyterRemove(
     allocator: Allocator,
+    registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
     if (args.len < 4) {
@@ -1277,7 +1275,13 @@ fn handleJupyterRemove(
         return error.ArgsError;
     }
 
-    const env_name = args[3];
+    // Resolve through the registry so aliases/ids work, but fall back to the
+    // raw name for kernels whose environment was already deregistered.
+    const identifier = args[3];
+    const env_name = blk: {
+        const ref = registry.resolve(allocator, identifier) catch break :blk identifier;
+        break :blk registry.get(ref).env_name;
+    };
     try jupyter.removeKernel(allocator, env_name);
 }
 
@@ -1409,20 +1413,24 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     const activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, "activate.sh" });
     defer allocator.free(activate_script_path);
 
-    updateScriptFile(allocator, activate_script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+    updateScriptFile(allocator, activate_script_path, old_name, new_name, old_venv_path, new_venv_path, .names_and_paths) catch |err| {
         output.printError(allocator, "Failed to update activate.sh: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 
-    const setup_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, "setup.sh" });
-    defer allocator.free(setup_script_path);
+    // The setup script aux writes is `setup_env.sh`; `setup.sh` is kept for
+    // environments created by older zenv versions. Both may be absent.
+    for ([_][]const u8{ "setup_env.sh", "setup.sh" }) |setup_name| {
+        const setup_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, setup_name });
+        defer allocator.free(setup_script_path);
 
-    updateScriptFile(allocator, setup_script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
-        if (err != error.FileNotFound) {
-            output.printError(allocator, "Failed to update setup.sh: {s}", .{@errorName(err)}) catch {};
-            return err;
-        }
-    };
+        updateScriptFile(allocator, setup_script_path, old_name, new_name, old_venv_path, new_venv_path, .names_and_paths) catch |err| {
+            if (err != error.FileNotFound) {
+                output.printError(allocator, "Failed to update {s}: {s}", .{ setup_name, @errorName(err) }) catch {};
+                return err;
+            }
+        };
+    }
 
     updateScriptsDirectory(allocator, new_venv_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
         output.printError(allocator, "Failed to update scripts directory: {s}", .{@errorName(err)}) catch {};
@@ -1439,7 +1447,20 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     }
 }
 
-fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
+/// What updateScriptFile is allowed to rewrite. User-authored hook scripts get
+/// `.paths_only`: the exact venv path is unambiguous, but a bare name token in
+/// someone else's script is not ours to rewrite.
+const ScriptRenameScope = enum { names_and_paths, paths_only };
+
+/// A character that can occur inside an environment name (the same set
+/// registry.rename accepts). A name token bounded by one of these is part of a
+/// longer name — e.g. `test` inside `test_env` or `my-test` — and must not be
+/// replaced.
+fn isEnvNameChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.';
+}
+
+fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8, scope: ScriptRenameScope) !void {
     const content = try runtime.readFileAlloc(allocator, script_path, 1024 * 1024); // 1MB max
     defer allocator.free(content);
 
@@ -1448,23 +1469,28 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
 
     var i: usize = 0;
     while (i < content.len) {
-        if (i + old_name.len <= content.len and std.mem.eql(u8, content[i .. i + old_name.len], old_name)) {
-            // Check if this is a standalone reference to the old environment name
-            const before_ok = i == 0 or !std.ascii.isAlphanumeric(content[i - 1]);
-            const after_ok = i + old_name.len == content.len or !std.ascii.isAlphanumeric(content[i + old_name.len]);
-
-            if (before_ok and after_ok) {
-                // Replace with new name
-                try updated_content.appendSlice(new_name);
-                i += old_name.len;
-                continue;
-            }
-        }
-
+        // Exact venv-path occurrences are checked FIRST so a name inside our own
+        // venv path is consumed as part of the path, never as a bare token.
         if (i + old_venv_path.len <= content.len and std.mem.eql(u8, content[i .. i + old_venv_path.len], old_venv_path)) {
             try updated_content.appendSlice(new_venv_path);
             i += old_venv_path.len;
             continue;
+        }
+
+        if (scope == .names_and_paths and i + old_name.len <= content.len and std.mem.eql(u8, content[i .. i + old_name.len], old_name)) {
+            // Standalone token only: not embedded in a longer name (`test_env`),
+            // and not a component of some other path (`/p/test/x`) — genuine venv
+            // path references were already consumed by the branch above.
+            const before = if (i == 0) @as(u8, 0) else content[i - 1];
+            const after = if (i + old_name.len == content.len) @as(u8, 0) else content[i + old_name.len];
+            const before_ok = i == 0 or (!isEnvNameChar(before) and before != '/');
+            const after_ok = i + old_name.len == content.len or (!isEnvNameChar(after) and after != '/');
+
+            if (before_ok and after_ok) {
+                try updated_content.appendSlice(new_name);
+                i += old_name.len;
+                continue;
+            }
         }
 
         try updated_content.append(content[i]);
@@ -1495,7 +1521,10 @@ fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name:
             const script_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, entry.name });
             defer allocator.free(script_path);
 
-            updateScriptFile(allocator, script_path, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
+            // These are copies of USER hook scripts: rewrite only the exact venv
+            // path. A bare occurrence of the env name in user content may mean
+            // anything; rewriting it would corrupt their script.
+            updateScriptFile(allocator, script_path, old_name, new_name, old_venv_path, new_venv_path, .paths_only) catch |err| {
                 output.printError(allocator, "Failed to update script {s}: {s}", .{ entry.name, @errorName(err) }) catch {};
                 return err;
             };
@@ -1525,26 +1554,43 @@ fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []co
     };
     defer parsed.deinit();
 
-    if (parsed.value.object.get(old_name)) |_| {
-        output.print(allocator, "Found environment '{s}' in local config, updating to '{s}'", .{ old_name, new_name }) catch {};
-
-        const old_key_pattern = try std.fmt.allocPrint(allocator, "\"{s}\":", .{old_name});
-        defer allocator.free(old_key_pattern);
-
-        const new_key_pattern = try std.fmt.allocPrint(allocator, "\"{s}\":", .{new_name});
-        defer allocator.free(new_key_pattern);
-
-        if (std.mem.indexOf(u8, config_contents, old_key_pattern)) |_| {
-            const updated_contents = try std.mem.replaceOwned(u8, allocator, config_contents, old_key_pattern, new_key_pattern);
-            defer allocator.free(updated_contents);
-
-            try runtime.writeFile(config_path, updated_contents);
-
-            output.print(allocator, "Successfully updated local config file", .{}) catch {};
-        } else {
-            output.printError(allocator, "Could not find key pattern in config file", .{}) catch {};
-        }
-    } else {
-        output.print(allocator, "Environment '{s}' not found in local config, skipping update", .{old_name}) catch {};
+    if (parsed.value != .object) {
+        output.printError(allocator, "Local config is not a JSON object, skipping update", .{}) catch {};
+        return;
     }
+    const root = &parsed.value.object;
+
+    if (root.get(old_name) == null) {
+        output.print(allocator, "Environment '{s}' not found in local config, skipping update", .{old_name}) catch {};
+        return;
+    }
+    if (root.get(new_name) != null) {
+        output.printError(allocator, "Local config already has an entry '{s}'; not updating it", .{new_name}) catch {};
+        return;
+    }
+
+    output.print(allocator, "Found environment '{s}' in local config, updating to '{s}'", .{ old_name, new_name }) catch {};
+
+    // Rename the TOP-LEVEL key only, structurally: rebuild the root object in
+    // order with the one key swapped, then re-serialize. Unlike a textual
+    // replace, this can never touch a nested key or a string value that
+    // happens to contain the name.
+    var new_root: std.json.ObjectMap = .empty;
+    defer new_root.deinit(allocator);
+    var it = root.iterator();
+    while (it.next()) |kv| {
+        const key = if (std.mem.eql(u8, kv.key_ptr.*, old_name)) new_name else kv.key_ptr.*;
+        try new_root.put(allocator, key, kv.value_ptr.*);
+    }
+
+    const updated_contents = try std.json.Stringify.valueAlloc(
+        allocator,
+        std.json.Value{ .object = new_root },
+        .{ .whitespace = .indent_2 },
+    );
+    defer allocator.free(updated_contents);
+
+    try runtime.writeFileAtomic(allocator, config_path, updated_contents);
+
+    output.print(allocator, "Successfully updated local config file", .{}) catch {};
 }

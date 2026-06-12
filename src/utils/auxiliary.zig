@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const runtime = @import("runtime.zig");
+const paths = @import("paths.zig");
 
 const config_module = @import("config.zig");
 const ZenvConfig = config_module.ZenvConfig;
@@ -127,33 +128,20 @@ pub fn setupEnvironment(
         valid_deps_list.deinit();
     }
 
-    // Handle paths differently based on whether base_dir is absolute or relative
-    const is_absolute_base_dir = std.fs.path.isAbsolute(base_dir);
-    output.print(allocator, "Base directory is {s}: '{s}'", .{ if (is_absolute_base_dir) "absolute" else "relative", base_dir }) catch {};
+    // One venv-path derivation for the whole setup; everything below joins
+    // onto this absolute directory (setup runs in the project dir, so cwd is
+    // the anchor for a relative base_dir).
+    const venv_dir = try paths.venvPath(allocator, cwd_path, base_dir, env_name);
+    defer allocator.free(venv_dir);
+    output.print(allocator, "Environment directory: '{s}'", .{venv_dir}) catch {};
 
-    // Create requirements file path using base_dir
-    var req_rel_path: []const u8 = undefined;
-    var req_abs_path: []const u8 = undefined;
-
-    if (is_absolute_base_dir) {
-        // base_dir is already absolute, so the relative and absolute paths are
-        // identical — share one allocation rather than duplicating it.
-        req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
-        req_abs_path = req_rel_path;
-    } else {
-        // For relative base_dir, combine with cwd for absolute paths
-        req_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "requirements.txt" });
-        req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, req_rel_path });
-    }
-    output.print(allocator, "Requirements file paths: relative='{s}', absolute='{s}'", .{ req_rel_path, req_abs_path }) catch {};
-
-    defer allocator.free(req_rel_path);
-    defer if (req_abs_path.ptr != req_rel_path.ptr) allocator.free(req_abs_path);
+    const req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "requirements.txt" });
+    defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
-    output.print(allocator, "Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_rel_path }) catch {};
+    output.print(allocator, "Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_abs_path }) catch {};
     {
-        var req_file = try runtime.createFile(req_rel_path, .{});
+        var req_file = try runtime.createFile(req_abs_path, .{});
 
         defer {
             // Explicitly sync file content to disk before closing
@@ -183,22 +171,8 @@ pub fn setupEnvironment(
     }
     output.print(allocator, "Created requirements file: {s}", .{req_abs_path}) catch {};
 
-    // Generate setup script path using base_dir
-    var script_rel_path: []const u8 = undefined;
-    var script_abs_path: []const u8 = undefined;
-
-    if (is_absolute_base_dir) {
-        // base_dir is already absolute — share one allocation for both paths.
-        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
-        script_abs_path = script_rel_path;
-    } else {
-        // For relative base_dir, combine with cwd for absolute paths
-        script_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name, "setup_env.sh" });
-        script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, script_rel_path });
-    }
-
-    defer allocator.free(script_rel_path);
-    defer if (script_abs_path.ptr != script_rel_path.ptr) allocator.free(script_abs_path);
+    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "setup_env.sh" });
+    defer allocator.free(script_abs_path);
 
     // Generate setup script content using the template
     const script_content = try template_setup.createSetupScriptFromTemplate(
@@ -213,12 +187,13 @@ pub fn setupEnvironment(
     );
     defer allocator.free(script_content);
 
-    // Write setup script to file
-    output.print(allocator, "Writing setup script to {s}", .{script_rel_path}) catch {};
+    // Write setup script to file, synced before we execute it below.
+    output.print(allocator, "Writing setup script to {s}", .{script_abs_path}) catch {};
     {
-        var script_file = try runtime.createFile(script_rel_path, .{ .permissions = .fromMode(0o755) });
+        var script_file = try runtime.createFile(script_abs_path, .{ .permissions = .fromMode(0o755) });
         defer script_file.close(runtime.io);
         try script_file.writeStreamingAll(runtime.io, script_content);
+        try script_file.sync(runtime.io);
     }
     output.print(allocator, "Created setup script: {s}", .{script_abs_path}) catch {};
 

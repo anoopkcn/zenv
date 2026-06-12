@@ -36,37 +36,9 @@ pub const Command = enum {
     unknown,
 
     fn fromString(s: []const u8) Command {
-        const command_map = .{
-            .{ "setup", .setup },
-            .{ "activate", .activate },
-            .{ "list", .list },
-            .{ "register", .register },
-            .{ "deregister", .deregister },
-            .{ "cd", .cd },
-            .{ "init", .init },
-            .{ "rm", .rm },
-            .{ "rename", .rename },
-            .{ "python", .python },
-            .{ "log", .log },
-            .{ "run", .run },
-            .{ "validate", .validate },
-            .{ "alias", .alias },
-            .{ "jupyter", .jupyter },
-            .{ "help", .help },
-            .{ "version", .version },
-            .{ "-v", .@"-v" },
-            .{ "-V", .@"-V" },
-            .{ "--version", .@"--version" },
-            .{ "--help", .@"--help" },
-        };
-
-        // Linear search through the command_map
-        inline for (command_map) |entry| {
-            if (std.mem.eql(u8, s, entry[0])) {
-                return entry[1];
-            }
-        }
-        return Command.unknown;
+        // Tag names ARE the command spellings (including @"-v" etc.), so the
+        // comptime-built string map covers every command with no hand-kept table.
+        return std.meta.stringToEnum(Command, s) orelse .unknown;
     }
 };
 
@@ -226,7 +198,10 @@ pub fn main(app: std.process.Init) anyerror!void {
     // Command parsing logic - Use args directly for command parsing
     const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
 
-    // Handle simple commands directly
+    const config_path = "zenv.json";
+
+    // Commands that never touch the registry are handled before it is loaded,
+    // so `zenv python`/`zenv validate` don't pay for (or fail on) registry.json.
     switch (command) {
         .help, .@"--help" => {
             printUsage();
@@ -241,7 +216,20 @@ pub fn main(app: std.process.Init) anyerror!void {
             commands.handleInitCommand(allocator, args);
             process.exit(0);
         },
-        // Let other commands proceed to config parsing
+        .python => {
+            commands.handlePythonCommand(allocator, args) catch |err| errors.report(allocator, err);
+            return;
+        },
+        .validate => {
+            commands.handleValidateCommand(allocator, config_path, args) catch |err| errors.report(allocator, err);
+            return;
+        },
+        .unknown => {
+            output.printError(allocator, "Unknown command '{s}'", .{args[1]}) catch {};
+            output.print(allocator, "run 'zenv help' to see the usage", .{}) catch {};
+            process.exit(1);
+        },
+        // Registry-backed commands proceed to registry/config loading below.
         .setup,
         .activate,
         .list,
@@ -250,17 +238,12 @@ pub fn main(app: std.process.Init) anyerror!void {
         .cd,
         .rm,
         .rename,
-        .python,
         .log,
         .run,
-        .validate,
         .alias,
         .jupyter,
-        .unknown,
         => {},
     }
-
-    const config_path = "zenv.json";
     // Load the environment registry first, as we'll need it for all commands
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
         output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
@@ -296,17 +279,22 @@ pub fn main(app: std.process.Init) anyerror!void {
             };
 
             if (!config_exists) {
-                // Create init args
+                // Create init args from the POSITIONAL arguments, skipping flags:
+                // `zenv setup --init myenv` must not create an env named "--init".
+                const env_name = flags_module.positional(args, 0) orelse {
+                    output.printError(allocator, "Missing environment name. Usage: zenv setup <name> --init", .{}) catch {};
+                    process.exit(1);
+                };
+
                 var init_args = std.array_list.Managed([]const u8).init(allocator);
                 defer init_args.deinit();
 
                 try init_args.append("zenv"); // Args[0] is the program name
                 try init_args.append("init");
-                try init_args.append(args[2]); // Environment name
+                try init_args.append(env_name);
 
-                // Add description if provided
-                if (args.len > 3) {
-                    try init_args.append(args[3]);
+                if (flags_module.positional(args, 1)) |description| {
+                    try init_args.append(description);
                 }
 
                 // Run init to create config
@@ -332,7 +320,7 @@ pub fn main(app: std.process.Init) anyerror!void {
     // Dispatch the command; any error it returns is mapped to a user-facing
     // message (and exits) by the single error handler.
     const config_ptr: ?*const configurations.ZenvConfig = if (config) |*c| c else null;
-    dispatch(command, allocator, config_ptr, &registry, args, config_path) catch |err| errors.report(allocator, err);
+    dispatch(command, allocator, config_ptr, &registry, args) catch |err| errors.report(allocator, err);
 }
 
 /// Routes a parsed command to its handler. Handlers return errors rather than
@@ -343,7 +331,6 @@ fn dispatch(
     config: ?*const configurations.ZenvConfig,
     registry: *configurations.EnvironmentRegistry,
     args: []const []const u8,
-    config_path: []const u8,
 ) !void {
     switch (command) {
         .setup => try commands.handleSetupCommand(allocator, config.?, registry, args),
@@ -354,20 +341,12 @@ fn dispatch(
         .rm => try commands.handleRmCommand(allocator, registry, args),
         .rename => try commands.handleRenameCommand(allocator, registry, args),
         .cd => try commands.handleCdCommand(allocator, registry, args),
-        .python => try commands.handlePythonCommand(allocator, args),
         .log => try commands.handleLogCommand(allocator, registry, args),
         .run => try commands.handleRunCommand(allocator, registry, args),
-        .validate => try commands.handleValidateCommand(allocator, config_path, args),
         .alias => try commands.handleAliasCommand(allocator, registry, args),
-        .jupyter => try commands.handleJupyterCommand(allocator, args),
+        .jupyter => try commands.handleJupyterCommand(allocator, registry, args),
 
         // These were handled before dispatch, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init => unreachable,
-
-        .unknown => {
-            output.printError(allocator, "Unknown command '{s}'", .{args[1]}) catch {};
-            output.print(allocator, "run 'zenv help' to see the usage", .{}) catch {};
-            std.process.exit(1);
-        },
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .unknown => unreachable,
     }
 }

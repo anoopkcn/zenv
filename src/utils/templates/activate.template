@@ -25,7 +25,7 @@ safe_module_load() {
 
 @@MODULE_SECTION@@
 
-source @@VENV_PATH@@/bin/activate
+source "@@VENV_PATH@@/bin/activate"
 
 export PYTHONDONTWRITEBYTECODE=1
 @@ZENV_ENV_DIR@@

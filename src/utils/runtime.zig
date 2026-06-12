@@ -51,6 +51,25 @@ pub fn writeFile(path: []const u8, data: []const u8) !void {
     return Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
+/// Atomically replaces `path` with `data`: writes a temp file in the same
+/// directory, syncs it, then renames it over the target. A crash mid-write
+/// can leave a stale temp file behind but never a truncated target. Use for
+/// state files (registry.json, zenv.json) where truncate-then-write would
+/// risk losing the whole file.
+pub fn writeFileAtomic(allocator: Allocator, path: []const u8, data: []const u8) !void {
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.zenv-tmp", .{path});
+    defer allocator.free(tmp_path);
+    errdefer deleteFile(tmp_path) catch {};
+
+    {
+        var file = try createFile(tmp_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, data);
+        try file.sync(io);
+    }
+    try rename(tmp_path, path);
+}
+
 /// Recursively creates `path` (idempotent). Replaces `makePath` /
 /// `makeDirAbsolute` (with the old PathAlreadyExists handling folded in).
 pub fn makePath(path: []const u8) !void {

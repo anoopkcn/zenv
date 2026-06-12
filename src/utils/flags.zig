@@ -37,3 +37,37 @@ pub const CommandFlags = struct {
         return flags;
     }
 };
+
+/// Returns the `idx`-th positional argument after the command (i.e. within
+/// `args[2..]`), skipping `-`/`--` flags. Keeps `zenv setup --init myenv` and
+/// `zenv setup myenv --init` equivalent instead of silently treating the flag
+/// itself as the environment name.
+pub fn positional(args: []const []const u8, idx: usize) ?[]const u8 {
+    if (args.len <= 2) return null;
+    var seen: usize = 0;
+    for (args[2..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "-")) continue;
+        if (seen == idx) return arg;
+        seen += 1;
+    }
+    return null;
+}
+
+// ============================ Tests ============================
+const testing = std.testing;
+
+test "positional skips flags regardless of position" {
+    const args1 = [_][]const u8{ "zenv", "setup", "--init", "myenv", "desc" };
+    try testing.expectEqualStrings("myenv", positional(&args1, 0).?);
+    try testing.expectEqualStrings("desc", positional(&args1, 1).?);
+
+    const args2 = [_][]const u8{ "zenv", "setup", "myenv", "--init" };
+    try testing.expectEqualStrings("myenv", positional(&args2, 0).?);
+    try testing.expect(positional(&args2, 1) == null);
+
+    const args3 = [_][]const u8{ "zenv", "setup", "--init" };
+    try testing.expect(positional(&args3, 0) == null);
+
+    const args4 = [_][]const u8{ "zenv", "setup" };
+    try testing.expect(positional(&args4, 0) == null);
+}

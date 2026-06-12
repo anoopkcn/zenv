@@ -1,10 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const output = @import("output.zig");
-const aux = @import("auxiliary.zig");
-const configurations = @import("config.zig");
 const runtime = @import("runtime.zig");
-const EnvironmentRegistry = configurations.EnvironmentRegistry;
 
 pub const KernelSpec = struct {
     name: []const u8,
@@ -71,26 +68,16 @@ pub fn generateKernelJson(allocator: Allocator, spec: KernelSpec) ![]const u8 {
     return try std.fmt.allocPrint(allocator, template, .{ spec.display_name, spec.python_path });
 }
 
-/// Create a Jupyter kernel for the given environment
-pub fn createKernel(allocator: Allocator, env_name: []const u8, custom_name: ?[]const u8, custom_display_name: ?[]const u8) !void {
+/// Create a Jupyter kernel for an environment. `env_name` and `venv_path`
+/// come from a registry entry the CALLER resolved (the host-aware resolver in
+/// config.zig) — this module never touches the registry, so it cannot pick a
+/// different environment than every other command would.
+pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []const u8, custom_name: ?[]const u8, custom_display_name: ?[]const u8) !void {
     // Check if Jupyter is available
     if (!isJupyterAvailable(allocator)) {
         try output.printError(allocator, "Jupyter is not installed or not available in PATH", .{});
         return error.JupyterNotFound;
     }
-
-    // Get environment info from registry
-    var registry = EnvironmentRegistry.load(allocator) catch |err| {
-        try output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)});
-        return;
-    };
-    defer registry.deinit();
-
-    // Find the environment
-    const env_info = registry.lookup(env_name) orelse {
-        try output.printError(allocator, "Environment '{s}' not found in registry", .{env_name});
-        return;
-    };
 
     // Determine kernel name and display name
     const kernel_name = custom_name orelse try std.fmt.allocPrint(allocator, "zenv-{s}", .{env_name});
@@ -100,7 +87,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, custom_name: ?[]
     defer if (custom_display_name == null) allocator.free(display_name);
 
     // Get Python path from environment
-    const python_path = try std.fmt.allocPrint(allocator, "{s}/bin/python", .{env_info.venv_path});
+    const python_path = try std.fmt.allocPrint(allocator, "{s}/bin/python", .{venv_path});
     defer allocator.free(python_path);
 
     // Check if Python executable exists

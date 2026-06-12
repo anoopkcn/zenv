@@ -498,9 +498,14 @@ pub const EnvironmentRegistry = struct {
         );
         defer self.allocator.free(json_text);
 
-        try runtime.writeFile(registry_path, json_text);
+        // Atomic replace: a crash mid-save must never truncate the registry.
+        try runtime.writeFileAtomic(self.allocator, registry_path, json_text);
     }
 
+    /// Adds (or updates) the entry for `env_name` and persists registry.json,
+    /// matching deregister/rename: every mutator saves, so callers cannot
+    /// forget. Transactional like rename: if the save fails, the in-memory
+    /// registry is rolled back and the error returned.
     pub fn register(
         self: *EnvironmentRegistry,
         env_name: []const u8,
@@ -520,30 +525,43 @@ pub const EnvironmentRegistry = struct {
         }
         errdefer self.allocator.free(registry_target_machines_str);
 
-        // Get virtual env path
-        var venv_path: []const u8 = undefined;
-        if (std.fs.path.isAbsolute(base_dir)) {
-            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ base_dir, env_name });
-        } else {
-            venv_path = try std.fs.path.join(self.allocator, &[_][]const u8{ project_dir, base_dir, env_name });
-        }
+        const venv_path = try paths.venvPath(self.allocator, project_dir, base_dir, env_name);
         errdefer self.allocator.free(venv_path);
 
         // Check for existing entry
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
-                // Update existing entry
-                self.allocator.free(entry.project_dir);
-                entry.project_dir = try self.allocator.dupe(u8, project_dir);
+                // Update in place. Allocate every replacement BEFORE freeing or
+                // swapping anything, and keep the old pointers for rollback, so
+                // neither an allocation failure mid-update nor a failed save can
+                // leave the entry pointing at freed memory.
+                const new_project_dir = try self.allocator.dupe(u8, project_dir);
+                errdefer self.allocator.free(new_project_dir);
+                const new_description: ?[]const u8 = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
+                errdefer if (new_description) |desc| self.allocator.free(desc);
 
-                if (entry.description) |desc| self.allocator.free(desc);
-                entry.description = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
+                const old_project_dir = entry.project_dir;
+                const old_description = entry.description;
+                const old_target_machines = entry.target_machines_str;
+                const old_venv_path = entry.venv_path;
 
-                self.allocator.free(entry.target_machines_str);
+                entry.project_dir = new_project_dir;
+                entry.description = new_description;
                 entry.target_machines_str = registry_target_machines_str;
-
-                self.allocator.free(entry.venv_path);
                 entry.venv_path = venv_path;
+
+                self.save() catch |err| {
+                    entry.project_dir = old_project_dir;
+                    entry.description = old_description;
+                    entry.target_machines_str = old_target_machines;
+                    entry.venv_path = old_venv_path;
+                    return err; // errdefers free the orphaned new strings
+                };
+
+                self.allocator.free(old_project_dir);
+                if (old_description) |desc| self.allocator.free(desc);
+                self.allocator.free(old_target_machines);
+                self.allocator.free(old_venv_path);
                 return;
             }
         }
@@ -551,16 +569,29 @@ pub const EnvironmentRegistry = struct {
         // Create new entry
         const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
         errdefer self.allocator.free(id);
+        const env_name_owned = try self.allocator.dupe(u8, env_name);
+        errdefer self.allocator.free(env_name_owned);
+        const project_dir_owned = try self.allocator.dupe(u8, project_dir);
+        errdefer self.allocator.free(project_dir_owned);
+        const description_owned: ?[]const u8 = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
+        errdefer if (description_owned) |desc| self.allocator.free(desc);
 
         try self.entries.append(.{
             .id = id,
-            .env_name = try self.allocator.dupe(u8, env_name),
-            .project_dir = try self.allocator.dupe(u8, project_dir),
-            .description = if (description) |desc| try self.allocator.dupe(u8, desc) else null,
+            .env_name = env_name_owned,
+            .project_dir = project_dir_owned,
+            .description = description_owned,
             .target_machines_str = registry_target_machines_str,
             .venv_path = venv_path,
             .aliases = ArrayList([]const u8).init(self.allocator),
         });
+
+        self.save() catch |err| {
+            // Detach the just-appended entry; the errdefers above free its
+            // strings exactly once (its alias list never allocated).
+            _ = self.entries.orderedRemove(self.entries.items.len - 1);
+            return err;
+        };
     }
 
     /// Structural removal by ref. CONSUMES the ref and RETURNS the owned,
@@ -575,58 +606,6 @@ pub const EnvironmentRegistry = struct {
             return err;
         };
         return removed;
-    }
-
-    // NOTE: shallow first-match resolver (no ambiguity error, host-BLIND for a
-    // shared alias — returns the first holder). Used only by jupyter (called with
-    // an explicit env_name) and the registry-lookup test. The host-aware path is
-    // `resolve`/`resolveAgainstCwd`; migrating jupyter onto it is future work.
-    pub fn lookup(self: *const EnvironmentRegistry, identifier: []const u8) ?RegistryEntry {
-        // Fast path: Direct lookup by env_name
-        for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.env_name, identifier)) {
-                return entry;
-            }
-        }
-
-        // Check for alias match
-        for (self.entries.items) |entry| {
-            for (entry.aliases.items) |alias| {
-                if (std.mem.eql(u8, alias, identifier)) {
-                    return entry;
-                }
-            }
-        }
-
-        // Check for exact ID match
-        for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.id, identifier)) {
-                return entry;
-            }
-        }
-
-        // Lookup by ID prefix if it's long enough (7+ chars)
-        if (identifier.len >= 7) {
-            var matching_entry: ?RegistryEntry = null;
-            var match_count: usize = 0;
-
-            for (self.entries.items) |entry| {
-                if (entry.id.len >= identifier.len and
-                    std.mem.eql(u8, entry.id[0..identifier.len], identifier))
-                {
-                    matching_entry = entry;
-                    match_count += 1;
-
-                    // If we find more than one match, we can't uniquely identify
-                    if (match_count > 1) break;
-                }
-            }
-
-            // Return only if we found exactly one match
-            if (match_count == 1) return matching_entry;
-        }
-
-        return null;
     }
 
     /// Opaque, stable handle to a resolved environment. Index-keyed: valid
@@ -981,7 +960,7 @@ test "generateSHA1ID returns 40-char lowercase hex" {
     }
 }
 
-test "registry lookup by name, alias, and id prefix" {
+test "registry resolution by name, alias, and id prefix" {
     const a = testing.allocator;
     var reg = EnvironmentRegistry.init(a);
     defer reg.deinit();
@@ -996,12 +975,12 @@ test "registry lookup by name, alias, and id prefix" {
         .aliases = std.array_list.Managed([]const u8).init(a),
     });
 
-    try testing.expect(reg.lookup("myenv") != null);
-    try testing.expect(reg.lookup("nope") == null);
-    try testing.expect(reg.lookup("0123456789abcdef") != null); // id prefix
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("myenv", null, null)).idx);
+    try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("nope", null, null));
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("0123456789abcdef", null, null)).idx); // id prefix
 
     try reg.addAlias("me", "myenv");
-    try testing.expect(reg.lookup("me") != null);
+    try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("me", null, null)).idx);
     try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
     try testing.expect(reg.removeAlias("me"));
     try testing.expect(reg.resolveAlias("me") == null);

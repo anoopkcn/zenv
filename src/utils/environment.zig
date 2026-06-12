@@ -49,11 +49,12 @@ pub fn getAndValidateEnvironment(
     args: []const []const u8,
     flags: CommandFlags,
 ) !*const EnvironmentConfig {
-    if (args.len < 3) {
+    // First positional after the command — NOT args[2], which may be a flag
+    // (e.g. `zenv setup --init myenv`).
+    const env_name = flags_module.positional(args, 0) orelse {
         output.printError(allocator, "Missing environment name argument for command '{s}'", .{args[1]}) catch {};
         return error.ArgsError;
-    }
-    const env_name = args[2];
+    };
 
     const env_config = config.getEnvironment(env_name) orelse {
         output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
