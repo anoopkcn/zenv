@@ -512,7 +512,7 @@ pub fn handleListCommand(
             var info = info_val;
             defer info.deinit(allocator);
             if (info.path) |p| {
-                stdout.print("\n  python  : {s}  ({s})", .{ info.version, p }) catch {};
+                stdout.print("\n  python  : {s}", .{p}) catch {};
             } else {
                 stdout.print("\n  python  : {s}", .{info.version}) catch {};
             }
