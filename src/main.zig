@@ -93,9 +93,9 @@ fn printUsage() void {
         \\                             updates generated scripts, and updates any associated Jupyter kernels.
         \\                             Preserves all configuration and metadata.
         \\
-        // \\  rm <name|id>               De-registers the environment AND permanently deletes its
-        // \\                             virtual environment directory from the filesystem.
-        // \\
+        \\  rm <name|id>               De-registers the environment AND permanently deletes its
+        \\                             virtual environment directory from the filesystem.
+        \\
         \\  validate [config]          Validates the configuration file. If no arguent provided it
         \\                             will validate the 'zenv.json' file in the current directory.
         \\                             Reports errors with line numbers and field names if found.
