@@ -18,6 +18,16 @@ abort() {
   printf '\033[1;31mERROR:\033[0m %s\n' "$@" >&2
   exit 1
 }
+zenv_uv_pip() {
+  # On HPC, `module load` exports PYTHONPATH pointing at the module stack's
+  # site-packages. uv's build-isolation subprocesses inherit it, which can drag
+  # in stale setuptools plugins (e.g. pbr's egg_info writer -> ModuleNotFoundError:
+  # pkg_resources) and break source builds. uv never needs module packages to
+  # resolve or install, so run every uv invocation with PYTHONPATH cleared.
+  # (The pip path is left untouched: it uses --no-build-isolation and relies on
+  # module-provided build deps.)
+  ( unset PYTHONPATH; uv "$@" )
+}
 
 LOG_FILE="@@VENV_DIR@@/zenv_setup.log"
 echo "=== Setup script started at $(date) ===" >> "$LOG_FILE"
@@ -415,9 +425,9 @@ export PYTHONDONTWRITEBYTECODE=1
 if [ "$USE_UV" = "true" ]; then
   ohai "Ensuring pip, setuptools, and wheel are up-to-date in the venv using uv"
   if [ "$NO_CACHE" = "true" ]; then
-    uv pip install --no-cache --link-mode=copy --upgrade pip #setuptools wheel
+    zenv_uv_pip pip install --no-cache --link-mode=copy --upgrade pip #setuptools wheel
   else
-    uv pip install --link-mode=copy --upgrade pip #setuptools wheel
+    zenv_uv_pip pip install --link-mode=copy --upgrade pip #setuptools wheel
   fi
 else
   ohai "Ensuring pip and it is up-to-date in the venv using pip"
@@ -446,9 +456,9 @@ if [ "$FORCE_DEPS" = "true" ]; then
   if [ -s "$REQUIREMENTS_PATH" ]; then
     if [ "$USE_UV" = "true" ]; then
       if [ "$NO_CACHE" = "true" ]; then
-        uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"
+        zenv_uv_pip pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"
       else
-        uv pip install --link-mode=copy -r "$REQUIREMENTS_PATH"
+        zenv_uv_pip pip install --link-mode=copy -r "$REQUIREMENTS_PATH"
       fi
     else
       python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
@@ -483,9 +493,9 @@ else
     if [ -s "$FILTERED_REQUIREMENTS" ]; then
       if [ "$USE_UV" = "true" ]; then
         if [ "$NO_CACHE" = "true" ]; then
-          uv pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"
+          zenv_uv_pip pip install --no-cache --link-mode=copy -r "$FILTERED_REQUIREMENTS"
         else
-          uv pip install --link-mode=copy -r "$FILTERED_REQUIREMENTS"
+          zenv_uv_pip pip install --link-mode=copy -r "$FILTERED_REQUIREMENTS"
         fi
       else
         python -m pip install $PIP_INSTALL_OPTIONS -r "$FILTERED_REQUIREMENTS"
@@ -500,9 +510,9 @@ else
     if [ -s "$REQUIREMENTS_PATH" ]; then
       if [ "$USE_UV" = "true" ]; then
         if [ "$NO_CACHE" = "true" ]; then
-          uv pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"
+          zenv_uv_pip pip install --no-cache --link-mode=copy -r "$REQUIREMENTS_PATH"
         else
-          uv pip install --link-mode=copy -r "$REQUIREMENTS_PATH"
+          zenv_uv_pip pip install --link-mode=copy -r "$REQUIREMENTS_PATH"
         fi
       else
         python -m pip install $PIP_INSTALL_OPTIONS -r "$REQUIREMENTS_PATH"
@@ -521,26 +531,25 @@ if [ "$DEV_MODE" = "true" ]; then
 
   if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
     info "Found Python package configuration in current directory"
+    EDITABLE_OK=1
     if [ "$USE_UV" = "true" ]; then
       if [ "$NO_CACHE" = "true" ]; then
-        uv pip install --no-cache --link-mode=copy --editable . --no-deps || {
-          warn "Failed to install current directory as editable package using uv"
-          warn "Check that your setup.py or pyproject.toml is valid"
-        }
+        zenv_uv_pip pip install --no-cache --link-mode=copy --editable . --no-deps || EDITABLE_OK=0
       else
-        uv pip install --link-mode=copy --editable . --no-deps || {
-          warn "Failed to install current directory as editable package using uv"
-          warn "Check that your setup.py or pyproject.toml is valid"
-        }
+        zenv_uv_pip pip install --link-mode=copy --editable . --no-deps || EDITABLE_OK=0
       fi
     else
-      python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . --no-deps || {
-        warn "Failed to install current directory as editable package using pip"
-        warn "Check that your setup.py or pyproject.toml is valid"
-      }
+      python -m pip install $PIP_INSTALL_OPTIONS --no-build-isolation --editable . --no-deps || EDITABLE_OK=0
     fi
-    info "Dependencies are handled separately according to module filtering rules"
-    success "Installed current directory as editable package"
+
+    if [ "$EDITABLE_OK" = "1" ]; then
+      info "Dependencies are handled separately according to module filtering rules"
+      success "Installed current directory as editable package"
+    else
+      warn "Failed to install current directory as editable package"
+      warn "Check that your setup.py or pyproject.toml is valid"
+      warn "Continuing setup; the package was NOT installed in editable mode."
+    fi
   else
     warn "No setup.py or pyproject.toml found in current directory"
     warn "Skipping editable install. Create one of these files if needed."
