@@ -13,5 +13,6 @@ test {
     _ = @import("utils/host.zig");
     _ = @import("utils/paths.zig");
     _ = @import("utils/flags.zig");
+    _ = @import("utils/autosetup.zig");
     _ = @import("commands.zig");
 }

@@ -120,6 +120,15 @@ pub fn cwdRealpath(allocator: Allocator) ![]u8 {
     return std.process.currentPathAlloc(io, allocator);
 }
 
+/// Returns the absolute path of the running zenv binary (caller owns it).
+/// Follows symlinks. Used to re-invoke `zenv` as a subprocess (auto-setup).
+/// Note: `std.fs.selfExePathAlloc` does not exist in Zig 0.16; the API lives
+/// on the `std.process`/`Io` seam. The result is sentinel-terminated — keep the
+/// `[:0]u8` type so `allocator.free` accounts for the trailing byte.
+pub fn selfExePath(allocator: Allocator) ![:0]u8 {
+    return std.process.executablePathAlloc(io, allocator);
+}
+
 // --- Process execution -------------------------------------------------------
 //
 // One seam for spawning child processes. Concentrates the stdio/cwd policy and,

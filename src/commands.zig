@@ -7,6 +7,7 @@ const paths = @import("utils/paths.zig");
 const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
+const autosetup = @import("utils/autosetup.zig");
 const python = @import("utils/python.zig");
 const jupyter = @import("utils/jupyter.zig");
 const configurations = @import("utils/config.zig");
@@ -373,6 +374,20 @@ pub fn handleSetupCommand(
         }
     }
 
+    // Record the tracked-file checksum + build flags so run/activate/cd/jupyter
+    // can detect config drift later and auto-rebuild. The anchor is setup_cwd
+    // (== the registered project_dir), so the gate's hash matches this one.
+    // Non-fatal: setup already succeeded; a missing stamp just forces the next
+    // gated command to re-setup.
+    if (autosetup.computeTrackedHash(allocator, setup_cwd, env_config) catch null) |tracked_hash| {
+        defer allocator.free(tracked_hash);
+        const flag_tokens = autosetup.flagTokens(allocator, flags) catch &[_][]const u8{};
+        defer allocator.free(flag_tokens);
+        autosetup.writeStamp(allocator, env_dir_path, tracked_hash, flag_tokens) catch |err| {
+            output.print(allocator, "Warning: could not write setup stamp: {s}", .{@errorName(err)}) catch {};
+        };
+    }
+
     output.print(allocator,
         \\Environment '{s}' setup complete and registered in global registry.
         \\Usage: source $(zenv activate {s})
@@ -446,6 +461,9 @@ pub fn handleActivateCommand(
     }
 
     const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    // Rebuild the env first if its config/dependency files changed (silent, so
+    // stdout stays just the activate-script path).
+    try autosetup.ensureUpToDate(allocator, registry.get(ref));
 
     output.rawOut(allocator, "{s}/activate.sh\n", .{registry.get(ref).venv_path}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
@@ -694,6 +712,8 @@ pub fn handleCdCommand(
     }
 
     const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    // Rebuild the env first if its config/dependency files changed (silent).
+    try autosetup.ensureUpToDate(allocator, registry.get(ref));
 
     // Output just the project directory path
     output.rawOut(allocator, "{s}\n", .{registry.get(ref).project_dir}) catch |e| {
@@ -806,6 +826,8 @@ pub fn handleRunCommand(
     const command_args = args[4..];
 
     const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    // Rebuild the env first if its config/dependency files changed (silent).
+    try autosetup.ensureUpToDate(allocator, registry.get(ref));
     const venv_path = registry.get(ref).venv_path;
 
     const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
@@ -1258,6 +1280,9 @@ fn handleJupyterCreate(
     // work, and on a shared filesystem the kernel binds to THIS machine's env.
     const ref = registry.resolve(allocator, identifier) catch |e| return present(allocator, registry, identifier, e);
     const entry = registry.get(ref);
+    // Rebuild the env first if its config/dependency files changed (silent), so
+    // the kernel is created against an up-to-date environment.
+    try autosetup.ensureUpToDate(allocator, entry);
 
     try jupyter.createKernel(allocator, entry.env_name, entry.venv_path, custom_name, custom_display_name);
 }
