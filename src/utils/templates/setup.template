@@ -70,7 +70,7 @@ safe_module_load() {
 # are skipped. Any other unexpected (non-identifier) entry marks the cache
 # "untrusted" so activation falls back to a real `module load`.
 zenv_write_module_cache() {
-  local base="$1" loaded="$2" out="$3" stamp="$4" version="$5"
+  local base="$1" loaded="$2" out="$3" stamp="$4" version="$5" sig="$6"
   local tmp_out="${out}.tmp.$$" tmp_flag="${stamp}.flag.$$" untrusted=0
   : > "$tmp_flag"
 
@@ -127,6 +127,7 @@ zenv_write_module_cache() {
     printf 'version=%s\n' "$version"
     printf 'system=%s\n' "${SYSTEMNAME:-$(hostname 2>/dev/null)}"
     printf 'untrusted=%s\n' "$untrusted"
+    printf 'modules_sig=%s\n' "$sig"
   } > "$stamp"
 
   if [ "$untrusted" = "1" ]; then
@@ -170,48 +171,82 @@ if [ "$MODULE_CACHE_ENABLED" = "true" ]; then
   ohai "Module environment caching enabled; activation will replay captured module env."
 fi
 
+@@FORCE_DEPS_VALUE@@
+
 if command -v module >/dev/null 2>&1; then
-  ohai "Purging all modules"
-  module --force purge
-
-  # Snapshot the clean (post-purge) environment so we can later capture exactly
-  # what `module load` adds. Only when module caching is enabled.
-  ZENV_CACHE_BASE=""
-  if [ "$MODULE_CACHE_ENABLED" = "true" ]; then
-    ZENV_CACHE_BASE=$(mktemp 2>/dev/null) || ZENV_CACHE_BASE=""
-    if [ -n "$ZENV_CACHE_BASE" ]; then
-      env > "$ZENV_CACHE_BASE" 2>/dev/null || { warn "Could not snapshot base environment; module cache disabled for this run."; rm -f "$ZENV_CACHE_BASE"; ZENV_CACHE_BASE=""; }
+  # When caching is on and the module SET is unchanged for this system, skip the
+  # slow purge/load/capture and just source the existing cache to establish the
+  # module env (PATH, LD_LIBRARY_PATH, module python) for the rest of setup.
+  # Note: reuse does NOT purge (same semantics as activate.sh reuse); on any
+  # mismatch we fall back to a real purge + load + re-capture.
+  ZENV_REUSE_CACHE=0
+  if [ "$MODULE_CACHE_ENABLED" = "true" ] && [ "$FORCE_DEPS" != "true" ] && [ -n "@@MODULES_SIG@@" ] \
+     && [ -f "@@MODULE_CACHE_FILE@@" ] && [ -f "@@MODULE_CACHE_STAMP@@" ]; then
+    ZENV_STAMP_VER=$(sed -n 's/^version=//p' "@@MODULE_CACHE_STAMP@@")
+    ZENV_STAMP_SYS=$(sed -n 's/^system=//p' "@@MODULE_CACHE_STAMP@@")
+    ZENV_STAMP_UNT=$(sed -n 's/^untrusted=//p' "@@MODULE_CACHE_STAMP@@")
+    ZENV_STAMP_SIG=$(sed -n 's/^modules_sig=//p' "@@MODULE_CACHE_STAMP@@")
+    ZENV_CUR_SYS="${SYSTEMNAME:-$(hostname 2>/dev/null)}"
+    if [ "$ZENV_STAMP_VER" = "@@CACHE_VERSION@@" ] \
+       && [ "$ZENV_STAMP_SYS" = "$ZENV_CUR_SYS" ] \
+       && [ "$ZENV_STAMP_UNT" != "1" ] \
+       && [ "$ZENV_STAMP_SIG" = "@@MODULES_SIG@@" ]; then
+      ZENV_REUSE_CACHE=1
     fi
   fi
 
-  set +e  # Don't exit on module load errors
-
-  ohai "Beginning module loading process"
   ZENV_MOD_OK=1
-  if [ "$MODULES_VERIFIED" = "true" ]; then
-    info "Modules were pre-verified, proceeding with loading"
-    @@MODULE_LOADING_BLOCK@@
+  # The `&& . cache` is part of the `if` condition, so a failed source is exempt
+  # from `set -e` and cleanly falls through to the real-load branch below.
+  if [ "$ZENV_REUSE_CACHE" = "1" ] && . "@@MODULE_CACHE_FILE@@"; then
+    ohai "Module set unchanged; reusing cached module environment (skipping module purge/load)"
+    ZENV_CACHE_BASE=""  # keep empty so the capture block below is skipped
   else
-    @@MODULE_LOADING_BLOCK@@
-  fi
-
-  set -e
-
-  # Capture the module-produced environment delta into the activation cache.
-  if [ "$MODULE_CACHE_ENABLED" = "true" ] && [ -n "$ZENV_CACHE_BASE" ]; then
-    if [ "$ZENV_MOD_OK" = "1" ]; then
-      ZENV_CACHE_LOADED=$(mktemp 2>/dev/null) || ZENV_CACHE_LOADED=""
-      if [ -n "$ZENV_CACHE_LOADED" ] && env > "$ZENV_CACHE_LOADED" 2>/dev/null; then
-        zenv_write_module_cache "$ZENV_CACHE_BASE" "$ZENV_CACHE_LOADED" "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@CACHE_VERSION@@" || true
-      else
-        warn "Could not snapshot loaded environment; skipping module cache."
-      fi
-      [ -n "$ZENV_CACHE_LOADED" ] && rm -f "$ZENV_CACHE_LOADED"
-    else
-      warn "One or more modules failed to load; not writing module cache."
-      rm -f "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@"
+    if [ "$ZENV_REUSE_CACHE" = "1" ]; then
+      warn "Failed to source module cache; falling back to 'module load'"
     fi
-    rm -f "$ZENV_CACHE_BASE"
+    ohai "Purging all modules"
+    module --force purge
+
+    # Snapshot the clean (post-purge) environment so we can later capture exactly
+    # what `module load` adds. Only when module caching is enabled.
+    ZENV_CACHE_BASE=""
+    if [ "$MODULE_CACHE_ENABLED" = "true" ]; then
+      ZENV_CACHE_BASE=$(mktemp 2>/dev/null) || ZENV_CACHE_BASE=""
+      if [ -n "$ZENV_CACHE_BASE" ]; then
+        env > "$ZENV_CACHE_BASE" 2>/dev/null || { warn "Could not snapshot base environment; module cache disabled for this run."; rm -f "$ZENV_CACHE_BASE"; ZENV_CACHE_BASE=""; }
+      fi
+    fi
+
+    set +e  # Don't exit on module load errors
+
+    ohai "Beginning module loading process"
+    ZENV_MOD_OK=1
+    if [ "$MODULES_VERIFIED" = "true" ]; then
+      info "Modules were pre-verified, proceeding with loading"
+      @@MODULE_LOADING_BLOCK@@
+    else
+      @@MODULE_LOADING_BLOCK@@
+    fi
+
+    set -e
+
+    # Capture the module-produced environment delta into the activation cache.
+    if [ "$MODULE_CACHE_ENABLED" = "true" ] && [ -n "$ZENV_CACHE_BASE" ]; then
+      if [ "$ZENV_MOD_OK" = "1" ]; then
+        ZENV_CACHE_LOADED=$(mktemp 2>/dev/null) || ZENV_CACHE_LOADED=""
+        if [ -n "$ZENV_CACHE_LOADED" ] && env > "$ZENV_CACHE_LOADED" 2>/dev/null; then
+          zenv_write_module_cache "$ZENV_CACHE_BASE" "$ZENV_CACHE_LOADED" "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@CACHE_VERSION@@" "@@MODULES_SIG@@" || true
+        else
+          warn "Could not snapshot loaded environment; skipping module cache."
+        fi
+        [ -n "$ZENV_CACHE_LOADED" ] && rm -f "$ZENV_CACHE_LOADED"
+      else
+        warn "One or more modules failed to load; not writing module cache."
+        rm -f "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@"
+      fi
+      rm -f "$ZENV_CACHE_BASE"
+    fi
   fi
 
   MODULE_PYTHON=""
@@ -392,8 +427,6 @@ else
     python -m pip install --ignore-installed --no-build-isolation --upgrade pip #setuptools wheel
   fi
 fi
-
-@@FORCE_DEPS_VALUE@@
 
 REQUIREMENTS_PATH="@@REQUIREMENTS_PATH@@"
 ohai "Using requirements file: $REQUIREMENTS_PATH (this file is generated by zenv based on your configuration)"

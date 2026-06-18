@@ -213,6 +213,16 @@ fn createSetupScript(
     defer allocator.free(module_cache_stamp);
     try replacements.put("MODULE_CACHE_STAMP", module_cache_stamp);
 
+    // Reuse key: hash of the effective module list (in load order). Setup skips
+    // re-running Lmod when this matches the stamp. Empty when caching is off so
+    // the shell guard `[ -n "@@MODULES_SIG@@" ]` disables reuse.
+    const modules_sig = if (module_cache_active)
+        try template.modulesSignature(allocator, env_config.modules.items)
+    else
+        try allocator.dupe(u8, "");
+    defer allocator.free(modules_sig);
+    try replacements.put("MODULES_SIG", modules_sig);
+
     // Generate the module loading block
     var module_loading_block = std.array_list.Managed(u8).init(allocator);
     defer module_loading_block.deinit();
