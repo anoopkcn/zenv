@@ -270,7 +270,9 @@ The cache is used only when it is trustworthy; otherwise activation transparentl
 - Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as *prepends*, so your live login environment is preserved.
 - If any module fails to load during setup, no cache is written.
 
-The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance (or you edit `modules` in `zenv.json`), re-run `zenv setup` to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
+**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed. To avoid paying the Lmod cost on every such rebuild, the stamp also records a signature of the module set (`modules_sig`). When a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead re-sources the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. `zenv setup --force` always re-captures.
+
+The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance, re-run `zenv setup` (or `zenv setup --force`) to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
 
 ## Help
 
