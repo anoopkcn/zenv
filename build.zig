@@ -149,6 +149,10 @@ pub fn build(b: *std.Build) !void {
     // Add the options module as an import named "options"
     exe.root_module.addImport("options", options_module.createModule());
 
+    // Add the zig-toml parser as an import named "toml" (used by utils/parse_deps.zig)
+    const toml_dep = b.dependency("toml", .{ .target = target, .optimize = effective_optimize });
+    exe.root_module.addImport("toml", toml_dep.module("toml"));
+
     // Link standard library, etc.
     b.installArtifact(exe);
 
@@ -175,6 +179,8 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         }),
     });
+    // test_root.zig imports utils/parse_deps.zig, which imports "toml"
+    unit_tests.root_module.addImport("toml", toml_dep.module("toml"));
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -268,6 +274,10 @@ fn setupTargetReleaseWithOptimize(
         }),
     });
     exe_release.root_module.addImport("options", options_import);
+
+    // Add the zig-toml parser for this cross-compiled target
+    const toml_dep_rel = b.dependency("toml", .{ .target = target, .optimize = optimize });
+    exe_release.root_module.addImport("toml", toml_dep_rel.module("toml"));
 
     // --- Package the Executable ---
     const triple = target.result.zigTriple(b.allocator) catch |err| {

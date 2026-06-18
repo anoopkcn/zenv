@@ -3,6 +3,7 @@
 
 .zig-cache/
 zig-out/
+zig-pkg/
 /release/
 /debug/
 /build/
