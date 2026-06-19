@@ -191,6 +191,21 @@ pub fn handleSetupCommand(
     const setup_cwd = try runtime.cwdRealpath(allocator);
     defer allocator.free(setup_cwd);
 
+    // Refuse to create an environment whose base dir resolves to the global
+    // ZENV_DIR (e.g. `zenv setup` from $HOME with default base_dir `.zenv` and
+    // ZENV_DIR unset -> ~/.zenv). That would overwrite registry.json, python
+    // installs and other global state. Guard here, before any logging or
+    // directory creation. See paths.baseDirIsZenvDir.
+    {
+        const zenv_dir = try paths.getZenvDir(allocator);
+        defer allocator.free(zenv_dir);
+        if (try paths.baseDirIsZenvDir(allocator, setup_cwd, config.base_dir, zenv_dir)) {
+            output.printError(allocator, "Refusing to set up: base directory '{s}' resolves to ZENV_DIR ('{s}').", .{ config.base_dir, zenv_dir }) catch {};
+            output.printError(allocator, "This would overwrite global zenv state. Run setup from a project directory, set a different 'base_dir' in zenv.json, or point ZENV_DIR elsewhere.", .{}) catch {};
+            return error.BaseDirIsZenvDir;
+        }
+    }
+
     const env_dir_path = try paths.venvPath(allocator, setup_cwd, config.base_dir, env_name);
     defer allocator.free(env_dir_path);
 
