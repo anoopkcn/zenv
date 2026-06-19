@@ -255,8 +255,8 @@ fn validateAndBuildEnvironment(
 
     // Whitelist: every other field is unrecognized.
     const allowed = [_][]const u8{
-        "target_machines", "description",      "modules",          "modules_file", "dependencies",
-        "dependency_file", "dev_dependencies", "fallback_python",  "setup",        "activate",
+        "target_machines", "description",      "modules",         "modules_file", "dependencies",
+        "dependency_file", "dev_dependencies", "fallback_python", "setup",        "activate",
         "module_cache",
     };
     var fi = value.object.iterator();
