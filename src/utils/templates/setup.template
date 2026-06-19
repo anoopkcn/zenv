@@ -296,10 +296,12 @@ if command -v module >/dev/null 2>&1; then
 
   ohai "Checking Python packages provided by modules"
   MODULE_PACKAGES_FILE=$(mktemp)
+  # Keep the full "name==version" so we can report which module version is used in
+  # place of each declared dependency (the match below only looks at the name).
   if [ -n "$MODULE_PYTHON" ]; then
-    $MODULE_PYTHON -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null || true
+    $MODULE_PYTHON -m pip list --format=freeze 2>/dev/null | sort > "$MODULE_PACKAGES_FILE" || true
   else
-    (python3 -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null || python -m pip list --format=freeze | awk -F'==' '{print $1}' | sort > "$MODULE_PACKAGES_FILE" 2>/dev/null) || true
+    (python3 -m pip list --format=freeze 2>/dev/null | sort > "$MODULE_PACKAGES_FILE" || python -m pip list --format=freeze 2>/dev/null | sort > "$MODULE_PACKAGES_FILE") || true
   fi
 
   if [ -s "$MODULE_PACKAGES_FILE" ]; then
@@ -316,6 +318,10 @@ else
   MODULE_PACKAGES_FILE=$(mktemp) # Create empty temp file
   MODULE_PYTHON="" # Ensure this is empty when no modules are loaded
 fi
+
+# Dependencies satisfied by module-provided packages instead of being installed
+# (name<TAB>requested<TAB>module_version). Used for the end-of-run summary.
+MODULE_OVERRIDES_FILE=$(mktemp)
 
 ohai "Step 3: Preparing Python virtual environment"
 
@@ -474,17 +480,28 @@ else
     INSTALLED_COUNT=0
 
     if [ -s "$REQUIREMENTS_PATH" ]; then
-      grep -v "^[[:space:]]*#" "$REQUIREMENTS_PATH" | grep -v "^[[:space:]]*$" | while read -r line; do
+      CLEAN_REQUIREMENTS=$(mktemp)
+      grep -v "^[[:space:]]*#" "$REQUIREMENTS_PATH" | grep -v "^[[:space:]]*$" > "$CLEAN_REQUIREMENTS" || true
+      # Read from a file (not a pipe) so the loop runs in this shell: the counters
+      # and the appends to $MODULE_OVERRIDES_FILE below would be lost in a subshell.
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
         package_name=$(echo "$line" | sed 's/[^a-zA-Z0-9_.-].*//' | tr '[:upper:]' '[:lower:]')
 
-        if grep -i -q "^${package_name}$" "$MODULE_PACKAGES_FILE"; then
-          info "Excluding '$line' (provided by loaded modules)"
+        # Match by name against the "name==version" module list and capture the version.
+        module_entry=$(awk -F'==' -v p="$package_name" 'tolower($1)==p {print; exit}' "$MODULE_PACKAGES_FILE")
+        if [ -n "$module_entry" ]; then
+          module_version=${module_entry##*==}
+          [ "$module_version" = "$module_entry" ] && module_version="unknown"
+          info "Excluding '$line' (provided by loaded modules as ${package_name}==${module_version})"
+          printf '%s\t%s\t%s\n' "$package_name" "$line" "$module_version" >> "$MODULE_OVERRIDES_FILE"
           EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
         else
           echo "$line" >> "$FILTERED_REQUIREMENTS"
           INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         fi
-      done
+      done < "$CLEAN_REQUIREMENTS"
+      rm -f "$CLEAN_REQUIREMENTS"
     else
       info "Requirements file '$REQUIREMENTS_PATH' is empty or not found, so no packages to filter from it."
     fi
@@ -563,5 +580,75 @@ fi
 
 @@CUSTOM_SETUP_COMMANDS_BLOCK@@
 @@SETUP_HOOK_BLOCK@@
+
+# Summarize dependencies served by loaded modules instead of being installed, so
+# the user can decide whether a module-provided version is acceptable. This is
+# informational only: module packages winning is the intended behavior.
+if [ -s "$MODULE_OVERRIDES_FILE" ]; then
+  printf '\n'
+  ohai "Dependencies provided by loaded modules (used instead of your requirements):"
+  python - "$MODULE_OVERRIDES_FILE" <<'ZENV_PY' || cat "$MODULE_OVERRIDES_FILE"
+import sys
+
+def load_requirement():
+    for mod in ("packaging.requirements", "pip._vendor.packaging.requirements"):
+        try:
+            return __import__(mod, fromlist=["Requirement"]).Requirement
+        except Exception:
+            continue
+    return None
+
+Requirement = load_requirement()
+rows = []
+try:
+    with open(sys.argv[1]) as fh:
+        for raw in fh:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            parts = raw.split("\t")
+            name = parts[0] if parts else ""
+            req_line = parts[1] if len(parts) > 1 else name
+            mod_ver = parts[2] if len(parts) > 2 else ""
+            spec = req_line
+            status = "?"
+            if Requirement is not None:
+                try:
+                    r = Requirement(req_line)
+                    spec = str(r.specifier) or "(any)"
+                    if mod_ver and mod_ver != "unknown":
+                        try:
+                            status = "ok" if r.specifier.contains(mod_ver, prereleases=True) else "CONFLICT"
+                        except Exception:
+                            status = "?"
+                except Exception:
+                    pass
+            rows.append((name or req_line, spec, mod_ver or "unknown", status))
+except Exception:
+    sys.exit(1)
+
+if not rows:
+    sys.exit(0)
+
+headers = ("PACKAGE", "REQUIRED", "MODULE VERSION", "STATUS")
+widths = [max(len(str(r[i])) for r in [headers] + rows) for i in range(4)]
+def fmt(c):
+    return "    " + "  ".join(str(c[i]).ljust(widths[i]) for i in range(4))
+RED = "\033[1;31m"; GRN = "\033[0;32m"; RST = "\033[0m"
+print(fmt(headers))
+for r in rows:
+    line = fmt(r)
+    if r[3] == "CONFLICT":
+        print(RED + line + RST)
+    elif r[3] == "ok":
+        print(GRN + line + RST)
+    else:
+        print(line)
+ZENV_PY
+  info "STATUS 'CONFLICT' means the module version does not satisfy your requirement."
+  info "You can keep using the module-provided package as-is. If you require the exact"
+  info "version, unload the corresponding module and re-run 'zenv setup' to install it."
+fi
+rm -f "$MODULE_OVERRIDES_FILE" 2>/dev/null || true
 
 echo "=== Setup script completed at $(date) ===" >> "$LOG_FILE"
