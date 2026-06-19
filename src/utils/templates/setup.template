@@ -634,12 +634,12 @@ headers = ("PACKAGE", "REQUIRED", "MODULE VERSION", "STATUS")
 widths = [max(len(str(r[i])) for r in [headers] + rows) for i in range(4)]
 def fmt(c):
     return "    " + "  ".join(str(c[i]).ljust(widths[i]) for i in range(4))
-RED = "\033[1;31m"; GRN = "\033[0;32m"; RST = "\033[0m"
+YEL = "\033[1;33m"; GRN = "\033[0;32m"; RST = "\033[0m"
 print(fmt(headers))
 for r in rows:
     line = fmt(r)
     if r[3] == "CONFLICT":
-        print(RED + line + RST)
+        print(YEL + line + RST)
     elif r[3] == "ok":
         print(GRN + line + RST)
     else:
