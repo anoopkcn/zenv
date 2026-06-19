@@ -200,11 +200,28 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     return allocator.dupe(u8, trimmed_hostname);
 }
 
-// Get hostname using environment variables or fallback to command
+// Resolve the identity of the current machine for `target_machines` matching.
+//
+// On HPC systems every node of a cluster exports the same `$SYSTEMNAME`, while
+// `hostname` differs per node (jrlogin01 vs jrc0042). Keying off `$SYSTEMNAME`
+// first means one `target_machines` entry (e.g. "jureca") matches on login and
+// compute nodes alike, instead of only the nodes whose hostname happens to carry
+// the cluster name. This mirrors the `${SYSTEMNAME:-$(hostname)}` rule the setup
+// and activate templates already use for the module-cache key, so matching and
+// caching agree on one cluster identity. Off HPC, `$SYSTEMNAME` is unset and we
+// fall back to the previous hostname behaviour unchanged.
 pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
-    errors.debugLog(allocator, "Attempting to get hostname from environment variable...", .{});
+    errors.debugLog(allocator, "Attempting to get machine identity from environment variable...", .{});
 
-    // Try HOSTNAME, then HOST (if non-empty), then fall back to the command.
+    // Prefer SYSTEMNAME (cluster-global), then HOSTNAME, then HOST (if non-empty),
+    // then fall back to the `hostname` command.
+    if (runtime.env("SYSTEMNAME")) |systemname_env| {
+        if (systemname_env.len > 0) {
+            errors.debugLog(allocator, "Got machine identity from SYSTEMNAME: '{s}'", .{systemname_env});
+            return allocator.dupe(u8, systemname_env);
+        }
+    }
+
     if (runtime.env("HOSTNAME")) |hostname_env| {
         if (hostname_env.len > 0) {
             errors.debugLog(allocator, "Got hostname from HOSTNAME: '{s}'", .{hostname_env});
@@ -338,4 +355,40 @@ test "hostMatchesTargets: comma-separated list, blank, and no-match" {
     try testing.expect(hostMatchesTargets("anything", "")); // blank = any
     try testing.expect(hostMatchesTargets("anything", "machine1, *"));
     try testing.expect(hostMatchesTargets("jrlogin01.jureca", "juwels, jureca"));
+}
+
+test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
+    const a = testing.allocator;
+    const prev_env = runtime.environ_map;
+    defer runtime.environ_map = prev_env;
+
+    var env_map = std.process.Environ.Map.init(a);
+    defer env_map.deinit();
+    // A node whose hostname does NOT carry the cluster name still resolves to the
+    // cluster via SYSTEMNAME, so a `target_machines: ["jureca"]` entry matches.
+    try env_map.put("SYSTEMNAME", "jureca");
+    try env_map.put("HOSTNAME", "jrc0042");
+    try env_map.put("HOST", "jrc0042");
+    runtime.environ_map = &env_map;
+
+    const id = try getSystemHostname(a);
+    defer a.free(id);
+    try testing.expectEqualStrings("jureca", id);
+    try testing.expect(hostMatchesTargets(id, "jureca"));
+}
+
+test "getSystemHostname: empty SYSTEMNAME falls back to HOSTNAME" {
+    const a = testing.allocator;
+    const prev_env = runtime.environ_map;
+    defer runtime.environ_map = prev_env;
+
+    var env_map = std.process.Environ.Map.init(a);
+    defer env_map.deinit();
+    try env_map.put("SYSTEMNAME", ""); // set-but-empty must not win
+    try env_map.put("HOSTNAME", "jrlogin01.jureca");
+    runtime.environ_map = &env_map;
+
+    const id = try getSystemHostname(a);
+    defer a.free(id);
+    try testing.expectEqualStrings("jrlogin01.jureca", id);
 }
