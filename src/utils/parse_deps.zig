@@ -37,6 +37,24 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
     return true;
 }
 
+/// Extracts the bare package name from a PEP 508 requirement spec, dropping any
+/// version constraint, extras, marker, or surrounding whitespace. Used for
+/// case-insensitive duplicate detection — e.g. "Flask[async] >= 2.0; python_version<'3.12'"
+/// and "flask==3.1" both reduce to a name that compares equal via `samePackage`.
+/// The returned slice points INTO `spec` (no allocation).
+pub fn packageBaseName(spec: []const u8) []const u8 {
+    // The name ends at the first version operator, extras bracket, marker
+    // separator, URL ('@'), or whitespace.
+    const end = std.mem.indexOfAny(u8, spec, "<>=~!@;[ \t") orelse spec.len;
+    return std.mem.trim(u8, spec[0..end], " \t");
+}
+
+/// True when two requirement specs name the same package (case-insensitive,
+/// ignoring version/extras/markers). Allocation-free.
+pub fn samePackage(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(packageBaseName(a), packageBaseName(b));
+}
+
 // Parse a pyproject.toml file and extract PEP 621 dependencies.
 //
 // Reads `[project].dependencies` (an array of PEP 508 requirement strings) using a
@@ -201,15 +219,7 @@ pub fn validateDependencies(
         }
 
         // Extract the package name to check for duplicates (case-insensitive check)
-        var package_name_raw: []const u8 = undefined;
-        if (std.mem.indexOfAny(u8, dep, "<>=~")) |op_idx| {
-            package_name_raw = std.mem.trim(u8, dep[0..op_idx], " ");
-        } else if (std.mem.indexOfScalar(u8, dep, '[')) |bracket_idx| {
-            package_name_raw = std.mem.trim(u8, dep[0..bracket_idx], " ");
-        } else {
-            // Just the package name without version
-            package_name_raw = std.mem.trim(u8, dep, " ");
-        }
+        const package_name_raw = packageBaseName(dep);
 
         // Convert package name to lowercase for case-insensitive duplicate check
         // Reuse the same buffer to avoid repeated allocations
@@ -243,6 +253,14 @@ pub fn validateDependencies(
 // Requires access to EnvironmentConfig, which needs to be imported by the caller.
 pub fn isConfigProvidedDependency(env_config: *const config.EnvironmentConfig, dep: []const u8) bool {
     for (env_config.dependencies.items) |config_dep| {
+        if (std.mem.eql(u8, config_dep, dep)) {
+            return true;
+        }
+    }
+    // dev_dependencies are appended into the setup dep list the same way
+    // (borrowed, not duped), so they must be recognized here too — otherwise
+    // setup's cleanup would free config-owned strings and double-free them.
+    for (env_config.dev_dependencies.items) |config_dep| {
         if (std.mem.eql(u8, config_dep, dep)) {
             return true;
         }
@@ -299,6 +317,23 @@ test "parseRequirementsTxt: skips comments and blank lines" {
     }
     const count = try parseRequirementsTxt(a, content, &deps);
     try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "packageBaseName strips versions, extras, and markers" {
+    try testing.expectEqualStrings("flask", packageBaseName("flask"));
+    try testing.expectEqualStrings("flask", packageBaseName("flask>=2.0"));
+    try testing.expectEqualStrings("flask", packageBaseName("flask==3.1"));
+    try testing.expectEqualStrings("flask", packageBaseName("flask!=2.0"));
+    try testing.expectEqualStrings("numpy", packageBaseName("numpy>=1.26.0, <2.0"));
+    try testing.expectEqualStrings("mkdocstrings", packageBaseName("mkdocstrings[python]>=0.19"));
+    try testing.expectEqualStrings("requests", packageBaseName("requests ; python_version < '3.12'"));
+}
+
+test "samePackage is case-insensitive and ignores constraints" {
+    try testing.expect(samePackage("Flask", "flask==3.1"));
+    try testing.expect(samePackage("flask[async]>=2", "FLASK"));
+    try testing.expect(!samePackage("flask", "flask-login"));
+    try testing.expect(!samePackage("requests", "httpx"));
 }
 
 test "isLikelyPythonPackageName filters TOML metadata fields" {

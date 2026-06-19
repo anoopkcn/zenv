@@ -235,6 +235,7 @@ fn validateAndBuildEnvironment(
     // Optional string arrays.
     try buildOptStringArray(allocator, errors, value, env_name, "modules", &env.modules);
     try buildOptStringArray(allocator, errors, value, env_name, "dependencies", &env.dependencies);
+    try buildOptStringArray(allocator, errors, value, env_name, "dev_dependencies", &env.dev_dependencies);
 
     // module_cache: optional boolean.
     if (value.object.get("module_cache")) |mc| {
@@ -254,8 +255,9 @@ fn validateAndBuildEnvironment(
 
     // Whitelist: every other field is unrecognized.
     const allowed = [_][]const u8{
-        "target_machines", "description",     "modules", "modules_file", "dependencies",
-        "dependency_file", "fallback_python", "setup",   "activate",     "module_cache",
+        "target_machines", "description",      "modules",          "modules_file", "dependencies",
+        "dependency_file", "dev_dependencies", "fallback_python",  "setup",        "activate",
+        "module_cache",
     };
     var fi = value.object.iterator();
     while (fi.next()) |e| {

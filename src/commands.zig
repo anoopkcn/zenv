@@ -8,6 +8,7 @@ const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
 const aux = @import("utils/auxiliary.zig");
 const autosetup = @import("utils/autosetup.zig");
+const manifest = @import("utils/manifest.zig");
 const python = @import("utils/python.zig");
 const jupyter = @import("utils/jupyter.zig");
 const configurations = @import("utils/config.zig");
@@ -265,6 +266,18 @@ pub fn handleSetupCommand(
         }
     } else {
         output.print(allocator, "No dependencies specified in configuration.", .{}) catch {};
+    }
+
+    // Add development dependencies from config (e.g. those recorded by
+    // `zenv add --dev`). Borrowed from config like the runtime deps above, so
+    // the cleanup defer must treat them as config-provided (see
+    // parse_deps.isConfigProvidedDependency).
+    if (env_config.dev_dependencies.items.len > 0) {
+        output.print(allocator, "Adding {d} development dependencies from configuration:", .{env_config.dev_dependencies.items.len}) catch {};
+        for (env_config.dev_dependencies.items) |dep| {
+            output.print(allocator, "  - Dev dependency: {s}", .{dep}) catch {};
+            try all_required_deps.append(dep);
+        }
     }
 
     // Add dependencies from requirements file if specified
@@ -866,6 +879,155 @@ pub fn handleRunCommand(
             output.printError(allocator, "Command terminated abnormally (status {d})", .{status}) catch {};
             std.process.exit(1);
         },
+    }
+}
+
+/// `zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]`
+/// Installs `<package>` into the environment's venv and records it in the right
+/// manifest. Install happens FIRST; the manifest is only updated on success.
+pub fn handleAddCommand(
+    allocator: Allocator,
+    registry: *const EnvironmentRegistry,
+    args: []const []const u8,
+) !void {
+    const env_id = positional(args, 0) orelse {
+        output.printError(allocator, "Missing environment name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]", .{}) catch {};
+        return error.ArgsError;
+    };
+    const package = positional(args, 1) orelse {
+        output.printError(allocator, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]", .{}) catch {};
+        return error.ArgsError;
+    };
+    const flags = CommandFlags.fromArgs(args);
+
+    const ref = registry.resolve(allocator, env_id) catch |e| return present(allocator, registry, env_id, e);
+    const entry = registry.get(ref);
+    const env_name = entry.env_name;
+    const project_dir = entry.project_dir;
+
+    // The environment must already be built (its activation script exists).
+    const activate_path = try std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "activate.sh" });
+    defer allocator.free(activate_path);
+    runtime.access(activate_path) catch |err| {
+        if (err == error.FileNotFound) {
+            output.printError(allocator, "Environment '{s}' is not set up yet. Run 'zenv setup {s}' first.", .{ env_name, env_name }) catch {};
+            return error.EnvironmentNotFound;
+        }
+        return err;
+    };
+
+    // The project's zenv.json tells us which manifest (if any) backs this env.
+    const zenv_json_path = try std.fs.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
+    defer allocator.free(zenv_json_path);
+    const dep_file = try readDependencyFile(allocator, zenv_json_path, env_name);
+    defer if (dep_file) |df| allocator.free(df);
+
+    // 1. Install into the venv (only persist below if this succeeds).
+    try installPackage(allocator, activate_path, package, flags.use_uv);
+
+    // 2. Persist to the appropriate manifest.
+    try persistAddedPackage(allocator, project_dir, zenv_json_path, env_name, dep_file, package, flags.dev_mode, flags.zenv_only);
+
+    output.print(allocator, "Added '{s}' to environment '{s}'.", .{ package, env_name }) catch {};
+}
+
+/// Reads `dependency_file` for `env_name` from the zenv.json at `path`. Returns
+/// an owned copy, or null when the file/env/field is absent (or unparsable —
+/// add stays best-effort and falls back to zenv.json in that case).
+fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const u8) !?[]const u8 {
+    const content = runtime.readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
+    defer allocator.free(content);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{ .allocate = .alloc_always }) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const env_obj = parsed.value.object.get(env_name) orelse return null;
+    if (env_obj != .object) return null;
+    const df = env_obj.object.get("dependency_file") orelse return null;
+    return switch (df) {
+        .string => |s| try allocator.dupe(u8, s),
+        else => null,
+    };
+}
+
+/// Installs `package` into the activated environment via pip (or uv when
+/// `use_uv`). A non-zero installer exit maps to error.ProcessError.
+fn installPackage(allocator: Allocator, activate_path: []const u8, package: []const u8, use_uv: bool) !void {
+    const command: []const u8 = if (use_uv) "uv" else "python";
+    const cmd_args: []const []const u8 = if (use_uv)
+        &[_][]const u8{ "pip", "install", package }
+    else
+        &[_][]const u8{ "-m", "pip", "install", package };
+
+    const argv = try buildRunArgv(allocator, activate_path, command, cmd_args);
+    defer allocator.free(argv);
+
+    output.print(allocator, "Installing '{s}'...", .{package}) catch {};
+    const term = runtime.exec(argv, .{}) catch |err| {
+        output.printError(allocator, "Failed to run installer: {s}", .{@errorName(err)}) catch {};
+        return err;
+    };
+
+    const ok = blk: {
+        if (term != .exited) break :blk false;
+        if (term.exited != 0) break :blk false;
+        break :blk true;
+    };
+    if (!ok) {
+        output.printError(allocator, "Package installation failed; nothing was recorded.", .{}) catch {};
+        return error.ProcessError;
+    }
+}
+
+/// Records the installed `package` in the manifest selected by the flags and the
+/// env's `dep_file` (see the table in handleAddCommand's docs / the plan).
+fn persistAddedPackage(
+    allocator: Allocator,
+    project_dir: []const u8,
+    zenv_json_path: []const u8,
+    env_name: []const u8,
+    dep_file: ?[]const u8,
+    package: []const u8,
+    dev: bool,
+    zenv_only: bool,
+) !void {
+    const kind: []const u8 = if (dev) "dev_dependencies" else "dependencies";
+
+    // --zenv (or no dependency_file at all) -> record in zenv.json.
+    if (zenv_only or dep_file == null) {
+        try manifest.addToZenvJson(allocator, zenv_json_path, env_name, package, dev);
+        output.print(allocator, "Recorded in zenv.json ({s}).", .{kind}) catch {};
+        return;
+    }
+
+    const df = dep_file.?;
+    const df_path = if (std.fs.path.isAbsolute(df))
+        try allocator.dupe(u8, df)
+    else
+        try std.fs.path.join(allocator, &[_][]const u8{ project_dir, df });
+    defer allocator.free(df_path);
+
+    if (std.mem.endsWith(u8, df, ".toml")) {
+        // pyproject.toml: runtime -> [project].dependencies, dev -> [dependency-groups].dev.
+        const edited = try manifest.addToPyproject(allocator, df_path, package, dev);
+        if (edited) {
+            const tbl = if (dev) "[dependency-groups].dev" else "[project].dependencies";
+            output.print(allocator, "Recorded in {s} ({s}).", .{ df, tbl }) catch {};
+        } else {
+            // Runtime case with no [project] table: fall back to zenv.json.
+            output.print(allocator, "Could not locate [project] in {s}; recording in zenv.json instead.", .{df}) catch {};
+            try manifest.addToZenvJson(allocator, zenv_json_path, env_name, package, dev);
+        }
+    } else if (dev) {
+        // requirements files have no dev concept; dev deps live in zenv.json.
+        try manifest.addToZenvJson(allocator, zenv_json_path, env_name, package, true);
+        output.print(allocator, "Recorded dev dependency in zenv.json.", .{}) catch {};
+    } else {
+        try manifest.addToRequirementsTxt(allocator, df_path, package);
+        output.print(allocator, "Recorded in {s}.", .{df}) catch {};
     }
 }
 

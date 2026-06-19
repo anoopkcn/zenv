@@ -24,6 +24,7 @@ pub const Command = enum {
     python,
     log,
     run,
+    add,
     validate,
     alias,
     jupyter,
@@ -74,6 +75,12 @@ fn printUsage() void {
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.
+        \\
+        \\  add <name|id|.> <package>  Installs <package> into the environment and records it in the
+        \\                             project's manifest (requirements.txt / pyproject.toml / zenv.json).
+        \\                             <package> may include a version (e.g. 'flask>=2.0').
+        \\                             Options: --dev (dev dependency), --zenv (record only in
+        \\                             zenv.json), --uv (use uv instead of pip).
         \\
         \\  cd <name|id|.>             Outputs the project directory path for an environment.
         \\                             To use: cd $(zenv cd <name|id|.>)
@@ -148,6 +155,17 @@ fn printUsage() void {
         \\
         \\  --jupyter                  Creates a Jupyter kernel for the environment after setup.
         \\                             Equivalent to running 'zenv jupyter create <name>' after setup.
+        \\
+        \\Options for 'zenv add <name> <package>':
+        \\  --dev                      Records the package as a development dependency.
+        \\                             pyproject.toml -> [dependency-groups].dev; otherwise zenv.json.
+        \\                             (Note: --dev means editable install for 'setup', dev dependency
+        \\                             for 'add' — its meaning is per-command.)
+        \\
+        \\  --zenv                     Records the package only in zenv.json, leaving requirements.txt
+        \\                             and pyproject.toml untouched. The package is still installed.
+        \\
+        \\  --uv                       Uses 'uv pip install' instead of 'python -m pip install'.
         \\
         \\[z] Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
@@ -240,6 +258,7 @@ pub fn main(app: std.process.Init) anyerror!void {
         .rename,
         .log,
         .run,
+        .add,
         .alias,
         .jupyter,
         => {},
@@ -343,6 +362,7 @@ fn dispatch(
         .cd => try commands.handleCdCommand(allocator, registry, args),
         .log => try commands.handleLogCommand(allocator, registry, args),
         .run => try commands.handleRunCommand(allocator, registry, args),
+        .add => try commands.handleAddCommand(allocator, registry, args),
         .alias => try commands.handleAliasCommand(allocator, registry, args),
         .jupyter => try commands.handleJupyterCommand(allocator, registry, args),
 

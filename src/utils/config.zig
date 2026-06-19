@@ -68,6 +68,10 @@ pub const EnvironmentConfig = struct {
     modules_file: ?[]const u8 = null,
     dependency_file: ?[]const u8 = null,
     dependencies: ArrayList([]const u8),
+    // Development-only dependencies recorded in zenv.json. Installed alongside
+    // `dependencies` during setup, but kept separate so `zenv add --dev` can
+    // track them apart from runtime deps (and from any dependency_file).
+    dev_dependencies: ArrayList([]const u8),
     fallback_python: ?[]const u8 = null,
     setup: ?ScriptConfig = null,
     activate: ?ScriptConfig = null,
@@ -81,6 +85,7 @@ pub const EnvironmentConfig = struct {
             .target_machines = ArrayList([]const u8).init(allocator),
             .modules = ArrayList([]const u8).init(allocator),
             .dependencies = ArrayList([]const u8).init(allocator),
+            .dev_dependencies = ArrayList([]const u8).init(allocator),
             .description = null,
             .modules_file = null,
             .dependency_file = null,
@@ -100,6 +105,9 @@ pub const EnvironmentConfig = struct {
 
         for (self.dependencies.items) |item| self.dependencies.allocator.free(item);
         self.dependencies.deinit();
+
+        for (self.dev_dependencies.items) |item| self.dev_dependencies.allocator.free(item);
+        self.dev_dependencies.deinit();
 
         if (self.description) |desc| self.target_machines.allocator.free(desc);
         if (self.modules_file) |mfile| self.target_machines.allocator.free(mfile);

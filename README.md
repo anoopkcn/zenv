@@ -14,7 +14,8 @@ The tool provides several key features:
 2. **Registry**: Track environments globally so they can be activated from any directory
 3. **System Targeting**: Configure environments for specific machines or clusters
 4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules
-5. **Module Integration**: Load HPC modules required for environment setup
+5. **Add packages on the fly**: `zenv add` installs a package into an environment and records it in the project's manifest (`requirements.txt` / `pyproject.toml` / `zenv.json`)
+6. **Module Integration**: Load HPC modules required for environment setup
 
 ## Installation
 
@@ -177,6 +178,51 @@ zenv run test vim
 # zenv run test code -n .
 ```
 
+### Adding packages to an environment
+
+`zenv add` installs a package into an existing environment **and** records it in the
+project's manifest, so the dependency persists and is reinstalled on the next setup/rebuild.
+The package is installed first; the manifest is only updated if the install succeeds.
+
+```bash
+zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]
+```
+
+The `<package>` may include a version specifier (e.g. `flask>=2.0`). Re-adding a package
+that is already recorded replaces its spec, so you can use `zenv add` to update a pin.
+
+```bash
+# install requests and record it in the manifest
+zenv add test requests
+
+# install with a version constraint
+zenv add test "numpy>=1.26,<2.0"
+
+# add a development dependency
+zenv add test pytest --dev
+```
+
+**Where the package is recorded** depends on the environment's `dependency_file` and the flags:
+
+| Environment uses        | normal dependency               | `--dev` (development dependency)          |
+| ----------------------- | ------------------------------- | ----------------------------------------- |
+| `requirements.txt`      | appended to `requirements.txt`  | `dev_dependencies` in `zenv.json`         |
+| `pyproject.toml`        | `[project].dependencies`        | `[dependency-groups].dev` (PEP 735)       |
+| no `dependency_file`    | `dependencies` in `zenv.json`   | `dev_dependencies` in `zenv.json`         |
+
+Flags:
+
+- `--dev` — record the package as a development dependency (see the table above).
+- `--zenv` — record the package **only** in `zenv.json` (under `dependencies`, or
+  `dev_dependencies` with `--dev`), leaving `requirements.txt` / `pyproject.toml` untouched.
+  The package is still installed into the environment.
+- `--uv` — use `uv pip install` instead of `python -m pip install`.
+
+> Note: `--dev` is interpreted per-command — it means *editable install of the current
+> project* for `zenv setup`, but *development dependency* for `zenv add`.
+
+The environment must already be built (`zenv setup <name>`); `zenv add` does not create it.
+
 ### Registering and Deregistering Environments
 
 A metadata information about the environments are stored at `ZENV_DIR/registry.json`. by default `ZENV_DIR` is `$HOME/.zenv`.
@@ -235,6 +281,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "module_cache": true,
     "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
     "dependencies": ["<package name with or without version>"],
+    "dev_dependencies": ["<development dependency, typically added via 'zenv add --dev'>"],
     "setup": {
       "commands": ["<list of shell commands which is run during setup>"],
       "script": "<path to a shell script which is run during setup>"
@@ -253,6 +300,8 @@ One can have multiple environment configurations in the same `zenv.json` file an
 One can run `zenv validate` to validate the config file. If there are errors in the JSON it will try to inform the context of the error.
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
+
+The `dependencies` and `dev_dependencies` arrays list packages that `zenv setup` installs into the environment in addition to anything from `dependency_file`. Both are usually populated for you by `zenv add` (see [Adding packages to an environment](#adding-packages-to-an-environment)) rather than edited by hand, but you can also add entries directly.
 
 The machine identity that `target_machines` is matched against is taken from `$SYSTEMNAME` when it is set (falling back to `$HOSTNAME`/`$HOST`, then the `hostname` command). On HPC systems every node of a cluster exports the same `$SYSTEMNAME` while per-node `hostname`s differ (e.g. `jrlogin01` vs `jrc0042`), so keying off `$SYSTEMNAME` lets a single entry like `"target_machines": ["jureca"]` match on login and compute nodes alike. This is the same cluster identity used for the module cache (below). Off HPC, where `$SYSTEMNAME` is unset, matching uses the hostname as before.
 
@@ -306,6 +355,12 @@ Commands:
   run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
                              Does NOT require manual activation of the environment.
 
+  add <name|id|.> <package>  Installs <package> into the environment and records it in the
+                             project's manifest (requirements.txt / pyproject.toml / zenv.json).
+                             <package> may include a version (e.g. 'flask>=2.0').
+                             Options: --dev (dev dependency), --zenv (record only in
+                             zenv.json), --uv (use uv instead of pip).
+
   cd <name|id|.>             Outputs the project directory path for an environment.
                              To use: cd $(zenv cd <name|id|.>)
 
@@ -323,6 +378,9 @@ Commands:
                              Updates the registry, renames the virtual environment directory,
                              updates generated scripts, and updates any associated Jupyter kernels.
                              Preserves all configuration and metadata.
+
+  rm <name|id>               De-registers the environment AND permanently deletes its
+                             virtual environment directory from the filesystem.
 
   validate [config]          Validates the configuration file. If no arguent provided it
                              will validate the 'zenv.json' file in the current directory.
@@ -379,6 +437,17 @@ Options for 'zenv setup <name>':
 
   --jupyter                  Creates a Jupyter kernel for the environment after setup.
                              Equivalent to running 'zenv jupyter create <name>' after setup.
+
+Options for 'zenv add <name> <package>':
+  --dev                      Records the package as a development dependency.
+                             pyproject.toml -> [dependency-groups].dev; otherwise zenv.json.
+                             (Note: --dev means editable install for 'setup', dev dependency
+                             for 'add' — its meaning is per-command.)
+
+  --zenv                     Records the package only in zenv.json, leaving requirements.txt
+                             and pyproject.toml untouched. The package is still installed.
+
+  --uv                       Uses 'uv pip install' instead of 'python -m pip install'.
 
 [z] Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
