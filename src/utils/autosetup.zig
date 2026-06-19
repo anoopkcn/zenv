@@ -4,7 +4,9 @@
 //! file, or setup hook script) changes, the environment is stale and must be
 //! rebuilt before commands like `run`/`activate` use it. This module detects
 //! that drift with a checksum recorded in a per-env stamp file, and — when it
-//! finds drift — re-runs `zenv setup` as a SILENT subprocess.
+//! finds drift — re-runs `zenv setup` as a captured subprocess (silent build),
+//! bracketed by a short notice on STDERR so the user knows a rebuild happened
+//! without polluting the stdout that `activate`/`cd` feed to the shell.
 //!
 //! Why a subprocess instead of calling setup in-process: the venv build runs a
 //! shell script with INHERITED stdio (auxiliary.zig `executeShellScript`), so
@@ -218,11 +220,16 @@ pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const 
 // ===========================================================================
 
 /// Re-invokes `zenv setup <env> --no-host [replay_flags...]` as a captured
-/// (silent) subprocess with cwd set to the project dir. Returns
+/// subprocess with cwd set to the project dir. The child's stdout/stderr are
+/// captured (not inherited), so the rebuild itself is silent; we bracket it with
+/// a one-line `reason` notice and a completion notice on STDERR so the user knows
+/// a rebuild happened. stderr is used deliberately: `activate`/`cd` emit their
+/// shell-eval payload on stdout (which the shell captures), so a stderr notice is
+/// visible without corrupting `source $(zenv activate ...)`. Returns
 /// `error.AutoSetupFailed` if the child cannot start or exits non-zero. A
 /// failure to locate the running binary is non-fatal: we warn and skip rather
 /// than break an otherwise-working command.
-fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_flags: []const []const u8) !void {
+fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_flags: []const []const u8, reason: []const u8) !void {
     const self_exe = runtime.selfExePath(allocator) catch |err| {
         output.rawErr(allocator, "WARNING: auto-setup skipped (cannot locate zenv binary: {s})\n", .{@errorName(err)}) catch {};
         return;
@@ -233,6 +240,14 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
     defer argv.deinit();
     try argv.appendSlice(&[_][]const u8{ self_exe, "setup", entry.env_name, "--no-host" });
     try argv.appendSlice(replay_flags);
+
+    // Announce on STDERR before the (silent, possibly slow) rebuild. stderr is
+    // safe for every caller: `activate`/`cd` put their shell-eval payload on
+    // stdout, which the shell captures, while stderr flows to the terminal — so
+    // the user learns a rebuild happened without the notice corrupting
+    // `source $(zenv activate ...)`. The notice only fires on real drift, so a
+    // routine activation that changed nothing stays silent.
+    output.rawErr(allocator, "zenv: rebuilding environment '{s}' ({s}; auto-setup)...\n", .{ entry.env_name, reason }) catch {};
 
     const res = runtime.run(allocator, argv.items, .{ .cwd = entry.project_dir }) catch |err| {
         output.rawErr(allocator, "ERROR: auto-setup failed to start: {s}\n", .{@errorName(err)}) catch {};
@@ -245,6 +260,8 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
         output.rawErr(allocator, "ERROR: auto-setup failed; see {s}/zenv_setup.log\n", .{entry.venv_path}) catch {};
         return error.AutoSetupFailed;
     }
+
+    output.rawErr(allocator, "zenv: environment '{s}' is up to date.\n", .{entry.env_name}) catch {};
 }
 
 /// THE GATE. Call after an environment is resolved and before a command uses its
@@ -269,12 +286,12 @@ pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) 
     if (readStamp(allocator, entry.venv_path)) |stamp| {
         defer stamp.deinit(allocator);
         if (std.mem.eql(u8, stamp.hash, current)) return; // up to date
-        try runSetup(allocator, entry, stamp.flags);
+        try runSetup(allocator, entry, stamp.flags, "configuration or dependency files changed");
         return;
     }
 
     // No (valid) stamp: force a one-time re-setup with no replayed flags.
-    try runSetup(allocator, entry, &[_][]const u8{});
+    try runSetup(allocator, entry, &[_][]const u8{}, "no build record found");
 }
 
 // ===========================================================================

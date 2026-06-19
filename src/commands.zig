@@ -461,8 +461,9 @@ pub fn handleActivateCommand(
     }
 
     const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
-    // Rebuild the env first if its config/dependency files changed (silent, so
-    // stdout stays just the activate-script path).
+    // Rebuild the env first if its config/dependency files changed. The rebuild
+    // is silent and any notice goes to stderr, so stdout stays just the
+    // activate-script path that the shell sources.
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
 
     output.rawOut(allocator, "{s}/activate.sh\n", .{registry.get(ref).venv_path}) catch |e| {
