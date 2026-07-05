@@ -22,3 +22,7 @@ NOTES.md
 .envrc
 Makefile
 DEVLOG.md
+
+# macOS metadata
+.DS_Store
+._*

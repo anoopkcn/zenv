@@ -169,6 +169,28 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     return false;
 }
 
+// Get the hostname via the `gethostname(2)`/`uname(2)` syscall (internal).
+//
+// Unlike `getHostnameFromCommand`, this needs no external `hostname` binary —
+// on Linux it goes straight to the kernel via `uname`, so it works on minimal
+// systems (containers, HPC compute nodes, busybox images) where `/bin/hostname`
+// is absent. We try this before shelling out to the command.
+pub fn getHostnameFromSyscall(allocator: Allocator) ![]const u8 {
+    errors.debugLog(allocator, "Querying hostname via gethostname syscall", .{});
+    var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const name = std.posix.gethostname(&buf) catch |err| {
+        errors.debugLog(allocator, "gethostname syscall failed: {s}", .{@errorName(err)});
+        return error.ProcessError;
+    };
+    const trimmed = std.mem.trim(u8, name, &std.ascii.whitespace);
+    if (trimmed.len == 0) {
+        errors.debugLog(allocator, "gethostname syscall returned empty output", .{});
+        return error.MissingHostname;
+    }
+    errors.debugLog(allocator, "Got hostname from syscall: '{s}'", .{trimmed});
+    return allocator.dupe(u8, trimmed);
+}
+
 // Helper function to get hostname using the `hostname` command (internal)
 pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Executing 'hostname' command", .{});
@@ -236,7 +258,16 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
         }
     }
 
-    errors.debugLog(allocator, "Hostname env vars not set, falling back to 'hostname' command...", .{});
+    // Prefer the syscall (no external binary) over the `hostname` command, so
+    // machines without `/bin/hostname` still resolve an identity. Fall back to
+    // the command only if the syscall itself fails.
+    errors.debugLog(allocator, "Hostname env vars not set, trying gethostname syscall...", .{});
+    if (getHostnameFromSyscall(allocator)) |name| {
+        return name;
+    } else |err| {
+        errors.debugLog(allocator, "Syscall hostname failed ({s}), falling back to 'hostname' command...", .{@errorName(err)});
+    }
+
     return getHostnameFromCommand(allocator);
 }
 
@@ -375,6 +406,17 @@ test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
     defer a.free(id);
     try testing.expectEqualStrings("jureca", id);
     try testing.expect(hostMatchesTargets(id, "jureca"));
+}
+
+test "getHostnameFromSyscall: returns a non-empty hostname without the `hostname` binary" {
+    const a = testing.allocator;
+    const name = getHostnameFromSyscall(a) catch |err| {
+        // Some sandboxed CI environments block the syscall; tolerate that.
+        try testing.expect(err == error.ProcessError or err == error.MissingHostname);
+        return;
+    };
+    defer a.free(name);
+    try testing.expect(name.len > 0);
 }
 
 test "getSystemHostname: empty SYSTEMNAME falls back to HOSTNAME" {

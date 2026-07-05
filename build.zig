@@ -25,13 +25,13 @@ fn getVersion(b: *std.Build) Version {
     }
 
     // Try to find git
-    const git_path = b.findProgram(&.{"git"}, &.{}) catch |err| {
-        std.log.warn("git not found, cannot determine version: {s}", .{@errorName(err)});
+    const git_path = b.findProgram(.{ .names = &.{"git"} }) orelse {
+        std.log.warn("git not found, cannot determine version", .{});
         return .unknown;
     };
 
     // Determine the build root directory containing .git
-    const build_root_path = b.build_root.path orelse "."; // Default to current dir if null
+    const build_root_path = b.root.root_dir.path orelse "."; // Dir containing build.zig; default to cwd if null
 
     // Run git describe --tags --match '*.*.*'
     var exit_code: u8 = undefined;
@@ -160,9 +160,7 @@ pub fn build(b: *std.Build) !void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
