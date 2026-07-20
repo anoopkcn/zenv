@@ -24,19 +24,18 @@ fn getVersion(b: *std.Build) Version {
         return .{ .tag = ver }; // Treat override as a tag
     }
 
-    // Try to find git
-    const git_path = b.findProgram(.{ .names = &.{"git"} }) orelse {
-        std.log.warn("git not found, cannot determine version", .{});
-        return .unknown;
-    };
-
     // Determine the build root directory containing .git
-    const build_root_path = b.root.root_dir.path orelse "."; // Dir containing build.zig; default to cwd if null
+    // Dir containing build.zig; default to cwd if null.
+    // Zig 0.17 renamed `build_root: Cache.Directory` to `root: Cache.Path`.
+    const build_root_path = if (comptime @hasField(std.Build, "build_root"))
+        b.build_root.path orelse "."
+    else
+        b.root.root_dir.path orelse ".";
 
     // Run git describe --tags --match '*.*.*'
     var exit_code: u8 = undefined;
     const result = b.runAllowFail(&[_][]const u8{
-        git_path,
+        "git", // Resolved via PATH; spawn failure is handled below
         "-C", // Change directory before running command
         build_root_path, // Path to the repo root (where .git lives)
         "describe",
@@ -160,7 +159,15 @@ pub fn build(b: *std.Build) !void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    run_cmd.addPassthruArgs();
+    // Forward `zig build run -- <args>` to the executable.
+    // Zig 0.17 replaced `b.args` with `addPassthruArgs`; support both.
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+    } else {
+        run_cmd.addPassthruArgs();
+    }
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
