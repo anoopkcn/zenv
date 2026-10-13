@@ -321,7 +321,7 @@ The key-val `"modules_file": "path/to/file.txt"` can be specified in an environm
 
 ### Module caching
 
-On HPC systems, `module load` (Lmod) can be slow, and the generated `activate.sh` runs it on every activation. With `"module_cache": true` (the default), `zenv setup` captures the environment that `module load` produces and writes it to the environment directory (`.zenv_module_cache.sh` + `.zenv_module_cache.stamp`). Subsequent activations replay that captured environment instead of invoking Lmod, which is significantly faster.
+On HPC systems, `module load` (Lmod) can be slow, and the generated `activate.sh` runs it on every activation. With `"module_cache": true` (the default), `zenv setup` captures the environment that `module load` produces and writes it to the environment directory (`.zenv_module_cache.json`). Subsequent activations and `zenv run` replay that captured environment instead of invoking Lmod, which is significantly faster.
 
 The cache is used only when it is trustworthy; otherwise activation transparently falls back to a real `module --force purge` + `module load`:
 
@@ -329,9 +329,11 @@ The cache is used only when it is trustworthy; otherwise activation transparentl
 - Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as *prepends*, so your live login environment is preserved.
 - If any module fails to load during setup, no cache is written.
 
+If your login shell is not bash (e.g. zsh), `module` is not visible to the bash that `zenv setup` uses to load modules. zenv then defines it from `$LMOD_CMD`, the way Lmod's own bash init does.
+
 When this auto-rebuild fires, zenv prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` followed by a completion line) so you know a rebuild happened and why. It is on stderr deliberately: commands like `zenv activate` / `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. The notice appears only when a rebuild actually runs — a routine activation with no changes stays silent. Set `ZENV_NO_AUTO_SETUP=1` to disable the auto-rebuild (and its notice) entirely.
 
-**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed. To avoid paying the Lmod cost on every such rebuild, the stamp also records a signature of the module set (`modules_sig`). When a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead re-sources the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. `zenv setup --force` always re-captures.
+**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed. To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`). When a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. `zenv setup --force` always re-captures.
 
 The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance, re-run `zenv setup` (or `zenv setup --force`) to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
 

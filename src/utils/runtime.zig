@@ -19,6 +19,10 @@ pub var io: Io = undefined;
 /// The process environment, parsed once by the std bootstrap. Set by `main`.
 pub var environ_map: *std.process.Environ.Map = undefined;
 
+/// zenv's version string (from the build). Set by `main`; recorded in the
+/// pyvenv.cfg of venvs zenv creates.
+pub var version: []const u8 = "unknown";
+
 /// Looks up an environment variable. Returns a borrowed slice (owned by the
 /// environment block, no need to free) or null if unset.
 pub fn env(name: []const u8) ?[]const u8 {
@@ -156,6 +160,9 @@ pub const RunOptions = struct {
     stdout_limit: Io.Limit = .unlimited,
     stderr_limit: Io.Limit = .unlimited,
     cwd: ?[]const u8 = null,
+    /// Replaces the child environment when set. `argv[0]` is still resolved
+    /// against this process's PATH, so pass an absolute path when it matters.
+    environ_map: ?*const std.process.Environ.Map = null,
 };
 
 pub const ExecOptions = struct {
@@ -199,6 +206,7 @@ fn realRun(allocator: Allocator, argv: []const []const u8, opts: RunOptions) any
         .stdout_limit = opts.stdout_limit,
         .stderr_limit = opts.stderr_limit,
         .cwd = toCwd(opts.cwd),
+        .environ_map = opts.environ_map,
     });
     return .{ .term = r.term, .stdout = r.stdout, .stderr = r.stderr };
 }

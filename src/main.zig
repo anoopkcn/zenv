@@ -34,9 +34,6 @@ pub const Command = enum {
     @"-V",
     @"--version",
     @"--help",
-    /// Internal: `zenv __venv <python> <dir>` creates a venv layout. Called by
-    /// the setup script until setup itself moves into Zig. Not in the help.
-    __venv,
     unknown,
 
     fn fromString(s: []const u8) Command {
@@ -204,6 +201,7 @@ pub fn main(app: std.process.Init) anyerror!void {
     // Establish the process-wide I/O context for the whole program.
     runtime.io = app.io;
     runtime.environ_map = app.environ_map;
+    runtime.version = options.version;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -243,10 +241,6 @@ pub fn main(app: std.process.Init) anyerror!void {
         },
         .validate => {
             commands.handleValidateCommand(allocator, config_path, args) catch |err| errors.report(allocator, err);
-            return;
-        },
-        .__venv => {
-            commands.handleVenvCommand(allocator, args, options.version) catch |err| errors.report(allocator, err);
             return;
         },
         .unknown => {
@@ -374,6 +368,6 @@ fn dispatch(
         .jupyter => try commands.handleJupyterCommand(allocator, registry, args),
 
         // These were handled before dispatch, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .__venv, .unknown => unreachable,
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .unknown => unreachable,
     }
 }

@@ -4,18 +4,6 @@ const errors = @import("errors.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
-/// On-disk format version of the module-environment cache. Written into the
-/// stamp at setup and checked at activation; bump this when the capture/replay
-/// format changes so existing caches are invalidated (fall back to `module load`).
-pub const MODULE_CACHE_VERSION: u32 = 1;
-
-/// Basenames of the cache artifacts written into the venv directory.
-pub const MODULE_CACHE_FILE = ".zenv_module_cache.sh";
-pub const MODULE_CACHE_STAMP = ".zenv_module_cache.stamp";
-/// The same captured delta as MODULE_CACHE_FILE, as data (`set NAME=VALUE` /
-/// `prepend NAME=VALUE` lines) for envspec.zig to replay without a shell.
-pub const MODULE_CACHE_DATA = ".zenv_module_env";
-
 /// Writes `value` to `w` as the body of a shell single-quoted string,
 /// escaping any embedded single quotes with the classic `'\''` trick. The
 /// caller writes the wrapping single quotes around the call. Use this for any
@@ -34,23 +22,6 @@ pub fn appendSqEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error
 fn accessFile(path: []const u8) bool {
     runtime.access(path) catch return false;
     return true;
-}
-
-/// Lowercase-hex SHA-1 of the effective module list, in load order. Used as the
-/// reuse key for the module-env cache: setup skips re-running Lmod (purge/load/
-/// capture) and just sources the existing cache when this matches the stamp.
-/// Order- and boundary-sensitive (a NUL separator follows each name). Caller
-/// owns the result.
-pub fn modulesSignature(allocator: Allocator, modules: []const []const u8) ![]u8 {
-    var sha = std.crypto.hash.Sha1.init(.{});
-    for (modules) |m| {
-        sha.update(m);
-        sha.update("\x00");
-    }
-    var digest: [20]u8 = undefined;
-    sha.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return allocator.dupe(u8, &hex);
 }
 
 /// Copies a user hook script into the environment's scripts directory and returns
@@ -234,26 +205,4 @@ test "processTemplateString passes through text with no placeholders" {
     const out = try processTemplateString(a, "no placeholders here", repl);
     defer a.free(out);
     try testing.expectEqualStrings("no placeholders here", out);
-}
-
-test "modulesSignature is deterministic, order- and content-sensitive" {
-    const a = testing.allocator;
-    const ab = [_][]const u8{ "gcc", "cuda" };
-    const ab2 = [_][]const u8{ "gcc", "cuda" };
-    const ba = [_][]const u8{ "cuda", "gcc" };
-    const abc = [_][]const u8{ "gcc", "cuda", "mpi" };
-
-    const h_ab = try modulesSignature(a, &ab);
-    defer a.free(h_ab);
-    const h_ab2 = try modulesSignature(a, &ab2);
-    defer a.free(h_ab2);
-    const h_ba = try modulesSignature(a, &ba);
-    defer a.free(h_ba);
-    const h_abc = try modulesSignature(a, &abc);
-    defer a.free(h_abc);
-
-    try testing.expectEqual(@as(usize, 40), h_ab.len);
-    try testing.expectEqualStrings(h_ab, h_ab2); // deterministic
-    try testing.expect(!std.mem.eql(u8, h_ab, h_ba)); // load order matters
-    try testing.expect(!std.mem.eql(u8, h_ab, h_abc)); // adding a module changes it
 }

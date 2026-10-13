@@ -64,10 +64,13 @@ pub const Interpreter = struct {
 
 /// Asks `python` for its version and the venv layout under `venv_dir`.
 /// Results are allocated with `a` (use an arena).
-pub fn query(a: Allocator, python: []const u8, venv_dir: []const u8) !Interpreter {
+/// `env` is the environment to run it in (a module Python may need the
+/// module's LD_LIBRARY_PATH); null means zenv's own.
+pub fn query(a: Allocator, python: []const u8, venv_dir: []const u8, env: ?*const std.process.Environ.Map) !Interpreter {
     const res = runtime.run(a, &[_][]const u8{ python, "-I", "-c", QUERY_SCRIPT, venv_dir }, .{
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
+        .environ_map = env,
     }) catch |err| {
         output.printError(a, "Could not run Python '{s}': {s}", .{ python, @errorName(err) }) catch {};
         return error.PythonQueryFailed;
@@ -132,16 +135,17 @@ fn symlinkIfMissing(target: []const u8, link_path: []const u8, is_dir: bool) !vo
     try std.Io.Dir.cwd().symLink(runtime.io, target, link_path, .{ .is_directory = is_dir });
 }
 
-/// Creates the venv at `venv_dir` (absolute) for interpreter `python`.
-/// Idempotent: existing links are kept, pyvenv.cfg and the shims are rewritten.
-pub fn create(allocator: Allocator, python: []const u8, venv_dir: []const u8, zenv_version: []const u8) !void {
+/// Creates the venv at `venv_dir` (absolute) for interpreter `python` (an
+/// absolute path), querying it in `env`. Idempotent: existing links are kept,
+/// pyvenv.cfg and the shims are rewritten.
+pub fn create(allocator: Allocator, python: []const u8, venv_dir: []const u8, env: ?*const std.process.Environ.Map) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     if (!std.Io.Dir.path.isAbsolute(venv_dir)) return error.VenvPathNotAbsolute;
     try runtime.makePath(venv_dir);
-    const info = try query(a, python, venv_dir);
+    const info = try query(a, python, venv_dir, env);
 
     // `venv` creates a plain include/ whatever the scheme says.
     const include = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, "include" });
@@ -158,7 +162,7 @@ pub fn create(allocator: Allocator, python: []const u8, venv_dir: []const u8, ze
     }
 
     const join = std.Io.Dir.path.join;
-    try runtime.writeFile(try join(a, &[_][]const u8{ venv_dir, "pyvenv.cfg" }), try pyvenvCfg(a, &info, zenv_version));
+    try runtime.writeFile(try join(a, &[_][]const u8{ venv_dir, "pyvenv.cfg" }), try pyvenvCfg(a, &info, runtime.version));
     try runtime.writeFile(try join(a, &[_][]const u8{ venv_dir, ".gitignore" }), "# Created by zenv\n*\n");
     try runtime.writeFile(try join(a, &[_][]const u8{ info.scripts, "activate" }), try a.print(
         \\# Created by zenv. Sourcing bin/activate (IDEs, scripts) runs zenv's activation.

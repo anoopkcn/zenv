@@ -134,24 +134,15 @@ fn restoreFor(name: []const u8) Restore {
 fn opNames(a: Allocator, ops: []const Op) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     outer: for (ops) |op| {
-        if (!isIdentifier(op.name)) return error.InvalidVariableName;
+        if (!envspec.isIdentifier(op.name)) return error.InvalidVariableName;
         for (names.items) |n| if (std.mem.eql(u8, n, op.name)) continue :outer;
         try names.append(a, op.name);
     }
     return names.toOwnedSlice(a);
 }
 
-fn isIdentifier(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name, 0..) |c, i| {
-        const ok = c == '_' or std.ascii.isAlphabetic(c) or (i > 0 and std.ascii.isDigit(c));
-        if (!ok) return false;
-    }
-    return true;
-}
-
 fn checkOps(ops: []const Op) !void {
-    for (ops) |op| if (!isIdentifier(op.name)) return error.InvalidVariableName;
+    for (ops) |op| if (!envspec.isIdentifier(op.name)) return error.InvalidVariableName;
 }
 
 fn indent(w: *Writer, n: usize) !void {
@@ -301,10 +292,9 @@ fn writeShLoads(w: *Writer, modules: []const []const u8, ind: usize) !void {
 /// The module section. Runs only where `module` exists, like before. Three
 /// shapes, chosen at setup:
 ///   - no modules: purge (historical behaviour);
-///   - usable captured data: replay it when the stamp exists and the system
-///     matches, else purge + load;
-///   - otherwise: the pre-data logic (stamp check via sed, source the .sh
-///     cache) when caching is on, or a plain purge + load when it is off.
+///   - usable captured cache: replay it when the cache file still exists and
+///     the system matches, else purge + load;
+///   - otherwise (caching off, or nothing usable captured): purge + load.
 fn writeShModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
     try w.writeAll("if command -v module >/dev/null 2>&1; then\n");
     if (spec.modules.len == 0) {
@@ -312,11 +302,11 @@ fn writeShModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
         return;
     }
 
-    const stamp = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, template.MODULE_CACHE_STAMP });
     if (spec.usableModuleCache()) |cache| {
         try checkOps(cache.ops);
+        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE });
         try w.writeAll("    if [ -f '");
-        try sq(w, stamp);
+        try sq(w, cache_file);
         try w.writeAll("' ] && [ \"${SYSTEMNAME:-$(hostname 2>/dev/null)}\" = '");
         try sq(w, cache.system);
         try w.writeAll("' ] ; then\n");
@@ -324,40 +314,8 @@ fn writeShModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
         try w.writeAll("    else\n");
         try writeShLoads(w, spec.modules, 8);
         try w.writeAll("        if [ -f '");
-        try sq(w, stamp);
-        try w.writeAll("' ] ; then echo \"INFO: zenv module cache is for another system; ran 'module load'. Re-run 'zenv setup' here to refresh.\" >&2 ; fi\n    fi\n");
-    } else if (spec.module_cache_enabled) {
-        // No captured data (cache from an older zenv, untrusted, or failed):
-        // keep the stamp-checked replay of the .sh cache.
-        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, template.MODULE_CACHE_FILE });
-        try w.writeAll("    __zenv_cache='");
         try sq(w, cache_file);
-        try w.writeAll("'\n    __zenv_stamp='");
-        try sq(w, stamp);
-        try w.print(
-            \\'
-            \\    __zenv_use_cache=0
-            \\    if [ -f "$__zenv_cache" ] && [ -f "$__zenv_stamp" ]; then
-            \\        __zenv_cv=$(sed -n 's/^version=//p' "$__zenv_stamp")
-            \\        __zenv_cs=$(sed -n 's/^system=//p' "$__zenv_stamp")
-            \\        __zenv_cu=$(sed -n 's/^untrusted=//p' "$__zenv_stamp")
-            \\        __zenv_cur="${{SYSTEMNAME:-$(hostname 2>/dev/null)}}"
-            \\        if [ "$__zenv_cv" = "{d}" ] && [ "$__zenv_cs" = "$__zenv_cur" ] && [ "$__zenv_cu" != "1" ]; then
-            \\            __zenv_use_cache=1
-            \\        fi
-            \\    fi
-            \\    if [ "$__zenv_use_cache" = "1" ]; then
-            \\        . "$__zenv_cache"
-            \\    else
-            \\
-        , .{template.MODULE_CACHE_VERSION});
-        try writeShLoads(w, spec.modules, 8);
-        try w.writeAll(
-            \\        if [ -f "$__zenv_stamp" ]; then echo "INFO: zenv module cache unusable (system/version mismatch); ran 'module load'. Re-run 'zenv setup' on this system to refresh." >&2; fi
-            \\    fi
-            \\    unset __zenv_cache __zenv_stamp __zenv_use_cache __zenv_cv __zenv_cs __zenv_cu __zenv_cur
-            \\
-        );
+        try w.writeAll("' ] ; then echo \"INFO: zenv module cache is for another system; ran 'module load'. Re-run 'zenv setup' here to refresh.\" >&2 ; fi\n    fi\n");
     } else {
         try writeShLoads(w, spec.modules, 4);
     }
@@ -479,6 +437,12 @@ pub fn renderCshDeactivate(a: Allocator, spec: *const Spec) ![]u8 {
 }
 
 fn writeCshOp(w: *Writer, op: Op, ind: usize) !void {
+    if (std.mem.findScalar(u8, op.value, '\n') != null) {
+        // A csh quoted string cannot contain a newline.
+        try indent(w, ind);
+        try w.print("# skipped {s}: multi-line values cannot be set from csh\n", .{op.name});
+        return;
+    }
     switch (op.op) {
         .set => {
             try indent(w, ind);
@@ -533,9 +497,7 @@ fn writeCshLoads(w: *Writer, modules: []const []const u8, ind: usize) !void {
     }
 }
 
-/// csh module section: same gate as sh (`module` defined, here as an alias).
-/// The .sh cache cannot be sourced from csh, so without captured data it
-/// always loads.
+/// csh module section: same gate and shapes as sh (`module` is an alias here).
 fn writeCshModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
     try w.writeAll("if ( \"`alias module`\" != \"\" ) then\n");
     if (spec.modules.len == 0) {
@@ -544,7 +506,7 @@ fn writeCshModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
     }
     if (spec.usableModuleCache()) |cache| {
         try checkOps(cache.ops);
-        const stamp = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, template.MODULE_CACHE_STAMP });
+        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE });
         try w.writeAll(
             \\    set _zenv_sys = "`hostname`"
             \\    if ( $?SYSTEMNAME ) then
@@ -553,7 +515,7 @@ fn writeCshModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
             \\    set _zenv_hit = 0
             \\    if ( -f '
         );
-        try sq(w, stamp);
+        try sq(w, cache_file);
         try w.writeAll("' ) then\n        if ( \"$_zenv_sys\" == '");
         try sq(w, cache.system);
         try w.writeAll("' ) set _zenv_hit = 1\n    endif\n    if ( $_zenv_hit ) then\n");
@@ -646,18 +608,27 @@ test "renderSh: usable module cache is inlined behind a system check" {
     };
     spec.modules = &.{ "gcc/13", "it's" };
     spec.module_cache_enabled = true;
-    spec.module_cache = .{ .version = template.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &mod_ops };
+    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &mod_ops };
     const out = try renderSh(a, &spec);
 
-    try expectContains(out, "[ -f '/p/.zenv/demo/.zenv_module_cache.stamp' ] && [ \"${SYSTEMNAME:-$(hostname 2>/dev/null)}\" = 'jureca' ]");
+    try expectContains(out, "[ -f '/p/.zenv/demo/.zenv_module_cache.json' ] && [ \"${SYSTEMNAME:-$(hostname 2>/dev/null)}\" = 'jureca' ]");
     try expectContains(out, "        LD_LIBRARY_PATH='/m/lib'\"${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"");
     try expectContains(out, "        export LOADEDMODULES='gcc/13'");
     try expectContains(out, "        module load 'it'\\''s' || echo 'WARNING: Failed to load module it'\\''s' >&2");
     try expectNotContains(out, "sed -n"); // no stamp parsing at activation
     try expectNotContains(out, ".zenv_module_cache.sh");
+
+    // csh renders the same cache; a multi-line value is skipped, not mangled.
+    const multi = [_]Op{.{ .op = .set, .name = "BANNER", .value = "a\nb" }};
+    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &multi };
+    const csh = try renderCsh(a, &spec);
+    try expectContains(csh, "# skipped BANNER: multi-line values cannot be set from csh");
+    try expectContains(csh, ".zenv_module_cache.json");
+    const sh = try renderSh(a, &spec);
+    try expectContains(sh, "export BANNER='a\nb'"); // sh quotes span lines fine
 }
 
-test "renderSh: caching on without data keeps the stamp-checked .sh replay" {
+test "renderSh: no usable cache data means a plain purge + load" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -665,14 +636,10 @@ test "renderSh: caching on without data keeps the stamp-checked .sh replay" {
     spec.modules = &.{"gcc"};
     spec.module_cache_enabled = true;
     const out = try renderSh(a, &spec);
-    try expectContains(out, "__zenv_cache='/p/.zenv/demo/.zenv_module_cache.sh'");
-    try expectContains(out, ". \"$__zenv_cache\"");
-    try expectContains(out, "module load 'gcc'");
-
-    spec.module_cache_enabled = false;
-    const plain = try renderSh(a, &spec);
-    try expectNotContains(plain, "__zenv_cache");
-    try expectContains(plain, "    module load 'gcc'");
+    try expectNotContains(out, "zenv_module_cache");
+    try expectNotContains(out, "sed -n");
+    try expectContains(out, "    module --force purge");
+    try expectContains(out, "    module load 'gcc'");
 }
 
 test "renderSh: hooks are emitted after activation" {
@@ -701,7 +668,7 @@ test "render rejects variable names that are not identifiers" {
     spec.modules = &.{"gcc"};
     spec.module_cache_enabled = true;
     const bad = [_]Op{.{ .op = .set, .name = "BAD NAME", .value = "" }};
-    spec.module_cache = .{ .version = template.MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &bad };
+    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &bad };
     try testing.expectError(error.InvalidVariableName, renderSh(a, &spec));
 }
 

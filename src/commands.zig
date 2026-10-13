@@ -18,7 +18,6 @@ const runtime = @import("utils/runtime.zig");
 const template = @import("utils/template.zig");
 const envspec = @import("utils/envspec.zig");
 const activation = @import("utils/activation.zig");
-const venv = @import("utils/venv.zig");
 const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -237,7 +236,6 @@ pub fn handleSetupCommand(
     output.print(allocator, "Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
     // 0. Check the availability of modules
-    var modules_verified = false;
     if (env_config.modules.items.len > 0) {
         // Use the improved validateModules function
         const modules_available = env.validateModules(allocator, env_config) catch |err| {
@@ -251,7 +249,6 @@ pub fn handleSetupCommand(
         }
 
         output.print(allocator, "All modules appear to be available.", .{}) catch {};
-        modules_verified = true;
     }
 
     // 1. Combine Dependencies
@@ -366,8 +363,6 @@ pub fn handleSetupCommand(
         base_dir,
         &all_required_deps,
         flags,
-        modules_verified,
-        command_str.items,
     ) catch |err| {
         command_str.deinit(allocator);
         return err;
@@ -772,16 +767,6 @@ pub fn handleCdCommand(
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
-}
-
-/// `zenv __venv <python> <dir>`: creates the venv layout at `<dir>` for the
-/// interpreter `<python>` (see utils/venv.zig). Internal, used by setup.
-pub fn handleVenvCommand(allocator: Allocator, args: []const []const u8, zenv_version: []const u8) !void {
-    if (args.len != 4) {
-        output.printError(allocator, "Usage: zenv __venv <python> <absolute venv dir>", .{}) catch {};
-        return error.ArgsError;
-    }
-    try venv.create(allocator, args[2], args[3], zenv_version);
 }
 
 pub fn handlePythonCommand(
@@ -1737,13 +1722,12 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     // The module cache embeds absolute paths captured at setup; rather than
     // rewrite them, drop it. Next activate falls back to `module load` and the
     // next `zenv setup` regenerates a correct cache.
-    // zenv-env.json and the module data embed the old path the same way; without
-    // them run/add fall back to activate.sh until the next setup.
-    for ([_][]const u8{ template.MODULE_CACHE_FILE, template.MODULE_CACHE_STAMP, template.MODULE_CACHE_DATA, envspec.FILE_NAME }) |name| {
-        const cache_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, name });
-        defer allocator.free(cache_path);
-        runtime.deleteFile(cache_path) catch {}; // best-effort; missing is fine
-    }
+    // zenv-env.json embeds the old path the same way; without it run/add fall
+    // back to activate.sh until the next setup.
+    envspec.deleteModuleCache(allocator, new_venv_path);
+    const spec_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, envspec.FILE_NAME });
+    defer allocator.free(spec_path);
+    runtime.deleteFile(spec_path) catch {}; // best-effort; missing is fine
 }
 
 /// What updateScriptFile is allowed to rewrite. User-authored hook scripts get

@@ -94,6 +94,24 @@ pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !voi
     try logMessage(message);
 }
 
+/// Prints a formatted warning to stderr (and the log) with a newline appended.
+pub fn printWarning(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [1024]u8 = undefined;
+    const message = std.mem.print(&buf, "WARNING: " ++ fmt ++ "\n", args) catch
+        try allocator.print("WARNING: " ++ fmt ++ "\n", args);
+    defer if (message.ptr != &buf) allocator.free(message);
+
+    try writeStd(File.stderr(), message);
+    try logMessage(message);
+}
+
+/// Copies a child process's output verbatim to stdout and the log. Used by
+/// setup to tee installer output, as the old setup script did with `tee`.
+pub fn passthrough(bytes: []const u8) !void {
+    try writeStd(File.stdout(), bytes);
+    try logMessage(bytes);
+}
+
 /// Prints a formatted error message to stderr with a newline appended
 pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
     var buf: [1024]u8 = undefined;

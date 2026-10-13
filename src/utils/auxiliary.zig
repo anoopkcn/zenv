@@ -10,31 +10,9 @@ const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("errors.zig");
 const parse_deps = @import("parse_deps.zig");
 const environment = @import("environment.zig");
-const template_setup = @import("template_setup.zig");
+const envbuild = @import("envbuild.zig");
 const output = @import("output.zig");
 const CommandFlags = @import("flags.zig").CommandFlags;
-
-// Executes a given shell script, inheriting stdio and handling errors
-pub fn executeShellScript(
-    allocator: std.mem.Allocator,
-    script_abs_path: []const u8,
-) !void {
-    output.print(allocator, "Running script: {s}", .{script_abs_path}) catch {};
-    const term = try runtime.exec(&[_][]const u8{ "/bin/bash", script_abs_path }, .{});
-
-    // Check if the command was successful
-    const success = blk: {
-        if (term != .exited) break :blk false;
-        if (term.exited != 0) break :blk false;
-        break :blk true;
-    };
-
-    if (!success) {
-        return error.ProcessError;
-    }
-
-    // output.print(allocator,"Setup script completed successfully", .{}) catch {};
-}
 
 pub fn setupEnvironmentDirectory(
     allocator: Allocator,
@@ -60,8 +38,6 @@ pub fn installDependencies(
     base_dir: []const u8,
     all_required_deps: *std.ArrayList([]const u8),
     flags: CommandFlags,
-    modules_verified: bool,
-    command_str: ?[]const u8,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
     const deps_slice = try all_required_deps.toOwnedSlice(allocator);
@@ -84,12 +60,11 @@ pub fn installDependencies(
         base_dir,
         deps_slice,
         flags,
-        modules_verified,
-        command_str,
     );
 }
 
-// Sets up the full environment: creates files, generates and runs setup script.
+// Sets up the full environment: records the dependency list, then builds the
+// venv (see envbuild.zig).
 pub fn setupEnvironment(
     allocator: Allocator,
     env_config: *const EnvironmentConfig,
@@ -97,8 +72,6 @@ pub fn setupEnvironment(
     base_dir: []const u8,
     deps: []const []const u8,
     flags: CommandFlags,
-    modules_verified: bool,
-    command_str: ?[]const u8,
 ) !void {
     output.print(allocator, "Setting up environment '{s}' in base directory '{s}'...", .{ env_name, base_dir }) catch {};
 
@@ -160,38 +133,14 @@ pub fn setupEnvironment(
     }
     output.print(allocator, "Created requirements file: {s}", .{req_abs_path}) catch {};
 
-    const script_abs_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, "setup_env.sh" });
-    defer allocator.free(script_abs_path);
-
-    // Generate setup script content using the template
-    const script_content = try template_setup.createSetupScriptFromTemplate(
-        allocator,
-        env_config,
-        env_name,
-        base_dir,
-        req_abs_path,
-        flags,
-        modules_verified,
-        command_str,
-    );
-    defer allocator.free(script_content);
-
-    // Write setup script to file, synced before we execute it below.
-    output.print(allocator, "Writing setup script to {s}", .{script_abs_path}) catch {};
-    {
-        var script_file = try runtime.createFile(script_abs_path, .{ .permissions = .fromMode(0o755) });
-        defer script_file.close(runtime.io);
-        try script_file.writeStreamingAll(runtime.io, script_content);
-        try script_file.sync(runtime.io);
-    }
-    output.print(allocator, "Created setup script: {s}", .{script_abs_path}) catch {};
-
-    // Execute setup script. Any failure (non-zero exit or spawn error) surfaces
-    // as ProcessError; executeShellScript never returns ModuleLoadError.
-    executeShellScript(allocator, script_abs_path) catch {
-        output.printError(allocator, "Setup script execution failed.", .{}) catch {};
-        return error.ProcessError;
-    };
+    try envbuild.run(allocator, .{
+        .env_config = env_config,
+        .env_name = env_name,
+        .venv_dir = venv_dir,
+        .project_dir = cwd_path,
+        .deps = valid_deps_list.items,
+        .flags = flags,
+    });
 
     output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
 }
@@ -199,16 +148,3 @@ pub fn setupEnvironment(
 // ============================ Tests ============================
 const testing = std.testing;
 const test_support = @import("../test_support.zig");
-
-test "executeShellScript maps the child's exit status to success/ProcessError" {
-    test_support.setupRuntime();
-    const a = testing.allocator;
-    const prev = test_support.useFakeExec();
-    defer runtime.exec_backend = prev;
-
-    test_support.fake_exec_exit = 0; // clean exit -> ok (the fake ignores the path)
-    try executeShellScript(a, "/tmp/ignored.sh");
-
-    test_support.fake_exec_exit = 1; // non-zero exit -> ProcessError
-    try testing.expectError(error.ProcessError, executeShellScript(a, "/tmp/ignored.sh"));
-}

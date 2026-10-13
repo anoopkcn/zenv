@@ -18,7 +18,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const json = std.json;
 const runtime = @import("runtime.zig");
-const template = @import("template.zig");
 const host = @import("host.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
 
@@ -39,13 +38,28 @@ pub const Op = struct {
     value: []const u8 = "",
 };
 
-/// The module environment captured by setup (see setup.template
-/// `zenv_write_module_cache`), with the stamp fields that decide whether it may
-/// be replayed on this machine.
+/// The module-environment cache in the venv: what `module load` changed during
+/// setup (see envbuild.zig), replayed by activation and `zenv run` instead of
+/// running Lmod again.
+pub const MODULE_CACHE_FILE = ".zenv_module_cache.json";
+
+/// Bump when capture or replay semantics change; a cache with another version
+/// is never replayed (activation falls back to `module load`). 2: captured
+/// from `env -0` snapshots by zenv itself, stored as JSON.
+pub const MODULE_CACHE_VERSION: u32 = 2;
+
+/// Cache files written by zenv versions before the JSON cache. Deleted when a
+/// new cache is captured and on rename.
+pub const LEGACY_MODULE_CACHE_FILES = [_][]const u8{ ".zenv_module_cache.sh", ".zenv_module_cache.stamp", ".zenv_module_env" };
+
+/// Contents of MODULE_CACHE_FILE. `system` is the cluster it was captured on
+/// (`${SYSTEMNAME:-$(hostname)}`); `modules_sig` identifies the module list so
+/// setup can reuse the cache when only dependencies changed.
 pub const ModuleCache = struct {
     version: u32,
     system: []const u8,
     untrusted: bool,
+    modules_sig: []const u8 = "",
     ops: []const Op,
 };
 
@@ -79,7 +93,7 @@ pub const Spec = struct {
     pub fn usableModuleCache(self: *const Spec) ?ModuleCache {
         if (self.modules.len == 0 or !self.module_cache_enabled) return null;
         const cache = self.module_cache orelse return null;
-        if (cache.version != template.MODULE_CACHE_VERSION or cache.untrusted) return null;
+        if (cache.version != MODULE_CACHE_VERSION or cache.untrusted) return null;
         return cache;
     }
 };
@@ -101,53 +115,67 @@ pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8)
     return ops.toOwnedSlice(allocator);
 }
 
-/// Parses the module-env data file: one `set NAME=VALUE` or
-/// `prepend NAME=VALUE` per line. Any other line is an error, so a corrupt file
-/// disables replay instead of applying a partial environment.
-pub fn parseModuleData(allocator: Allocator, content: []const u8) ![]const Op {
-    var ops: std.ArrayList(Op) = .empty;
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const sp = std.mem.findScalar(u8, line, ' ') orelse return error.InvalidModuleData;
-        const kind: OpKind = if (std.mem.eql(u8, line[0..sp], "set"))
-            .set
-        else if (std.mem.eql(u8, line[0..sp], "prepend"))
-            .prepend
-        else
-            return error.InvalidModuleData;
-        const rest = line[sp + 1 ..];
-        const eq = std.mem.findScalar(u8, rest, '=') orelse return error.InvalidModuleData;
-        if (eq == 0) return error.InvalidModuleData;
-        try ops.append(allocator, .{ .op = kind, .name = rest[0..eq], .value = rest[eq + 1 ..] });
-    }
-    return ops.toOwnedSlice(allocator);
+/// Reads `<venv_path>/.zenv_module_cache.json`. Null when missing or
+/// malformed. Results are allocated with `allocator` (use an arena).
+pub fn readModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache {
+    const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE }) catch return null;
+    const text = runtime.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch return null;
+    return json.parseFromSliceLeaky(ModuleCache, allocator, text, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch null;
 }
 
-/// Reads the module cache data + stamp from `venv_path`. Null when either file
-/// is missing or malformed. Results borrow from `allocator` (use an arena).
-fn loadModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache {
-    const data_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, template.MODULE_CACHE_DATA }) catch return null;
-    const stamp_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, template.MODULE_CACHE_STAMP }) catch return null;
-    const data = runtime.readFileAlloc(allocator, data_path, 16 * 1024 * 1024) catch return null;
-    const stamp = runtime.readFileAlloc(allocator, stamp_path, 64 * 1024) catch return null;
+/// Writes the module cache atomically and removes the pre-JSON cache files.
+pub fn writeModuleCache(allocator: Allocator, venv_path: []const u8, cache: *const ModuleCache) !void {
+    const text = try json.Stringify.valueAlloc(allocator, cache.*, .{ .whitespace = .indent_2 });
+    defer allocator.free(text);
+    const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE });
+    defer allocator.free(path);
+    try runtime.writeFileAtomic(allocator, path, text);
+    deleteLegacyModuleCache(allocator, venv_path);
+}
 
-    var cache = ModuleCache{ .version = 0, .system = "", .untrusted = true, .ops = &.{} };
-    var lines = std.mem.splitScalar(u8, stamp, '\n');
-    while (lines.next()) |line| {
-        const eq = std.mem.findScalar(u8, line, '=') orelse continue;
-        const key = line[0..eq];
-        const val = line[eq + 1 ..];
-        if (std.mem.eql(u8, key, "version")) {
-            cache.version = std.fmt.parseInt(u32, val, 10) catch return null;
-        } else if (std.mem.eql(u8, key, "system")) {
-            cache.system = val;
-        } else if (std.mem.eql(u8, key, "untrusted")) {
-            cache.untrusted = std.mem.eql(u8, val, "1");
-        }
+/// Removes the module cache (current and legacy files); missing files are fine.
+pub fn deleteModuleCache(allocator: Allocator, venv_path: []const u8) void {
+    if (std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE })) |path| {
+        defer allocator.free(path);
+        runtime.deleteFile(path) catch {};
+    } else |_| {}
+    deleteLegacyModuleCache(allocator, venv_path);
+}
+
+fn deleteLegacyModuleCache(allocator: Allocator, venv_path: []const u8) void {
+    for (LEGACY_MODULE_CACHE_FILES) |name| {
+        const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, name }) catch continue;
+        defer allocator.free(path);
+        runtime.deleteFile(path) catch {};
     }
-    cache.ops = parseModuleData(allocator, data) catch return null;
-    return cache;
+}
+
+/// Lowercase-hex SHA-1 of the module list, in load order: the key under which
+/// setup may reuse a cache instead of re-running Lmod. Caller owns the result.
+pub fn modulesSignature(allocator: Allocator, modules: []const []const u8) ![]u8 {
+    var sha = std.crypto.hash.Sha1.init(.{});
+    for (modules) |m| {
+        sha.update(m);
+        sha.update("\x00");
+    }
+    var digest: [20]u8 = undefined;
+    sha.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return allocator.dupe(u8, &hex);
+}
+
+/// Whether `name` is a shell identifier, i.e. can be exported and rendered
+/// unquoted into activation scripts.
+pub fn isIdentifier(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name, 0..) |c, i| {
+        const ok = c == '_' or std.ascii.isAlphabetic(c) or (i > 0 and std.ascii.isDigit(c));
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /// Builds the Spec for `env_config`. Call at the end of setup, after the setup
@@ -168,7 +196,7 @@ pub fn build(
         .venv = venv_path,
         .modules = modules,
         .module_cache_enabled = env_config.module_cache,
-        .module_cache = if (modules.len > 0 and env_config.module_cache) loadModuleCache(allocator, venv_path) else null,
+        .module_cache = if (modules.len > 0 and env_config.module_cache) readModuleCache(allocator, venv_path) else null,
         .ops = try venvOps(allocator, venv_path, env_name),
         .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
         .activate_script = activate_script,
@@ -239,7 +267,7 @@ pub fn directReason(spec: *const Spec, current_system: ?[]const u8, module_syste
     if (spec.hasActivateHooks()) return "activate hooks are configured";
     if (spec.modules.len > 0) {
         const cache = spec.module_cache orelse return "no module cache data";
-        if (cache.version != template.MODULE_CACHE_VERSION) return "module cache version mismatch";
+        if (cache.version != MODULE_CACHE_VERSION) return "module cache version mismatch";
         if (cache.untrusted) return "module cache is marked untrusted";
         const sys = current_system orelse return "cannot determine the current system";
         if (!std.mem.eql(u8, sys, cache.system)) return "module cache was captured on another system";
@@ -294,7 +322,7 @@ pub fn resolveCommand(allocator: Allocator, command: []const u8, path_value: ?[]
     return null;
 }
 
-fn isExecutableFile(path: []const u8) bool {
+pub fn isExecutableFile(path: []const u8) bool {
     const cwd = std.Io.Dir.cwd();
     const st = cwd.statFile(runtime.io, path, .{}) catch return false;
     if (st.kind != .file) return false;
@@ -323,23 +351,26 @@ test "venvOps mirrors bin/activate + activate.sh exports, in order" {
     try testing.expectEqual(@as(usize, 5), no_prompt.len);
 }
 
-test "parseModuleData reads set/prepend lines and rejects anything else" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+test "modulesSignature is deterministic, order- and content-sensitive" {
+    const a = testing.allocator;
+    const ab = [_][]const u8{ "gcc", "cuda" };
+    const ab2 = [_][]const u8{ "gcc", "cuda" };
+    const ba = [_][]const u8{ "cuda", "gcc" };
+    const abc = [_][]const u8{ "gcc", "cuda", "mpi" };
 
-    const ops = try parseModuleData(a, "set LMOD_FAMILY=gcc\nprepend PATH=/m/bin:/m2/bin\nset EMPTY=\nset EQ=a=b\n");
-    try testing.expectEqual(@as(usize, 4), ops.len);
-    try testing.expectEqual(OpKind.set, ops[0].op);
-    try testing.expectEqualStrings("gcc", ops[0].value);
-    try testing.expectEqual(OpKind.prepend, ops[1].op);
-    try testing.expectEqualStrings("/m/bin:/m2/bin", ops[1].value);
-    try testing.expectEqualStrings("", ops[2].value);
-    try testing.expectEqualStrings("a=b", ops[3].value); // only the first '=' splits
+    const h_ab = try modulesSignature(a, &ab);
+    defer a.free(h_ab);
+    const h_ab2 = try modulesSignature(a, &ab2);
+    defer a.free(h_ab2);
+    const h_ba = try modulesSignature(a, &ba);
+    defer a.free(h_ba);
+    const h_abc = try modulesSignature(a, &abc);
+    defer a.free(h_abc);
 
-    try testing.expectError(error.InvalidModuleData, parseModuleData(a, "export X=1\n"));
-    try testing.expectError(error.InvalidModuleData, parseModuleData(a, "set =1\n"));
-    try testing.expectError(error.InvalidModuleData, parseModuleData(a, "set NOVALUE\n"));
+    try testing.expectEqual(@as(usize, 40), h_ab.len);
+    try testing.expectEqualStrings(h_ab, h_ab2); // deterministic
+    try testing.expect(!std.mem.eql(u8, h_ab, h_ba)); // load order matters
+    try testing.expect(!std.mem.eql(u8, h_ab, h_abc)); // adding a module changes it
 }
 
 test "spec survives a stringify/parse round trip" {
@@ -372,7 +403,7 @@ test "spec survives a stringify/parse round trip" {
 }
 
 test "directReason gates on hooks, module cache validity and purge" {
-    const cache_ok = ModuleCache{ .version = template.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &.{} };
+    const cache_ok = ModuleCache{ .version = MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &.{} };
     var spec = Spec{ .name = "v", .venv = "/v", .module_cache_enabled = true, .ops = &.{} };
 
     try testing.expect(directReason(&spec, "laptop", false) == null);
@@ -401,7 +432,7 @@ test "directReason gates on hooks, module cache validity and purge" {
 }
 
 test "usableModuleCache requires modules, caching on, trusted current-format data" {
-    const ok = ModuleCache{ .version = template.MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &.{} };
+    const ok = ModuleCache{ .version = MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &.{} };
     var spec = Spec{ .name = "v", .venv = "/v", .modules = &.{"gcc"}, .module_cache_enabled = true, .module_cache = ok, .ops = &.{} };
     try testing.expect(spec.usableModuleCache() != null);
     spec.module_cache_enabled = false;
