@@ -12,6 +12,9 @@ pub const MODULE_CACHE_VERSION: u32 = 1;
 /// Basenames of the cache artifacts written into the venv directory.
 pub const MODULE_CACHE_FILE = ".zenv_module_cache.sh";
 pub const MODULE_CACHE_STAMP = ".zenv_module_cache.stamp";
+/// The same captured delta as MODULE_CACHE_FILE, as data (`set NAME=VALUE` /
+/// `prepend NAME=VALUE` lines) for envspec.zig to replay without a shell.
+pub const MODULE_CACHE_DATA = ".zenv_module_env";
 
 /// Writes `value` to `w` as the body of a shell single-quoted string,
 /// escaping any embedded single quotes with the classic `'\''` trick. The

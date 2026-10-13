@@ -16,6 +16,8 @@ const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
 const runtime = @import("utils/runtime.zig");
 const template = @import("utils/template.zig");
+const envspec = @import("utils/envspec.zig");
+const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
@@ -373,6 +375,12 @@ pub fn handleSetupCommand(
 
     // 4. Create the final activation script (using a separate utility)
     try aux.createActivationScript(allocator, env_config, env_name, base_dir);
+
+    // 4b. Record activation as data so run/add can skip bash + activate.sh.
+    // Non-fatal: without it they fall back to sourcing activate.sh.
+    envspec.writeForEnv(allocator, env_config, env_dir_path) catch |err| {
+        output.print(allocator, "Warning: could not write {s}: {s}", .{ envspec.FILE_NAME, @errorName(err) }) catch {};
+    };
 
     // 5. Register the environment in the global registry
     const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
@@ -859,21 +867,7 @@ pub fn handleRunCommand(
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
     const venv_path = registry.get(ref).venv_path;
 
-    const activate_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
-        output.printError(allocator, "Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-    defer allocator.free(activate_path);
-
-    // Build the argv that runs the command inside the activated environment
-    // without any temp file (see `buildRunArgv`).
-    const argv = buildRunArgv(allocator, activate_path, command, command_args) catch |err| {
-        output.printError(allocator, "Failed to build command: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-    defer allocator.free(argv);
-
-    const term = runtime.exec(argv, .{}) catch |err| {
+    const term = execInEnv(allocator, venv_path, command, command_args) catch |err| {
         output.printError(allocator, "Failed to run command: {s}", .{@errorName(err)}) catch {};
         return err;
     };
@@ -938,7 +932,7 @@ pub fn handleAddCommand(
     defer if (dep_file) |df| allocator.free(df);
 
     // 1. Install into the venv (only persist below if this succeeds).
-    try installPackage(allocator, activate_path, package, flags.use_uv);
+    try installPackage(allocator, entry.venv_path, package, flags.use_uv);
 
     // 2. Persist to the appropriate manifest.
     try persistAddedPackage(allocator, project_dir, zenv_json_path, env_name, dep_file, package, flags.dev_mode, flags.zenv_only);
@@ -971,18 +965,15 @@ fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const 
 
 /// Installs `package` into the activated environment via pip (or uv when
 /// `use_uv`). A non-zero installer exit maps to error.ProcessError.
-fn installPackage(allocator: Allocator, activate_path: []const u8, package: []const u8, use_uv: bool) !void {
+fn installPackage(allocator: Allocator, venv_path: []const u8, package: []const u8, use_uv: bool) !void {
     const command: []const u8 = if (use_uv) "uv" else "python";
     const cmd_args: []const []const u8 = if (use_uv)
         &[_][]const u8{ "pip", "install", package }
     else
         &[_][]const u8{ "-m", "pip", "install", package };
 
-    const argv = try buildRunArgv(allocator, activate_path, command, cmd_args);
-    defer allocator.free(argv);
-
     output.print(allocator, "Installing '{s}'...", .{package}) catch {};
-    const term = runtime.exec(argv, .{}) catch |err| {
+    const term = execInEnv(allocator, venv_path, command, cmd_args) catch |err| {
         output.printError(allocator, "Failed to run installer: {s}", .{@errorName(err)}) catch {};
         return err;
     };
@@ -1045,6 +1036,65 @@ fn persistAddedPackage(
         try manifest.addToRequirementsTxt(allocator, df_path, package);
         output.print(allocator, "Recorded in {s}.", .{df}) catch {};
     }
+}
+
+/// Runs `command` inside the environment at `venv_path` with inherited stdio
+/// and returns its `Term`. Uses the direct launch when `zenv-env.json` can
+/// reproduce activation, else sources activate.sh through bash.
+fn execInEnv(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8) !runtime.Term {
+    if (try execDirect(allocator, venv_path, command, command_args)) |term| return term;
+
+    const activate_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" });
+    defer allocator.free(activate_path);
+    const argv = try buildRunArgv(allocator, activate_path, command, command_args);
+    defer allocator.free(argv);
+    return runtime.exec(argv, .{});
+}
+
+/// Direct launch: copy this process's environment, apply `zenv-env.json`,
+/// resolve `command` against the resulting PATH and spawn it, no shell
+/// involved. Returns null (caller falls back to bash) when the spec is missing
+/// or `envspec.directReason` reports a blocker, or when ZENV_RUN_SHELL=1.
+fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8) !?runtime.Term {
+    if (runtime.env("ZENV_RUN_SHELL")) |v| {
+        if (std.mem.eql(u8, v, "1")) {
+            zerrors.debugLog(allocator, "run: ZENV_RUN_SHELL=1, using activate.sh", .{});
+            return null;
+        }
+    }
+
+    const parsed = envspec.readSpec(allocator, venv_path) orelse {
+        zerrors.debugLog(allocator, "run: no usable {s}, using activate.sh", .{envspec.FILE_NAME});
+        return null;
+    };
+    defer parsed.deinit();
+    const spec = &parsed.value;
+
+    // Only the module cache needs the system identity; skip the lookup otherwise.
+    const system: ?[]const u8 = if (spec.modules > 0) envspec.currentSystem(allocator) catch null else null;
+    defer if (system) |s| allocator.free(s);
+    if (envspec.directReason(spec, system, envspec.moduleSystemPresent())) |reason| {
+        zerrors.debugLog(allocator, "run: {s}, using activate.sh", .{reason});
+        return null;
+    }
+
+    var child_env = try runtime.environ_map.clone(allocator);
+    defer child_env.deinit();
+    try envspec.apply(&child_env, spec);
+
+    const exe = try envspec.resolveCommand(allocator, command, child_env.get("PATH")) orelse {
+        // Same status bash's `exec` gives for an unknown command.
+        output.printError(allocator, "{s}: command not found", .{command}) catch {};
+        return .{ .exited = 127 };
+    };
+    defer allocator.free(exe);
+    zerrors.debugLog(allocator, "run: direct launch of {s}", .{exe});
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, command);
+    try argv.appendSlice(allocator, command_args);
+    return try runtime.exec(argv.items, .{ .environ_map = &child_env, .exe_path = exe });
 }
 
 /// Shell snippet passed to `bash -c`. It sources the activation script (passed
@@ -1645,7 +1695,9 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     // The module cache embeds absolute paths captured at setup; rather than
     // rewrite them, drop it. Next activate falls back to `module load` and the
     // next `zenv setup` regenerates a correct cache.
-    for ([_][]const u8{ template.MODULE_CACHE_FILE, template.MODULE_CACHE_STAMP }) |name| {
+    // zenv-env.json and the module data embed the old path the same way; without
+    // them run/add fall back to activate.sh until the next setup.
+    for ([_][]const u8{ template.MODULE_CACHE_FILE, template.MODULE_CACHE_STAMP, template.MODULE_CACHE_DATA, envspec.FILE_NAME }) |name| {
         const cache_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, name });
         defer allocator.free(cache_path);
         runtime.deleteFile(cache_path) catch {}; // best-effort; missing is fine

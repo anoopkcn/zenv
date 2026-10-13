@@ -213,6 +213,10 @@ fn createSetupScript(
     defer allocator.free(module_cache_stamp);
     try replacements.put("MODULE_CACHE_STAMP", module_cache_stamp);
 
+    const module_cache_data = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_DATA });
+    defer allocator.free(module_cache_data);
+    try replacements.put("MODULE_CACHE_DATA", module_cache_data);
+
     // Reuse key: hash of the effective module list (in load order). Setup skips
     // re-running Lmod when this matches the stamp. Empty when caching is off so
     // the shell guard `[ -n "@@MODULES_SIG@@" ]` disables reuse.

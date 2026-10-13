@@ -79,12 +79,15 @@ safe_module_load() {
 # else is emitted as an absolute export. Exported shell functions (BASH_FUNC_*)
 # are skipped. Any other unexpected (non-identifier) entry marks the cache
 # "untrusted" so activation falls back to a real `module load`.
+# The same delta is also written as data (`set NAME=VALUE` / `prepend NAME=VALUE`
+# lines) to "$data", which zenv replays for `run`/`add` without a shell.
 zenv_write_module_cache() {
-  local base="$1" loaded="$2" out="$3" stamp="$4" version="$5" sig="$6"
-  local tmp_out="${out}.tmp.$$" tmp_flag="${stamp}.flag.$$" untrusted=0
+  local base="$1" loaded="$2" out="$3" stamp="$4" version="$5" sig="$6" data="$7"
+  local tmp_out="${out}.tmp.$$" tmp_flag="${stamp}.flag.$$" tmp_data="${data}.tmp.$$" untrusted=0
   : > "$tmp_flag"
+  : > "$tmp_data"
 
-  awk -v flagfile="$tmp_flag" '
+  awk -v flagfile="$tmp_flag" -v datafile="$tmp_data" '
     function is_pathvar(n){ return (n=="PATH"||n=="LD_LIBRARY_PATH"||n=="LIBRARY_PATH"||n=="CPATH"||n=="MANPATH"||n=="PKG_CONFIG_PATH") }
     function is_volatile(n){ return (n=="_"||n=="SHLVL"||n=="PWD"||n=="OLDPWD"||n=="PS1"||n=="PPID"||n=="BASHPID"||n=="RANDOM"||n=="SECONDS"||n=="LINENO"||n=="COLUMNS"||n=="LINES") }
     function shq(s){ gsub(/\047/, "\047\\\047\047", s); return "\047" s "\047" }
@@ -113,8 +116,10 @@ zenv_write_module_cache() {
           }
           if (added=="") next
           printf "%s=%s\"${%s:+:${%s}}\"\nexport %s\n", n, shq(added), n, n, n
+          printf "prepend %s=%s\n", n, added > datafile
         } else {
           printf "export %s=%s\n", n, shq(v)
+          printf "set %s=%s\n", n, v > datafile
         }
       } else {
         if (skip) next
@@ -124,14 +129,15 @@ zenv_write_module_cache() {
     END { if (untrusted) print "1" > flagfile }
   ' "$base" "$loaded" > "$tmp_out" || {
     warn "Failed to compute module environment delta; skipping cache."
-    rm -f "$tmp_out" "$tmp_flag"
+    rm -f "$tmp_out" "$tmp_flag" "$tmp_data"
     return 1
   }
 
   if [ -s "$tmp_flag" ]; then untrusted=1; fi
   rm -f "$tmp_flag"
 
-  mv "$tmp_out" "$out" || { warn "Failed to write module cache file."; rm -f "$tmp_out"; return 1; }
+  mv "$tmp_out" "$out" || { warn "Failed to write module cache file."; rm -f "$tmp_out" "$tmp_data"; return 1; }
+  mv "$tmp_data" "$data" || { warn "Failed to write module cache data file."; rm -f "$tmp_data" "$data"; }
 
   {
     printf 'version=%s\n' "$version"
@@ -246,14 +252,14 @@ if command -v module >/dev/null 2>&1; then
       if [ "$ZENV_MOD_OK" = "1" ]; then
         ZENV_CACHE_LOADED=$(mktemp 2>/dev/null) || ZENV_CACHE_LOADED=""
         if [ -n "$ZENV_CACHE_LOADED" ] && env > "$ZENV_CACHE_LOADED" 2>/dev/null; then
-          zenv_write_module_cache "$ZENV_CACHE_BASE" "$ZENV_CACHE_LOADED" "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@CACHE_VERSION@@" "@@MODULES_SIG@@" || true
+          zenv_write_module_cache "$ZENV_CACHE_BASE" "$ZENV_CACHE_LOADED" "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@CACHE_VERSION@@" "@@MODULES_SIG@@" "@@MODULE_CACHE_DATA@@" || true
         else
           warn "Could not snapshot loaded environment; skipping module cache."
         fi
         [ -n "$ZENV_CACHE_LOADED" ] && rm -f "$ZENV_CACHE_LOADED"
       else
         warn "One or more modules failed to load; not writing module cache."
-        rm -f "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@"
+        rm -f "@@MODULE_CACHE_FILE@@" "@@MODULE_CACHE_STAMP@@" "@@MODULE_CACHE_DATA@@"
       fi
       rm -f "$ZENV_CACHE_BASE"
     fi

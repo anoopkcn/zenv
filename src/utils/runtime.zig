@@ -160,6 +160,12 @@ pub const RunOptions = struct {
 
 pub const ExecOptions = struct {
     cwd: ?[]const u8 = null,
+    /// Replaces the child environment when set.
+    environ_map: ?*const std.process.Environ.Map = null,
+    /// Executable to run, while `argv[0]` stays as given. Needed when the
+    /// command was resolved against a PATH other than this process's own:
+    /// the std spawn resolves `argv[0]` against the parent PATH only.
+    exe_path: ?[]const u8 = null,
 };
 
 pub const ExecBackend = struct {
@@ -199,8 +205,10 @@ fn realRun(allocator: Allocator, argv: []const []const u8, opts: RunOptions) any
 
 fn realExec(argv: []const []const u8, opts: ExecOptions) anyerror!Term {
     var child = try std.process.spawn(io, .{
+        .exe = if (opts.exe_path) |p| .{ .explicit = .{ .dir = Dir.cwd(), .path = p } } else .detect,
         .argv = argv,
         .cwd = toCwd(opts.cwd),
+        .environ_map = opts.environ_map,
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
