@@ -52,7 +52,7 @@ pub fn downloadFile(
     try body_writer.flush();
 
     if (result.status != .ok) {
-        try output.printError(allocator, "Failed to download: HTTP status {d}", .{@intFromEnum(result.status)});
+        try output.printError(allocator, "Failed to download: HTTP status {d}", .{@backingInt(result.status)});
         return error.StatusError;
     }
 
@@ -77,7 +77,7 @@ pub fn downloadToTemp(
     options: DownloadOptions,
 ) ![]const u8 {
     const temp_dir = "/tmp";
-    const dl_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, filename });
+    const dl_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ temp_dir, filename });
     errdefer allocator.free(dl_path);
 
     try downloadFile(allocator, url, dl_path, options);

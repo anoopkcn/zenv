@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.array_list.Managed;
+const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const errors = @import("errors.zig");
 const ZenvError = errors.ZenvError;
@@ -26,7 +26,7 @@ fn generateSHA1ID(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const timestamp_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{runtime.nowMillis()});
+    const timestamp_str = try arena.allocator().print("{d}", .{runtime.nowMillis()});
     sha1.update(timestamp_str);
 
     var hash: [20]u8 = undefined;
@@ -55,13 +55,15 @@ pub const ScriptConfig = struct {
     pub fn deinit(self: *ScriptConfig, allocator: Allocator) void {
         if (self.commands) |*cmds| {
             for (cmds.items) |item| allocator.free(item);
-            cmds.deinit();
+            cmds.deinit(allocator);
         }
         if (self.script) |script_path| allocator.free(script_path);
     }
 };
 
 pub const EnvironmentConfig = struct {
+    /// Every owned string and list in this config is allocated with `allocator`.
+    allocator: Allocator,
     target_machines: ArrayList([]const u8),
     description: ?[]const u8 = null,
     modules: ArrayList([]const u8),
@@ -82,46 +84,33 @@ pub const EnvironmentConfig = struct {
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
-            .target_machines = ArrayList([]const u8).init(allocator),
-            .modules = ArrayList([]const u8).init(allocator),
-            .dependencies = ArrayList([]const u8).init(allocator),
-            .dev_dependencies = ArrayList([]const u8).init(allocator),
-            .description = null,
-            .modules_file = null,
-            .dependency_file = null,
-            .fallback_python = null,
-            .setup = null,
-            .activate = null,
-            .module_cache = true,
+            .allocator = allocator,
+            .target_machines = .empty,
+            .modules = .empty,
+            .dependencies = .empty,
+            .dev_dependencies = .empty,
         };
     }
 
+    fn freeList(allocator: Allocator, list: *ArrayList([]const u8)) void {
+        for (list.items) |item| allocator.free(item);
+        list.deinit(allocator);
+    }
+
     pub fn deinit(self: *EnvironmentConfig) void {
-        for (self.target_machines.items) |item| self.target_machines.allocator.free(item);
-        self.target_machines.deinit();
+        const allocator = self.allocator;
+        freeList(allocator, &self.target_machines);
+        freeList(allocator, &self.modules);
+        freeList(allocator, &self.dependencies);
+        freeList(allocator, &self.dev_dependencies);
 
-        for (self.modules.items) |item| self.modules.allocator.free(item);
-        self.modules.deinit();
+        if (self.description) |desc| allocator.free(desc);
+        if (self.modules_file) |mfile| allocator.free(mfile);
+        if (self.dependency_file) |req| allocator.free(req);
+        if (self.fallback_python) |py_exec| allocator.free(py_exec);
 
-        for (self.dependencies.items) |item| self.dependencies.allocator.free(item);
-        self.dependencies.deinit();
-
-        for (self.dev_dependencies.items) |item| self.dev_dependencies.allocator.free(item);
-        self.dev_dependencies.deinit();
-
-        if (self.description) |desc| self.target_machines.allocator.free(desc);
-        if (self.modules_file) |mfile| self.target_machines.allocator.free(mfile);
-        if (self.dependency_file) |req| self.target_machines.allocator.free(req);
-
-        if (self.setup) |*setup_config| {
-            setup_config.deinit(self.target_machines.allocator);
-        }
-
-        if (self.activate) |*activate_config| {
-            activate_config.deinit(self.target_machines.allocator);
-        }
-
-        if (self.fallback_python) |py_exec| self.target_machines.allocator.free(py_exec);
+        if (self.setup) |*setup_config| setup_config.deinit(allocator);
+        if (self.activate) |*activate_config| activate_config.deinit(allocator);
     }
 };
 
@@ -178,23 +167,23 @@ pub const Parse = struct {
     }
 
     pub fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
-        var result = ArrayList([]const u8).init(allocator);
+        var result: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (result.items) |item| allocator.free(item);
-            result.deinit();
+            result.deinit(allocator);
         }
 
         switch (value) {
             .array => |array| {
-                try result.ensureTotalCapacityPrecise(array.items.len);
+                try result.ensureTotalCapacityPrecise(allocator, array.items.len);
                 for (array.items) |item| {
                     if (item == .string) {
-                        try result.append(try allocator.dupe(u8, item.string));
+                        try result.append(allocator, try allocator.dupe(u8, item.string));
                     }
                 }
             },
             .string => |str| {
-                try result.append(try allocator.dupe(u8, str));
+                try result.append(allocator, try allocator.dupe(u8, str));
             },
             else => {},
         }
@@ -231,7 +220,7 @@ pub const RegistryEntry = struct {
         for (self.aliases.items) |alias| {
             allocator.free(alias);
         }
-        self.aliases.deinit();
+        self.aliases.deinit(allocator);
     }
 };
 
@@ -261,7 +250,7 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..eq], " \t\r");
         const val = std.mem.trim(u8, line[eq + 1 ..], " \t\r");
         if (std.mem.eql(u8, key, "version")) {
@@ -291,7 +280,7 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
 // used to build the venv. Returns null if the file is absent/unreadable (env not
 // built) or has no `version`. Caller owns the returned strings (call deinit).
 pub fn readVenvPythonInfo(allocator: Allocator, venv_path: []const u8) !?VenvPythonInfo {
-    const cfg_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "pyvenv.cfg" });
+    const cfg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "pyvenv.cfg" });
     defer allocator.free(cfg_path);
 
     const content = runtime.readFileAlloc(allocator, cfg_path, 64 * 1024) catch {
@@ -326,34 +315,34 @@ const RegistryJSON = struct {
 
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
-    entries: std.array_list.Managed(RegistryEntry),
+    entries: std.ArrayList(RegistryEntry),
 
     pub fn init(allocator: Allocator) EnvironmentRegistry {
         return .{
             .allocator = allocator,
-            .entries = std.array_list.Managed(RegistryEntry).init(allocator),
+            .entries = .empty,
         };
     }
 
     pub fn deinit(self: *EnvironmentRegistry) void {
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
-        self.entries.deinit();
+        self.entries.deinit(self.allocator);
     }
 
     pub fn load(allocator: Allocator) !EnvironmentRegistry {
         var registry = EnvironmentRegistry.init(allocator);
         errdefer registry.deinit();
 
-        const zenv_dir_path = try paths.ensureZenvDir(allocator);
-        defer allocator.free(zenv_dir_path);
-
-        const registry_path = try std.fmt.allocPrint(allocator, "{s}/registry.json", .{zenv_dir_path});
+        // Read first and only create ZENV_DIR when the registry is missing:
+        // every command loads the registry, so the common path stays a single
+        // file read instead of a mkdir round-trip per invocation.
+        const registry_path = try paths.getRegistryPath(allocator);
         defer allocator.free(registry_path);
 
         // Read the registry file (creating an empty one if it does not exist yet)
         const file_content = runtime.readFileAlloc(allocator, registry_path, 10 * 1024 * 1024) catch |err| {
             if (err == error.FileNotFound) {
-                try registry.save(); // Create an empty registry
+                try registry.save(); // Creates ZENV_DIR and an empty registry
                 return registry;
             }
             output.printError(allocator, "Failed to open registry file: {s}", .{@errorName(err)}) catch {};
@@ -361,18 +350,20 @@ pub const EnvironmentRegistry = struct {
         };
         defer allocator.free(file_content);
 
-        // Use parsed value with proper error handling
+        // Strings may borrow from `file_content` (it outlives `parsed`); every
+        // field kept below is duped into `allocator` anyway.
         const parsed = try json.parseFromSlice(json.Value, allocator, file_content, .{
-            .allocate = .alloc_always,
+            .allocate = .alloc_if_needed,
         });
         defer parsed.deinit();
 
         // Process the parsed data
         const root = parsed.value;
+        if (root != .object) return error.InvalidRegistryFormat;
         if (root.object.get("environments")) |environments| {
             if (environments != .array) return error.InvalidRegistryFormat;
 
-            try registry.entries.ensureTotalCapacityPrecise(environments.array.items.len);
+            try registry.entries.ensureTotalCapacityPrecise(allocator, environments.array.items.len);
 
             for (environments.array.items) |entry_value| {
                 if (entry_value != .object) continue;
@@ -433,14 +424,14 @@ pub const EnvironmentRegistry = struct {
                     }
 
                     // Default reconstruction
-                    break :blk try std.fs.path.join(allocator, &[_][]const u8{
+                    break :blk try std.Io.Dir.path.join(allocator, &[_][]const u8{
                         project_dir_owned, "zenv", env_name_owned,
                     });
                 };
                 errdefer allocator.free(venv_path_owned);
 
                 // Initialize aliases list for this entry
-                var aliases = ArrayList([]const u8).init(allocator);
+                var aliases: std.ArrayList([]const u8) = .empty;
 
                 // Load aliases if they exist for this entry
                 if (entry_obj.get("aliases")) |aliases_value| {
@@ -449,14 +440,14 @@ pub const EnvironmentRegistry = struct {
                             if (alias_value == .string) {
                                 const alias_owned = try allocator.dupe(u8, alias_value.string);
                                 errdefer allocator.free(alias_owned);
-                                try aliases.append(alias_owned);
+                                try aliases.append(allocator, alias_owned);
                             }
                         }
                     }
                 }
 
                 // Add entry to registry
-                try registry.entries.append(.{
+                try registry.entries.append(allocator, .{
                     .id = id_owned,
                     .env_name = env_name_owned,
                     .project_dir = project_dir_owned,
@@ -475,7 +466,7 @@ pub const EnvironmentRegistry = struct {
         const zenv_dir_path = try paths.ensureZenvDir(self.allocator);
         defer self.allocator.free(zenv_dir_path);
 
-        const registry_path = try std.fmt.allocPrint(self.allocator, "{s}/registry.json", .{zenv_dir_path});
+        const registry_path = try std.Io.Dir.path.join(self.allocator, &.{ zenv_dir_path, "registry.json" });
         defer self.allocator.free(registry_path);
 
         // Build a plain serializable view of the registry and let std.json
@@ -584,14 +575,14 @@ pub const EnvironmentRegistry = struct {
         const description_owned: ?[]const u8 = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
         errdefer if (description_owned) |desc| self.allocator.free(desc);
 
-        try self.entries.append(.{
+        try self.entries.append(self.allocator, .{
             .id = id,
             .env_name = env_name_owned,
             .project_dir = project_dir_owned,
             .description = description_owned,
             .target_machines_str = registry_target_machines_str,
             .venv_path = venv_path,
-            .aliases = ArrayList([]const u8).init(self.allocator),
+            .aliases = .empty,
         });
 
         self.save() catch |err| {
@@ -782,29 +773,29 @@ pub const EnvironmentRegistry = struct {
     /// a shared alias, and a non-unique 7+ id-prefix. Returns borrowed slices;
     /// caller frees the outer slice only.
     pub fn candidates(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) ![]Candidate {
-        var list = std.array_list.Managed(Candidate).init(allocator);
-        errdefer list.deinit();
+        var list: std.ArrayList(Candidate) = .empty;
+        errdefer list.deinit(allocator);
 
         if (std.mem.eql(u8, identifier, ".")) {
-            const cwd = runtime.cwdRealpath(allocator) catch return list.toOwnedSlice();
+            const cwd = runtime.cwdRealpath(allocator) catch return list.toOwnedSlice(allocator);
             defer allocator.free(cwd);
             for (self.entries.items) |entry| {
                 if (std.mem.eql(u8, entry.project_dir, cwd))
-                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
+                    try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
             }
-            return list.toOwnedSlice();
+            return list.toOwnedSlice(allocator);
         }
 
         // A shared alias matched by more than one environment.
         for (self.entries.items) |entry| {
             for (entry.aliases.items) |alias| {
                 if (std.mem.eql(u8, alias, identifier)) {
-                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
+                    try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
                     break;
                 }
             }
         }
-        if (list.items.len > 0) return list.toOwnedSlice();
+        if (list.items.len > 0) return list.toOwnedSlice(allocator);
 
         // A non-unique 7+ id-prefix.
         if (identifier.len >= 7) {
@@ -812,11 +803,11 @@ pub const EnvironmentRegistry = struct {
                 if (entry.id.len >= identifier.len and
                     std.mem.eql(u8, entry.id[0..identifier.len], identifier))
                 {
-                    try list.append(.{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
+                    try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
                 }
             }
         }
-        return list.toOwnedSlice();
+        return list.toOwnedSlice(allocator);
     }
 
     // Alias management methods
@@ -841,7 +832,7 @@ pub const EnvironmentRegistry = struct {
                 const alias_name_owned = try self.allocator.dupe(u8, alias_name);
                 errdefer self.allocator.free(alias_name_owned);
 
-                try entry.aliases.append(alias_name_owned);
+                try entry.aliases.append(self.allocator, alias_name_owned);
                 return;
             }
         }
@@ -881,11 +872,11 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn listAliases(self: *const EnvironmentRegistry, allocator: Allocator) !ArrayList(AliasEntry) {
-        var aliases = ArrayList(AliasEntry).init(allocator);
+        var aliases: std.ArrayList(AliasEntry) = .empty;
 
         for (self.entries.items) |entry| {
             for (entry.aliases.items) |alias| {
-                try aliases.append(.{ .alias = alias, .env_name = entry.env_name });
+                try aliases.append(allocator, .{ .alias = alias, .env_name = entry.env_name });
             }
         }
 
@@ -919,9 +910,9 @@ pub const EnvironmentRegistry = struct {
         }
 
         const entry = &self.entries.items[ref.idx];
-        const parent_dir = std.fs.path.dirname(entry.venv_path) orelse return error.InvalidPath;
+        const parent_dir = std.Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
 
-        const new_venv = try std.fs.path.join(self.allocator, &[_][]const u8{ parent_dir, new_name });
+        const new_venv = try std.Io.Dir.path.join(self.allocator, &[_][]const u8{ parent_dir, new_name });
         errdefer self.allocator.free(new_venv);
         const new_id = try generateSHA1ID(self.allocator, new_name, entry.project_dir, entry.target_machines_str);
         errdefer self.allocator.free(new_id);
@@ -973,14 +964,14 @@ test "registry resolution by name, alias, and id prefix" {
     var reg = EnvironmentRegistry.init(a);
     defer reg.deinit();
 
-    try reg.entries.append(.{
+    try reg.entries.append(a, .{
         .id = try a.dupe(u8, "0123456789abcdef0123456789abcdef01234567"),
         .env_name = try a.dupe(u8, "myenv"),
         .project_dir = try a.dupe(u8, "/p"),
         .description = null,
         .target_machines_str = try a.dupe(u8, "*"),
         .venv_path = try a.dupe(u8, "/p/zenv/myenv"),
-        .aliases = std.array_list.Managed([]const u8).init(a),
+        .aliases = .empty,
     });
 
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("myenv", null, null)).idx);
@@ -1002,14 +993,14 @@ fn tAppend(reg: *EnvironmentRegistry, id: []const u8, name: []const u8, dir: []c
 // Like tAppend but with an explicit target_machines_str, for host-aware tests.
 fn tAppendT(reg: *EnvironmentRegistry, id: []const u8, name: []const u8, dir: []const u8, targets: []const u8) !void {
     const a = reg.allocator;
-    try reg.entries.append(.{
+    try reg.entries.append(a, .{
         .id = try a.dupe(u8, id),
         .env_name = try a.dupe(u8, name),
         .project_dir = try a.dupe(u8, dir),
         .description = null,
         .target_machines_str = try a.dupe(u8, targets),
         .venv_path = try a.dupe(u8, dir),
-        .aliases = std.array_list.Managed([]const u8).init(a),
+        .aliases = .empty,
     });
 }
 
@@ -1190,6 +1181,20 @@ test "registry save/load round-trips a shared alias" {
         const r2 = try reg2.resolveAgainstCwd("dev", null, "machine2");
         try testing.expectEqualStrings("env_m2", reg2.get(r2).env_name);
     }
+}
+
+test "registry load rejects a non-object root instead of crashing" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+
+    const zdir = ".zig-cache/tmp/zenv-registry-bad-root";
+    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
+    runtime.deleteTree(zdir) catch {};
+    defer runtime.deleteTree(zdir) catch {};
+    try runtime.makePath(zdir);
+    try runtime.writeFile(zdir ++ "/registry.json", "[]");
+
+    try testing.expectError(error.InvalidRegistryFormat, EnvironmentRegistry.load(a));
 }
 
 test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {

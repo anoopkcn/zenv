@@ -82,37 +82,23 @@ pub fn getAndValidateEnvironment(
             }
         };
 
-        // Read modules from the file
-        var modules_from_file = readModulesFromFile(allocator, modules_file_path) catch |err| {
+        // Read modules with the config's own allocator so the list can be moved
+        // into env_config as-is, without copying each name.
+        const modules_from_file = readModulesFromFile(env_config.allocator, modules_file_path) catch |err| {
             output.printError(allocator, "Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
             return err;
         };
 
         // If env_config is a const pointer, we need to create a mutable version
-        var mutable_env_config = @constCast(env_config);
+        const mutable_env_config = @constCast(env_config);
 
-        // Clear existing modules (ignoring them as specified)
+        // Replace the existing modules (ignoring them as specified)
         if (mutable_env_config.modules.items.len > 0) {
             output.print(allocator, "Ignoring {d} modules defined in zenv.json in favor of modules_file", .{mutable_env_config.modules.items.len}) catch {};
-            for (mutable_env_config.modules.items) |module| {
-                mutable_env_config.modules.allocator.free(module);
-            }
-            mutable_env_config.modules.clearRetainingCapacity();
         }
-
-        // Transfer ownership of modules from file to env_config
-        mutable_env_config.modules.ensureTotalCapacity(modules_from_file.items.len) catch {};
-        for (modules_from_file.items) |module| {
-            // Create new duplicate to avoid any potential memory corruption
-            const module_copy = mutable_env_config.modules.allocator.dupe(u8, module) catch continue;
-            mutable_env_config.modules.append(module_copy) catch {};
-
-            // Now we need to free the original since we made a copy
-            allocator.free(module);
-        }
-
-        // Just deinit the ArrayList, but the items have been freed above
-        modules_from_file.deinit();
+        for (mutable_env_config.modules.items) |module| env_config.allocator.free(module);
+        mutable_env_config.modules.deinit(env_config.allocator);
+        mutable_env_config.modules = modules_from_file;
 
         output.print(allocator, "Loaded {d} modules from file for environment '{s}'", .{ mutable_env_config.modules.items.len, env_name }) catch {};
 
@@ -146,27 +132,27 @@ pub fn getAndValidateEnvironment(
         var formatted_targets: []const u8 = undefined;
         var formatted_targets_allocated = false;
         format_block: {
-            var targets_buffer = std.array_list.Managed(u8).init(allocator);
-            defer targets_buffer.deinit();
+            var targets_buffer: std.ArrayList(u8) = .empty;
+            defer targets_buffer.deinit(allocator);
 
             // Attempt to format the string
-            targets_buffer.appendSlice("[") catch |err| {
+            targets_buffer.appendSlice(allocator, "[") catch |err| {
                 output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                 break :format_block; // Use placeholder
             };
             for (env_config.target_machines.items, 0..) |target, i| {
                 if (i > 0) {
-                    targets_buffer.appendSlice(", ") catch |err| {
+                    targets_buffer.appendSlice(allocator, ", ") catch |err| {
                         output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                         break :format_block;
                     };
                 }
-                targets_buffer.print("\"{s}\"", .{target}) catch |err| {
+                targets_buffer.print(allocator, "\"{s}\"", .{target}) catch |err| {
                     output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                     break :format_block;
                 };
             }
-            targets_buffer.appendSlice("]") catch |err| {
+            targets_buffer.appendSlice(allocator, "]") catch |err| {
                 output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
                 break :format_block;
             };
@@ -203,13 +189,13 @@ pub fn getAndValidateEnvironment(
 pub fn readModulesFromFile(
     allocator: Allocator,
     file_path: []const u8,
-) !std.array_list.Managed([]const u8) {
-    var modules_list = std.array_list.Managed([]const u8).init(allocator);
+) !std.ArrayList([]const u8) {
+    var modules_list: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (modules_list.items) |item| {
             allocator.free(item);
         }
-        modules_list.deinit();
+        modules_list.deinit(allocator);
     }
 
     // Open and read the file
@@ -221,11 +207,11 @@ pub fn readModulesFromFile(
     // Debug the file content with hex representation for all bytes (debug only)
     if (errors.isDebugEnabled(allocator) and file_content.len > 0) {
         const debug_len = @min(file_content.len, 100);
-        var hex_buf = std.array_list.Managed(u8).init(allocator);
-        defer hex_buf.deinit();
+        var hex_buf: std.ArrayList(u8) = .empty;
+        defer hex_buf.deinit(allocator);
 
         for (file_content[0..debug_len]) |byte| {
-            hex_buf.print("{X:0>2} ", .{byte}) catch {};
+            hex_buf.print(allocator, "{X:0>2} ", .{byte}) catch {};
         }
         errors.debugLog(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items});
     }
@@ -237,15 +223,10 @@ pub fn readModulesFromFile(
         errors.debugLog(allocator, "UTF-8 BOM detected and skipped", .{});
     }
 
-    // Create a hashmap to ensure uniqueness and avoid duplicates
+    // Set of names already in `modules_list` (keys borrow the list's strings),
+    // to drop duplicates while keeping first-seen order.
     var modules_set = std.StringHashMap(void).init(allocator);
-    defer {
-        var keys_iter = modules_set.keyIterator();
-        while (keys_iter.next()) |key| {
-            allocator.free(key.*);
-        }
-        modules_set.deinit();
-    }
+    defer modules_set.deinit();
 
     // Process the file line by line using straightforward approach
     var line_start: usize = 0;
@@ -297,12 +278,16 @@ pub fn readModulesFromFile(
             }
 
             // Check if we've already seen this module
-            if (!modules_set.contains(module_name)) {
-                const key_copy = try allocator.dupe(u8, module_name);
-                try modules_set.put(key_copy, {});
-
-                // Add module to the list
-                try modules_list.append(module_name);
+            const gop = modules_set.getOrPut(module_name) catch |err| {
+                allocator.free(module_name);
+                return err;
+            };
+            if (!gop.found_existing) {
+                modules_list.append(allocator, module_name) catch |err| {
+                    _ = modules_set.remove(module_name);
+                    allocator.free(module_name);
+                    return err;
+                };
                 errors.debugLog(allocator, "  - Found module: '{s}'", .{module_name});
             } else {
                 // Free the duplicate since we already have this module

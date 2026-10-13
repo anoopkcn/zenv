@@ -17,7 +17,7 @@ pub fn getZenvDir(allocator: Allocator) ![]const u8 {
         return error.HomeDirectoryNotFound;
     };
 
-    return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
 }
 
 // Creates the zenv directory if it doesn't exist
@@ -40,7 +40,7 @@ pub fn getRegistryPath(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "registry.json" });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "registry.json" });
 }
 
 // Gets the path to the default-python file
@@ -48,7 +48,7 @@ pub fn getDefaultPythonFilePath(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "default-python" });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "default-python" });
 }
 
 // Gets the default python installation directory
@@ -56,7 +56,7 @@ pub fn getPythonInstallDir(allocator: Allocator) ![]const u8 {
     const zenv_dir_path = try getZenvDir(allocator);
     defer allocator.free(zenv_dir_path);
 
-    return std.fs.path.join(allocator, &[_][]const u8{ zenv_dir_path, "python" });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "python" });
 }
 
 /// THE rule for where an environment lives: `<base_dir>/<env_name>`, where a
@@ -70,10 +70,10 @@ pub fn venvPath(
     base_dir: []const u8,
     env_name: []const u8,
 ) ![]const u8 {
-    if (std.fs.path.isAbsolute(base_dir)) {
-        return std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+    if (std.Io.Dir.path.isAbsolute(base_dir)) {
+        return std.Io.Dir.path.join(allocator, &[_][]const u8{ base_dir, env_name });
     }
-    return std.fs.path.join(allocator, &[_][]const u8{ project_dir, base_dir, env_name });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, base_dir, env_name });
 }
 
 /// True when `base_dir`, resolved against `project_dir` the way `venvPath`
@@ -93,13 +93,13 @@ pub fn baseDirIsZenvDir(
     base_dir: []const u8,
     zenv_dir: []const u8,
 ) !bool {
-    const base_abs = if (std.fs.path.isAbsolute(base_dir))
-        try std.fs.path.resolve(allocator, &[_][]const u8{base_dir})
+    const base_abs = if (std.Io.Dir.path.isAbsolute(base_dir))
+        try std.Io.Dir.path.resolve(allocator, &[_][]const u8{base_dir})
     else
-        try std.fs.path.resolve(allocator, &[_][]const u8{ project_dir, base_dir });
+        try std.Io.Dir.path.resolve(allocator, &[_][]const u8{ project_dir, base_dir });
     defer allocator.free(base_abs);
 
-    const zenv_abs = try std.fs.path.resolve(allocator, &[_][]const u8{zenv_dir});
+    const zenv_abs = try std.Io.Dir.path.resolve(allocator, &[_][]const u8{zenv_dir});
     defer allocator.free(zenv_abs);
 
     if (std.mem.eql(u8, base_abs, zenv_abs)) return true;

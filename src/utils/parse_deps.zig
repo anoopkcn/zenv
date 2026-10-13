@@ -28,8 +28,8 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
     // may legitimately contain a space, as in "numpy>=1.26.0, <2.0" or
     // "mkdocstrings[python] >= 0.19" — those always carry an operator or '['.
     // (Keying on the comma instead would mis-accept prose like "Fast, simple".)
-    if (std.mem.indexOf(u8, package_name, " ") != null and
-        std.mem.indexOfAny(u8, package_name, "<>=~[") == null)
+    if (std.mem.find(u8, package_name, " ") != null and
+        std.mem.findAny(u8, package_name, "<>=~[") == null)
     {
         return false;
     }
@@ -45,7 +45,7 @@ fn isLikelyPythonPackageName(package_name: []const u8) bool {
 pub fn packageBaseName(spec: []const u8) []const u8 {
     // The name ends at the first version operator, extras bracket, marker
     // separator, URL ('@'), or whitespace.
-    const end = std.mem.indexOfAny(u8, spec, "<>=~!@;[ \t") orelse spec.len;
+    const end = std.mem.findAny(u8, spec, "<>=~!@;[ \t") orelse spec.len;
     return std.mem.trim(u8, spec[0..end], " \t");
 }
 
@@ -67,7 +67,7 @@ pub fn samePackage(a: []const u8, b: []const u8) bool {
 pub fn parsePyprojectToml(
     allocator: Allocator,
     content: []const u8,
-    deps_list: *std.array_list.Managed([]const u8),
+    deps_list: *std.ArrayList([]const u8),
 ) !usize {
     output.print(allocator, "Parsing pyproject.toml for dependencies...", .{}) catch {};
 
@@ -110,7 +110,7 @@ pub fn parsePyprojectToml(
         }
         const dep = try allocator.dupe(u8, spec);
         output.print(allocator, "  - TOML dependency: {s}", .{dep}) catch {};
-        try deps_list.append(dep);
+        try deps_list.append(allocator, dep);
         count += 1;
     }
 
@@ -127,7 +127,7 @@ pub fn parsePyprojectToml(
 pub fn parseRequirementsTxt(
     allocator: Allocator,
     content: []const u8,
-    deps_list: *std.array_list.Managed([]const u8),
+    deps_list: *std.ArrayList([]const u8),
 ) !usize {
     output.print(allocator, "Parsing requirements.txt for dependencies...", .{}) catch {};
     var count: usize = 0;
@@ -151,7 +151,7 @@ pub fn parseRequirementsTxt(
         const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
 
         // Add the dependency
-        try deps_list.append(trimmed_dupe);
+        try deps_list.append(allocator, trimmed_dupe);
         count += 1;
     }
     output.print(allocator, "Found {d} dependencies in requirements.txt format", .{count}) catch {};
@@ -163,13 +163,13 @@ pub fn validateDependencies(
     allocator: Allocator,
     raw_deps: []const []const u8,
     env_name: []const u8,
-) !std.array_list.Managed([]const u8) {
+) !std.ArrayList([]const u8) {
     output.print(allocator, "Validating dependencies for '{s}':", .{env_name}) catch {};
-    var valid_deps = std.array_list.Managed([]const u8).init(allocator);
+    var valid_deps: std.ArrayList([]const u8) = .empty;
     // Improved error handling with explicit cleanup of any added items
     errdefer {
         // Only free items we owned and added to valid_deps
-        valid_deps.deinit();
+        valid_deps.deinit(allocator);
     }
 
     // Create a hashmap to track seen package names (case-insensitive). The keys
@@ -182,8 +182,8 @@ pub fn validateDependencies(
     }
 
     // Reuse a buffer for lowercase string conversion to reduce allocations
-    var lowercase_buf = std.array_list.Managed(u8).init(allocator);
-    defer lowercase_buf.deinit();
+    var lowercase_buf: std.ArrayList(u8) = .empty;
+    defer lowercase_buf.deinit(allocator);
 
     for (raw_deps) |dep| {
         if (dep.len == 0) {
@@ -192,7 +192,7 @@ pub fn validateDependencies(
         }
 
         // Skip deps that look like file paths
-        if (std.mem.indexOf(u8, dep, "/") != null) {
+        if (std.mem.find(u8, dep, "/") != null) {
             output.print(allocator, "Warning: Skipping dependency that looks like a path: '{s}'", .{dep}) catch {};
             continue;
         }
@@ -224,9 +224,9 @@ pub fn validateDependencies(
         // Convert package name to lowercase for case-insensitive duplicate check
         // Reuse the same buffer to avoid repeated allocations
         lowercase_buf.clearRetainingCapacity();
-        try lowercase_buf.ensureTotalCapacity(package_name_raw.len);
+        try lowercase_buf.ensureTotalCapacity(allocator, package_name_raw.len);
         for (package_name_raw) |c| {
-            try lowercase_buf.append(std.ascii.toLower(c));
+            try lowercase_buf.append(allocator, std.ascii.toLower(c));
         }
 
         // Check if we've already seen this package (case-insensitive)
@@ -237,7 +237,7 @@ pub fn validateDependencies(
 
         // Accept this dependency as valid
         output.print(allocator, "Including dependency: '{s}'", .{dep}) catch {};
-        try valid_deps.append(dep);
+        try valid_deps.append(allocator, dep);
 
         // Add the lowercase name to the seen set using a key we create and own
         const lowercase_key = try allocator.dupe(u8, lowercase_buf.items);
@@ -284,18 +284,18 @@ test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
         \\    "flask>=2.0",
         \\]
     ;
-    var deps = std.array_list.Managed([]const u8).init(a);
+    var deps: std.ArrayList([]const u8) = .empty;
     defer {
         for (deps.items) |d| a.free(d);
-        deps.deinit();
+        deps.deinit(a);
     }
     const count = try parsePyprojectToml(a, content, &deps);
     try testing.expect(count >= 2);
     var has_req = false;
     var has_flask = false;
     for (deps.items) |d| {
-        if (std.mem.indexOf(u8, d, "requests") != null) has_req = true;
-        if (std.mem.indexOf(u8, d, "flask") != null) has_flask = true;
+        if (std.mem.find(u8, d, "requests") != null) has_req = true;
+        if (std.mem.find(u8, d, "flask") != null) has_flask = true;
     }
     try testing.expect(has_req and has_flask);
 }
@@ -310,10 +310,10 @@ test "parseRequirementsTxt: skips comments and blank lines" {
         \\flask>=2.0
         \\   # indented comment
     ;
-    var deps = std.array_list.Managed([]const u8).init(a);
+    var deps: std.ArrayList([]const u8) = .empty;
     defer {
         for (deps.items) |d| a.free(d);
-        deps.deinit();
+        deps.deinit(a);
     }
     const count = try parseRequirementsTxt(a, content, &deps);
     try testing.expectEqual(@as(usize, 2), count);
@@ -354,7 +354,7 @@ test "validateDependencies keeps multi-constraint specifiers" {
         "requests>=2.8.1, <3.0",
     };
     var valid = try validateDependencies(a, &raw, "test");
-    defer valid.deinit();
+    defer valid.deinit(a);
     try testing.expectEqual(@as(usize, 2), valid.items.len);
     try testing.expectEqualStrings("numpy>=1.26.0,<2.0", valid.items[0]);
     try testing.expectEqualStrings("requests>=2.8.1, <3.0", valid.items[1]);
@@ -372,16 +372,16 @@ test "parsePyprojectToml: single-line dependencies array does not swallow later 
         \\name = "proj"
         \\version = "1.2.3"
     ;
-    var deps = std.array_list.Managed([]const u8).init(a);
+    var deps: std.ArrayList([]const u8) = .empty;
     defer {
         for (deps.items) |d| a.free(d);
-        deps.deinit();
+        deps.deinit(a);
     }
     const count = try parsePyprojectToml(a, content, &deps);
     try testing.expectEqual(@as(usize, 2), count);
     for (deps.items) |d| {
-        try testing.expect(std.mem.indexOf(u8, d, "proj") == null);
-        try testing.expect(std.mem.indexOf(u8, d, "1.2.3") == null);
+        try testing.expect(std.mem.find(u8, d, "proj") == null);
+        try testing.expect(std.mem.find(u8, d, "1.2.3") == null);
     }
 }
 
@@ -395,16 +395,16 @@ test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
         \\    "numpy>=1.26.0, <2.0",
         \\]
     ;
-    var deps = std.array_list.Managed([]const u8).init(a);
+    var deps: std.ArrayList([]const u8) = .empty;
     defer {
         for (deps.items) |d| a.free(d);
-        deps.deinit();
+        deps.deinit(a);
     }
     const count = try parsePyprojectToml(a, content, &deps);
     try testing.expect(count >= 1);
     var found = false;
     for (deps.items) |d| {
-        if (std.mem.indexOf(u8, d, "numpy") != null and std.mem.indexOf(u8, d, "<2.0") != null) found = true;
+        if (std.mem.find(u8, d, "numpy") != null and std.mem.find(u8, d, "<2.0") != null) found = true;
     }
     try testing.expect(found);
 }
@@ -451,10 +451,10 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
         \\description
         \\"""
     ;
-    var deps = std.array_list.Managed([]const u8).init(a);
+    var deps: std.ArrayList([]const u8) = .empty;
     defer {
         for (deps.items) |d| a.free(d);
-        deps.deinit();
+        deps.deinit(a);
     }
     const count = try parsePyprojectToml(a, content, &deps);
     // Exactly the three [project].dependencies entries — not the optional-deps or tool config.
@@ -463,7 +463,7 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
     try testing.expectEqualStrings("numpy>=1.26.0, <2.0", deps.items[1]);
     try testing.expectEqualStrings("mkdocstrings[python]>=0.19", deps.items[2]);
     for (deps.items) |d| {
-        try testing.expect(std.mem.indexOf(u8, d, "pytest") == null);
-        try testing.expect(std.mem.indexOf(u8, d, "ruff") == null);
+        try testing.expect(std.mem.find(u8, d, "pytest") == null);
+        try testing.expect(std.mem.find(u8, d, "ruff") == null);
     }
 }

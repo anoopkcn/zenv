@@ -209,24 +209,24 @@ pub fn handleSetupCommand(
     const env_dir_path = try paths.venvPath(allocator, setup_cwd, config.base_dir, env_name);
     defer allocator.free(env_dir_path);
 
-    const log_path = try std.fs.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
+    const log_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
     defer allocator.free(log_path);
 
     try output.startLogging(allocator, log_path);
     defer output.stopLogging();
 
     // Log the command that was used to start the setup
-    var command_str = std.array_list.Managed(u8).init(allocator);
+    var command_str: std.ArrayList(u8) = .empty;
     // Note: don't free command_str until after installation is complete
     for (args, 0..) |arg, i| {
         if (i > 0) {
-            command_str.print(" ", .{}) catch {};
+            command_str.print(allocator, " ", .{}) catch {};
         }
-        if (std.mem.indexOf(u8, arg, " ") != null) {
+        if (std.mem.find(u8, arg, " ") != null) {
             // Quote arguments with spaces
-            command_str.print("\"{s}\"", .{arg}) catch {};
+            command_str.print(allocator, "\"{s}\"", .{arg}) catch {};
         } else {
-            command_str.print("{s}", .{arg}) catch {};
+            command_str.print(allocator, "{s}", .{arg}) catch {};
         }
     }
     output.print(allocator, "Command: {s}", .{command_str.items}) catch {};
@@ -251,7 +251,7 @@ pub fn handleSetupCommand(
     }
 
     // 1. Combine Dependencies
-    var all_required_deps = std.array_list.Managed([]const u8).init(allocator);
+    var all_required_deps: std.ArrayList([]const u8) = .empty;
     // Track ownership of item strings properly
     var deps_need_cleanup = true;
     // Defer cleanup if needed
@@ -264,10 +264,10 @@ pub fn handleSetupCommand(
                     allocator.free(item);
                 }
             }
-            all_required_deps.deinit();
+            all_required_deps.deinit(allocator);
         } else {
             // Just deinit the list if we don't need to cleanup individual items
-            all_required_deps.deinit();
+            all_required_deps.deinit(allocator);
         }
     }
 
@@ -277,7 +277,7 @@ pub fn handleSetupCommand(
         for (env_config.dependencies.items) |dep| {
             output.print(allocator, "  - Config dependency: {s}", .{dep}) catch {};
             // Don't dupe here, assume config owns them or they are literals
-            try all_required_deps.append(dep);
+            try all_required_deps.append(allocator, dep);
         }
     } else {
         output.print(allocator, "No dependencies specified in configuration.", .{}) catch {};
@@ -291,7 +291,7 @@ pub fn handleSetupCommand(
         output.print(allocator, "Adding {d} development dependencies from configuration:", .{env_config.dev_dependencies.items.len}) catch {};
         for (env_config.dev_dependencies.items) |dep| {
             output.print(allocator, "  - Dev dependency: {s}", .{dep}) catch {};
-            try all_required_deps.append(dep);
+            try all_required_deps.append(allocator, dep);
         }
     }
 
@@ -365,11 +365,11 @@ pub fn handleSetupCommand(
         modules_verified,
         command_str.items,
     ) catch |err| {
-        command_str.deinit();
+        command_str.deinit(allocator);
         return err;
     };
     deps_need_cleanup = false;
-    command_str.deinit();
+    command_str.deinit(allocator);
 
     // 4. Create the final activation script (using a separate utility)
     try aux.createActivationScript(allocator, env_config, env_name, base_dir);
@@ -859,7 +859,7 @@ pub fn handleRunCommand(
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
     const venv_path = registry.get(ref).venv_path;
 
-    const activate_path = std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
+    const activate_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" }) catch |err| {
         output.printError(allocator, "Failed to construct activation script path: {s}", .{@errorName(err)}) catch {};
         return err;
     };
@@ -886,7 +886,7 @@ pub fn handleRunCommand(
         .signal, .stopped => |sig| {
             // Saturate rather than truncate: an out-of-range signo must not
             // wrap into a small (success-looking) exit code.
-            const signo: u8 = std.math.cast(u8, @intFromEnum(sig)) orelse 255;
+            const signo: u8 = std.math.cast(u8, @backingInt(sig)) orelse 255;
             output.printError(allocator, "Command terminated by signal {d}", .{signo}) catch {};
             std.process.exit(128 +| signo);
         },
@@ -921,7 +921,7 @@ pub fn handleAddCommand(
     const project_dir = entry.project_dir;
 
     // The environment must already be built (its activation script exists).
-    const activate_path = try std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "activate.sh" });
+    const activate_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.venv_path, "activate.sh" });
     defer allocator.free(activate_path);
     runtime.access(activate_path) catch |err| {
         if (err == error.FileNotFound) {
@@ -932,7 +932,7 @@ pub fn handleAddCommand(
     };
 
     // The project's zenv.json tells us which manifest (if any) backs this env.
-    const zenv_json_path = try std.fs.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
+    const zenv_json_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
     defer allocator.free(zenv_json_path);
     const dep_file = try readDependencyFile(allocator, zenv_json_path, env_name);
     defer if (dep_file) |df| allocator.free(df);
@@ -956,7 +956,8 @@ fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const 
     };
     defer allocator.free(content);
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{ .allocate = .alloc_always }) catch return null;
+    // Strings may borrow from `content`; the one we return is duped.
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{ .allocate = .alloc_if_needed }) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const env_obj = parsed.value.object.get(env_name) orelse return null;
@@ -1019,10 +1020,10 @@ fn persistAddedPackage(
     }
 
     const df = dep_file.?;
-    const df_path = if (std.fs.path.isAbsolute(df))
+    const df_path = if (std.Io.Dir.path.isAbsolute(df))
         try allocator.dupe(u8, df)
     else
-        try std.fs.path.join(allocator, &[_][]const u8{ project_dir, df });
+        try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, df });
     defer allocator.free(df_path);
 
     if (std.mem.endsWith(u8, df, ".toml")) {
@@ -1065,12 +1066,12 @@ fn buildRunArgv(
     command: []const u8,
     command_args: []const []const u8,
 ) ![]const []const u8 {
-    var argv = std.array_list.Managed([]const u8).init(allocator);
-    errdefer argv.deinit();
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer argv.deinit(allocator);
     // `zenv` becomes $0 (used only in any bash error message); activate_path is $1.
-    try argv.appendSlice(&[_][]const u8{ "/bin/bash", "-c", run_runner, "zenv", activate_path, command });
-    try argv.appendSlice(command_args);
-    return argv.toOwnedSlice();
+    try argv.appendSlice(allocator, &[_][]const u8{ "/bin/bash", "-c", run_runner, "zenv", activate_path, command });
+    try argv.appendSlice(allocator, command_args);
+    return argv.toOwnedSlice(allocator);
 }
 
 test "buildRunArgv passes command and args through verbatim" {
@@ -1118,7 +1119,7 @@ pub fn handleLogCommand(
     const entry = registry.get(ref);
 
     // Construct the path to the log file
-    const log_file_path = std.fs.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
+    const log_file_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.venv_path, "zenv_setup.log" }) catch |err| {
         output.printError(allocator, "Failed to construct log file path: {s}", .{@errorName(err)}) catch {};
         return err;
     };
@@ -1189,13 +1190,14 @@ pub fn handleValidateCommand(
     }.handleValidationError;
 
     if (validation.validateConfigFile(allocator, validate_config_path)) |errors_opt| {
-        if (errors_opt) |errors| {
+        if (errors_opt) |found| {
             // Errors were found and already printed by validateConfigFile
             // Clean up errors
+            var errors = found;
             for (errors.items) |*err| {
                 err.deinit(allocator);
             }
-            errors.deinit();
+            errors.deinit(allocator);
             std.process.exit(1);
         } else {
             // No errors found
@@ -1337,11 +1339,11 @@ fn handleAliasList(
 ) !void {
     _ = args;
 
-    const aliases = registry.listAliases(allocator) catch |err| {
+    var aliases = registry.listAliases(allocator) catch |err| {
         output.printError(allocator, "Failed to list aliases: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    defer aliases.deinit();
+    defer aliases.deinit(allocator);
 
     if (aliases.items.len == 0) {
         output.print(allocator, "No aliases defined.", .{}) catch {};
@@ -1522,12 +1524,12 @@ pub fn handleRenameCommand(
 
     const old_venv_path = try allocator.dupe(u8, registry.get(ref).venv_path);
     defer allocator.free(old_venv_path);
-    const parent_dir = std.fs.path.dirname(old_venv_path) orelse {
+    const parent_dir = std.Io.Dir.path.dirname(old_venv_path) orelse {
         output.printError(allocator, "Invalid virtual environment path", .{}) catch {};
         return error.InvalidPath;
     };
 
-    const new_venv_path = std.fs.path.join(allocator, &[_][]const u8{ parent_dir, new_name }) catch {
+    const new_venv_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ parent_dir, new_name }) catch {
         output.printError(allocator, "Failed to construct new environment path", .{}) catch {};
         return error.OutOfMemory;
     };
@@ -1613,7 +1615,7 @@ pub fn handleRenameCommand(
 }
 
 fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
-    const activate_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, "activate.sh" });
+    const activate_script_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, "activate.sh" });
     defer allocator.free(activate_script_path);
 
     updateScriptFile(allocator, activate_script_path, old_name, new_name, old_venv_path, new_venv_path, .names_and_paths) catch |err| {
@@ -1624,7 +1626,7 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     // The setup script aux writes is `setup_env.sh`; `setup.sh` is kept for
     // environments created by older zenv versions. Both may be absent.
     for ([_][]const u8{ "setup_env.sh", "setup.sh" }) |setup_name| {
-        const setup_script_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, setup_name });
+        const setup_script_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, setup_name });
         defer allocator.free(setup_script_path);
 
         updateScriptFile(allocator, setup_script_path, old_name, new_name, old_venv_path, new_venv_path, .names_and_paths) catch |err| {
@@ -1644,7 +1646,7 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
     // rewrite them, drop it. Next activate falls back to `module load` and the
     // next `zenv setup` regenerates a correct cache.
     for ([_][]const u8{ template.MODULE_CACHE_FILE, template.MODULE_CACHE_STAMP }) |name| {
-        const cache_path = try std.fs.path.join(allocator, &[_][]const u8{ new_venv_path, name });
+        const cache_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, name });
         defer allocator.free(cache_path);
         runtime.deleteFile(cache_path) catch {}; // best-effort; missing is fine
     }
@@ -1667,15 +1669,15 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
     const content = try runtime.readFileAlloc(allocator, script_path, 1024 * 1024); // 1MB max
     defer allocator.free(content);
 
-    var updated_content = std.array_list.Managed(u8).init(allocator);
-    defer updated_content.deinit();
+    var updated_content: std.ArrayList(u8) = .empty;
+    defer updated_content.deinit(allocator);
 
     var i: usize = 0;
     while (i < content.len) {
         // Exact venv-path occurrences are checked FIRST so a name inside our own
         // venv path is consumed as part of the path, never as a bare token.
         if (i + old_venv_path.len <= content.len and std.mem.eql(u8, content[i .. i + old_venv_path.len], old_venv_path)) {
-            try updated_content.appendSlice(new_venv_path);
+            try updated_content.appendSlice(allocator, new_venv_path);
             i += old_venv_path.len;
             continue;
         }
@@ -1690,13 +1692,13 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
             const after_ok = i + old_name.len == content.len or (!isEnvNameChar(after) and after != '/');
 
             if (before_ok and after_ok) {
-                try updated_content.appendSlice(new_name);
+                try updated_content.appendSlice(allocator, new_name);
                 i += old_name.len;
                 continue;
             }
         }
 
-        try updated_content.append(content[i]);
+        try updated_content.append(allocator, content[i]);
         i += 1;
     }
 
@@ -1704,7 +1706,7 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
 }
 
 fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
-    const scripts_dir = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
+    const scripts_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
     defer allocator.free(scripts_dir);
 
     var dir = runtime.openDir(scripts_dir, .{ .iterate = true }) catch |err| {
@@ -1721,7 +1723,7 @@ fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name:
             std.mem.endsWith(u8, entry.name, ".py") or
             std.mem.endsWith(u8, entry.name, ".bash"))
         {
-            const script_path = try std.fs.path.join(allocator, &[_][]const u8{ scripts_dir, entry.name });
+            const script_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ scripts_dir, entry.name });
             defer allocator.free(script_path);
 
             // These are copies of USER hook scripts: rewrite only the exact venv
@@ -1736,7 +1738,7 @@ fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name:
 }
 
 fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []const u8, project_dir: []const u8) !void {
-    const config_path = try std.fs.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
+    const config_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
     defer allocator.free(config_path);
 
     output.print(allocator, "Updating local config: {s}", .{config_path}) catch {};

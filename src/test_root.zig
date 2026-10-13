@@ -15,5 +15,6 @@ test {
     _ = @import("utils/flags.zig");
     _ = @import("utils/manifest.zig");
     _ = @import("utils/autosetup.zig");
+    _ = @import("utils/output.zig");
     _ = @import("commands.zig");
 }

@@ -23,12 +23,12 @@ pub const ValidationError = struct {
 /// Validates a JSON configuration file and returns a list of validation errors
 /// or null if no errors are found. If validation errors are found, they will
 /// be printed to stderr.
-pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.array_list.Managed(ValidationError) {
+pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.ArrayList(ValidationError) {
     // Read the file content
     const file_content = runtime.readFileAlloc(allocator, file_path, 10 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
-            var errors = std.array_list.Managed(ValidationError).init(allocator);
-            try errors.append(ValidationError{
+            var errors: std.ArrayList(ValidationError) = .empty;
+            try errors.append(allocator, ValidationError{
                 .line = 0,
                 .column = 0,
                 .message = try allocator.dupe(u8, "Configuration file not found"),
@@ -55,8 +55,8 @@ pub fn validateConfigFile(allocator: Allocator, file_path: []const u8) !?std.arr
     return null;
 }
 
-const StrList = std.array_list.Managed([]const u8);
-const ErrorList = std.array_list.Managed(ValidationError);
+const StrList = std.ArrayList([]const u8);
+const ErrorList = std.ArrayList(ValidationError);
 
 /// Outcome of the single parse-and-validate seam: either the built config or the
 /// full list of positioned errors, never both.
@@ -72,10 +72,10 @@ pub const LoadResult = union(enum) {
 /// here and nowhere else. A passing result therefore guarantees the config also
 /// builds, which is the whole point of unifying the two former encodings.
 pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
-    var errors = ErrorList.init(allocator);
+    var errors: ErrorList = .empty;
     errdefer {
         for (errors.items) |*e| e.deinit(allocator);
-        errors.deinit();
+        errors.deinit(allocator);
     }
 
     var scanner = json.Scanner.initCompleteInput(allocator, content);
@@ -83,13 +83,15 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
+    // Strings may borrow from `content` (it outlives `parsed`); every built
+    // field is duped below.
     var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{
-        .allocate = .alloc_always,
+        .allocate = .alloc_if_needed,
     }) catch |err| {
-        try errors.append(ValidationError{
+        try errors.append(allocator, ValidationError{
             .line = diag.getLine(),
             .column = diag.getColumn(),
-            .message = try std.fmt.allocPrint(allocator, "Invalid JSON syntax: {s}", .{@errorName(err)}),
+            .message = try allocator.print("Invalid JSON syntax: {s}", .{@errorName(err)}),
             .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
             // field_path left null: a syntax error has no schema path.
         });
@@ -100,7 +102,7 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
 
     const root = parsed.value;
     if (root != .object) {
-        try errors.append(ValidationError{
+        try errors.append(allocator, ValidationError{
             .message = try allocator.dupe(u8, "Root configuration must be a JSON object"),
             .field_path = try allocator.dupe(u8, ""),
         });
@@ -121,13 +123,13 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
             allocator.free(config.base_dir);
             config.base_dir = dup;
         } else {
-            try errors.append(ValidationError{
+            try errors.append(allocator, ValidationError{
                 .message = try allocator.dupe(u8, "'base_dir' must be a string"),
                 .field_path = try allocator.dupe(u8, "base_dir"),
             });
         }
     } else {
-        try errors.append(ValidationError{
+        try errors.append(allocator, ValidationError{
             .message = try allocator.dupe(u8, "Missing required 'base_dir' field"),
             .field_path = try allocator.dupe(u8, ""),
         });
@@ -156,7 +158,7 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     }
 
     if (!has_envs) {
-        try errors.append(ValidationError{
+        try errors.append(allocator, ValidationError{
             .message = try allocator.dupe(u8, "At least one environment must be defined"),
             .field_path = try allocator.dupe(u8, ""),
         });
@@ -168,7 +170,7 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
         return .{ .errors = errors };
     }
 
-    errors.deinit();
+    errors.deinit(allocator);
     return .{ .config = config };
 }
 
@@ -183,8 +185,8 @@ fn validateAndBuildEnvironment(
     env_name: []const u8,
 ) !?config_module.EnvironmentConfig {
     if (value != .object) {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "Environment '{s}' must be an object", .{env_name}),
+        try errors.append(allocator, ValidationError{
+            .message = try allocator.print("Environment '{s}' must be an object", .{env_name}),
             .field_path = try allocator.dupe(u8, env_name),
         });
         return null;
@@ -196,32 +198,32 @@ fn validateAndBuildEnvironment(
     // target_machines: required, non-empty array of strings.
     if (value.object.get("target_machines")) |tm| {
         if (tm != .array) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines' must be an array", .{env_name}),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{env_name}),
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', 'target_machines' must be an array", .{env_name}),
+                .field_path = try allocator.print("{s}.target_machines", .{env_name}),
             });
         } else {
             if (tm.array.items.len == 0) {
-                try errors.append(ValidationError{
-                    .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines' must not be empty", .{env_name}),
-                    .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines", .{env_name}),
+                try errors.append(allocator, ValidationError{
+                    .message = try allocator.print("In environment '{s}', 'target_machines' must not be empty", .{env_name}),
+                    .field_path = try allocator.print("{s}.target_machines", .{env_name}),
                 });
             }
             for (tm.array.items, 0..) |m, i| {
                 if (m != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'target_machines[{d}]' must be a string", .{ env_name, i }),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.target_machines[{d}]", .{ env_name, i }),
+                    try errors.append(allocator, ValidationError{
+                        .message = try allocator.print("In environment '{s}', 'target_machines[{d}]' must be a string", .{ env_name, i }),
+                        .field_path = try allocator.print("{s}.target_machines[{d}]", .{ env_name, i }),
                     });
                 }
             }
             const built = try config_module.Parse.getStringArray(allocator, tm);
-            env.target_machines.deinit();
+            env.target_machines.deinit(allocator);
             env.target_machines = built;
         }
     } else {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "Environment '{s}' is missing required 'target_machines' field", .{env_name}),
+        try errors.append(allocator, ValidationError{
+            .message = try allocator.print("Environment '{s}' is missing required 'target_machines' field", .{env_name}),
             .field_path = try allocator.dupe(u8, env_name),
         });
     }
@@ -242,9 +244,9 @@ fn validateAndBuildEnvironment(
         if (mc == .bool) {
             env.module_cache = mc.bool;
         } else if (mc != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', 'module_cache' must be a boolean or null", .{env_name}),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.module_cache", .{env_name}),
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', 'module_cache' must be a boolean or null", .{env_name}),
+                .field_path = try allocator.print("{s}.module_cache", .{env_name}),
             });
         }
     }
@@ -270,9 +272,9 @@ fn validateAndBuildEnvironment(
             }
         }
         if (!ok) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' is not a recognized field.", .{ env_name, fname }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, fname }),
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', '{s}' is not a recognized field.", .{ env_name, fname }),
+                .field_path = try allocator.print("{s}.{s}", .{ env_name, fname }),
             });
         }
     }
@@ -293,9 +295,9 @@ fn buildOptString(
     switch (v) {
         .string => |s| out.* = try allocator.dupe(u8, s),
         .null => {},
-        else => try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be a string or null", .{ env_name, field }),
-            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        else => try errors.append(allocator, ValidationError{
+            .message = try allocator.print("In environment '{s}', '{s}' must be a string or null", .{ env_name, field }),
+            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
         }),
     }
 }
@@ -311,22 +313,22 @@ fn buildOptStringArray(
 ) !void {
     const v = value.object.get(field) orelse return;
     if (v != .array) {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an array", .{ env_name, field }),
-            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        try errors.append(allocator, ValidationError{
+            .message = try allocator.print("In environment '{s}', '{s}' must be an array", .{ env_name, field }),
+            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
         });
         return;
     }
     for (v.array.items, 0..) |item, i| {
         if (item != .string) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}[{d}]' must be a string", .{ env_name, field, i }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}[{d}]", .{ env_name, field, i }),
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', '{s}[{d}]' must be a string", .{ env_name, field, i }),
+                .field_path = try allocator.print("{s}.{s}[{d}]", .{ env_name, field, i }),
             });
         }
     }
     const built = try config_module.Parse.getStringArray(allocator, v);
-    out.deinit();
+    out.deinit(allocator);
     out.* = built;
 }
 
@@ -341,9 +343,9 @@ fn validateAndBuildScriptObject(
     const v = value.object.get(field) orelse return null;
     if (v == .null) return null;
     if (v != .object) {
-        try errors.append(ValidationError{
-            .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
-            .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ env_name, field }),
+        try errors.append(allocator, ValidationError{
+            .message = try allocator.print("In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
+            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
         });
         return null;
     }
@@ -355,9 +357,9 @@ fn validateAndBuildScriptObject(
         switch (script) {
             .string => |s| sc.script = try allocator.dupe(u8, s),
             .null => {},
-            else => try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.script' must be a string or null", .{ env_name, field }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.script", .{ env_name, field }),
+            else => try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', '{s}.script' must be a string or null", .{ env_name, field }),
+                .field_path = try allocator.print("{s}.{s}.script", .{ env_name, field }),
             }),
         }
     }
@@ -366,17 +368,17 @@ fn validateAndBuildScriptObject(
         if (cmds == .array) {
             for (cmds.array.items, 0..) |c, i| {
                 if (c != .string) {
-                    try errors.append(ValidationError{
-                        .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands[{d}]' must be a string", .{ env_name, field, i }),
-                        .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands[{d}]", .{ env_name, field, i }),
+                    try errors.append(allocator, ValidationError{
+                        .message = try allocator.print("In environment '{s}', '{s}.commands[{d}]' must be a string", .{ env_name, field, i }),
+                        .field_path = try allocator.print("{s}.{s}.commands[{d}]", .{ env_name, field, i }),
                     });
                 }
             }
             sc.commands = try config_module.Parse.getStringArray(allocator, cmds);
         } else if (cmds != .null) {
-            try errors.append(ValidationError{
-                .message = try std.fmt.allocPrint(allocator, "In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
-                .field_path = try std.fmt.allocPrint(allocator, "{s}.{s}.commands", .{ env_name, field }),
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
+                .field_path = try allocator.print("{s}.{s}.commands", .{ env_name, field }),
             });
         }
     }
@@ -419,10 +421,10 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
     scanner.enableDiagnostics(&diag);
 
     const Frame = struct { is_object: bool, expecting_key: bool, index: usize, base_len: usize };
-    var frames = std.array_list.Managed(Frame).init(allocator);
-    defer frames.deinit();
-    var path = std.array_list.Managed(u8).init(allocator);
-    defer path.deinit();
+    var frames: std.ArrayList(Frame) = .empty;
+    defer frames.deinit(allocator);
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(allocator);
     var have_root = false;
 
     while (true) {
@@ -438,8 +440,8 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
                 have_root = true;
                 try map.put("", before);
                 switch (tok) {
-                    .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = 0 }),
-                    .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = 0 }),
+                    .object_begin => try frames.append(allocator, .{ .is_object = true, .expecting_key = true, .index = 0, .base_len = 0 }),
+                    .array_begin => try frames.append(allocator, .{ .is_object = false, .expecting_key = false, .index = 0, .base_len = 0 }),
                     else => {},
                 }
             }
@@ -455,8 +457,8 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
                     },
                     .string, .allocated_string => |key| {
                         path.shrinkRetainingCapacity(frames.items[ti].base_len);
-                        if (frames.items[ti].base_len > 0) try path.append('.');
-                        try path.appendSlice(key);
+                        if (frames.items[ti].base_len > 0) try path.append(allocator, '.');
+                        try path.appendSlice(allocator, key);
                         frames.items[ti].expecting_key = false;
                     },
                     else => {},
@@ -466,8 +468,8 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
                 try map.put(try allocator.dupe(u8, path.items), before);
                 frames.items[ti].expecting_key = true;
                 switch (tok) {
-                    .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
-                    .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
+                    .object_begin => try frames.append(allocator, .{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
+                    .array_begin => try frames.append(allocator, .{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
                     else => {},
                 }
             }
@@ -478,12 +480,12 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
                 },
                 else => {
                     path.shrinkRetainingCapacity(frames.items[ti].base_len);
-                    try path.print("[{d}]", .{frames.items[ti].index});
+                    try path.print(allocator, "[{d}]", .{frames.items[ti].index});
                     try map.put(try allocator.dupe(u8, path.items), before);
                     frames.items[ti].index += 1;
                     switch (tok) {
-                        .object_begin => try frames.append(.{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
-                        .array_begin => try frames.append(.{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
+                        .object_begin => try frames.append(allocator, .{ .is_object = true, .expecting_key = true, .index = 0, .base_len = path.items.len }),
+                        .array_begin => try frames.append(allocator, .{ .is_object = false, .expecting_key = false, .index = 0, .base_len = path.items.len }),
                         else => {},
                     }
                 },
@@ -539,7 +541,7 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
 }
 
 /// Prints validation errors to stderr
-pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Managed(ValidationError)) void {
+pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(ValidationError)) void {
     for (errors.items, 0..) |err, i| {
         if (i > 0) {
             output.printError(allocator, "", .{}) catch {};
@@ -562,17 +564,17 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Manage
 
             // Print a marker pointing to the column
             if (err.column > 0) {
-                var marker = std.array_list.Managed(u8).init(std.heap.page_allocator);
-                defer marker.deinit();
+                var marker: std.ArrayList(u8) = .empty;
+                defer marker.deinit(std.heap.page_allocator);
 
                 // Create spaces up to the column
                 const spaces = @min(err.column - 1, ctx.len);
                 for (0..spaces) |_| {
-                    marker.append(' ') catch break;
+                    marker.append(std.heap.page_allocator, ' ') catch break;
                 }
 
                 // Add the marker
-                marker.append('^') catch {};
+                marker.append(std.heap.page_allocator, '^') catch {};
 
                 output.printError(allocator, "         {s}", .{marker.items}) catch {};
             }
@@ -586,12 +588,12 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.array_list.Manage
 pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_module.ZenvConfig {
     const content = runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
-            var errors = std.array_list.Managed(ValidationError).init(allocator);
+            var errors: std.ArrayList(ValidationError) = .empty;
             defer {
                 for (errors.items) |*e| e.deinit(allocator);
-                errors.deinit();
+                errors.deinit(allocator);
             }
-            try errors.append(ValidationError{
+            try errors.append(allocator, ValidationError{
                 .message = try allocator.dupe(u8, "Configuration file not found"),
                 .context = try allocator.dupe(u8, config_path),
             });
@@ -607,7 +609,7 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
             var e = errs;
             defer {
                 for (e.items) |*x| x.deinit(allocator);
-                e.deinit();
+                e.deinit(allocator);
             }
             printValidationErrors(allocator, e);
             return error.InvalidFormat;
@@ -620,9 +622,9 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
 
 const testing = std.testing;
 
-fn freeErrors(a: Allocator, errs: *std.array_list.Managed(ValidationError)) void {
+fn freeErrors(a: Allocator, errs: *std.ArrayList(ValidationError)) void {
     for (errs.items) |*e| e.deinit(a);
-    errs.deinit();
+    errs.deinit(a);
 }
 
 test "loadConfig builds a valid config (the formerly-untested build path)" {
@@ -693,7 +695,7 @@ test "loadConfig: a non-string array item is rejected (strict; was silently skip
             defer freeErrors(a, e);
             var found = false;
             for (e.items) |it| {
-                if (std.mem.indexOf(u8, it.message, "modules[1]") != null) found = true;
+                if (std.mem.find(u8, it.message, "modules[1]") != null) found = true;
             }
             try testing.expect(found);
         },
@@ -715,7 +717,7 @@ test "loadConfig: an unknown environment field is rejected by the whitelist" {
             defer freeErrors(a, e);
             var found = false;
             for (e.items) |it| {
-                if (std.mem.indexOf(u8, it.message, "bogus") != null) found = true;
+                if (std.mem.find(u8, it.message, "bogus") != null) found = true;
             }
             try testing.expect(found);
         },
@@ -798,7 +800,7 @@ test "validateJsonContent: missing required base_dir is reported" {
     defer freeErrors(a, &errs);
     var found = false;
     for (errs.items) |e| {
-        if (std.mem.indexOf(u8, e.message, "base_dir") != null) found = true;
+        if (std.mem.find(u8, e.message, "base_dir") != null) found = true;
     }
     try testing.expect(found);
 }

@@ -55,7 +55,7 @@ fn createSetupScript(
     const venv_dir = try paths.venvPath(allocator, cwd_path, base_dir, env_name);
     defer allocator.free(venv_dir);
 
-    const scripts_rel_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "scripts" });
+    const scripts_rel_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, "scripts" });
     defer allocator.free(scripts_rel_path);
 
     // Create the scripts directory
@@ -68,7 +68,7 @@ fn createSetupScript(
     };
 
     // Handle setup hook script copying if present
-    var setup_hook_block = std.array_list.Managed(u8).init(allocator);
+    var setup_hook_block: std.Io.Writer.Allocating = .init(allocator);
     defer setup_hook_block.deinit();
     var setup_hook_path: ?[]const u8 = null;
     defer if (setup_hook_path) |path| allocator.free(path);
@@ -88,7 +88,7 @@ fn createSetupScript(
         defer allocator.free(dest_path);
         setup_hook_path = try allocator.dupe(u8, dest_path);
 
-        try setup_hook_block.print(
+        try setup_hook_block.writer.print(
             \\
             \\# Execute custom setup script if it exists
             \\if [ -f "{s}" ]; then
@@ -139,7 +139,7 @@ fn createSetupScript(
         if (default_python) |path| {
             defer allocator.free(path); // getDefaultPythonPath returns an owned copy
             // Build the full path to the Python binary
-            const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
+            const python_bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
             defer allocator.free(python_bin);
             fallback_python = try allocator.dupe(u8, python_bin);
             fallback_python_owned = fallback_python;
@@ -160,7 +160,7 @@ fn createSetupScript(
                 if (default_python) |path| {
                     defer allocator.free(path); // owned copy from getDefaultPythonPath
                     // Build the full path to the Python binary
-                    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
+                    const python_bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ path, "bin", "python3" });
                     defer allocator.free(python_bin);
                     fallback_python = try allocator.dupe(u8, python_bin);
                     fallback_python_owned = fallback_python;
@@ -201,15 +201,15 @@ fn createSetupScript(
     const module_cache_active = env_config.module_cache and env_config.modules.items.len > 0;
     try replacements.put("MODULE_CACHE_ENABLED_VALUE", if (module_cache_active) "MODULE_CACHE_ENABLED=true" else "MODULE_CACHE_ENABLED=false");
 
-    const cache_version_str = try std.fmt.allocPrint(allocator, "{d}", .{template.MODULE_CACHE_VERSION});
+    const cache_version_str = try allocator.print("{d}", .{template.MODULE_CACHE_VERSION});
     defer allocator.free(cache_version_str);
     try replacements.put("CACHE_VERSION", cache_version_str);
 
-    const module_cache_file = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_FILE });
+    const module_cache_file = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_FILE });
     defer allocator.free(module_cache_file);
     try replacements.put("MODULE_CACHE_FILE", module_cache_file);
 
-    const module_cache_stamp = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_STAMP });
+    const module_cache_stamp = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, template.MODULE_CACHE_STAMP });
     defer allocator.free(module_cache_stamp);
     try replacements.put("MODULE_CACHE_STAMP", module_cache_stamp);
 
@@ -224,9 +224,9 @@ fn createSetupScript(
     try replacements.put("MODULES_SIG", modules_sig);
 
     // Generate the module loading block
-    var module_loading_block = std.array_list.Managed(u8).init(allocator);
+    var module_loading_block: std.Io.Writer.Allocating = .init(allocator);
     defer module_loading_block.deinit();
-    const module_writer = &module_loading_block;
+    const module_writer = &module_loading_block.writer;
 
     if (env_config.modules.items.len > 0) {
         if (env_config.modules_file) |modules_file| {
@@ -240,7 +240,7 @@ fn createSetupScript(
             // shell strings so a stray quote can't break the generated script.
             try module_writer.print("echo '  - Module #{d}: \"", .{idx + 1});
             try template.appendSqEscaped(module_writer, module_name);
-            try module_writer.appendSlice("\"'\n");
+            try module_writer.writeAll("\"'\n");
         }
 
         // The set +e and error checking are now in the template itself, based on modules_verified
@@ -248,37 +248,35 @@ fn createSetupScript(
         // Load each module
         for (env_config.modules.items) |module_name| {
             // Add debug information before loading
-            try module_writer.appendSlice("info \"Attempting to load module: '");
+            try module_writer.writeAll("info \"Attempting to load module: '");
             try template.appendSqEscaped(module_writer, module_name);
-            try module_writer.appendSlice("'\"\n");
+            try module_writer.writeAll("'\"\n");
 
             if (modules_verified) {
                 // Just load the module when pre-verified, we already checked they exist.
                 // A failure still flips ZENV_MOD_OK so a half-loaded env is never cached.
-                try module_writer.appendSlice("safe_module_load '");
+                try module_writer.writeAll("safe_module_load '");
                 try template.appendSqEscaped(module_writer, module_name);
-                try module_writer.appendSlice("' || ZENV_MOD_OK=0\n");
+                try module_writer.writeAll("' || ZENV_MOD_OK=0\n");
             } else {
                 // Load with error handling when not pre-verified
-                try module_writer.appendSlice("safe_module_load '");
+                try module_writer.writeAll("safe_module_load '");
                 try template.appendSqEscaped(module_writer, module_name);
-                try module_writer.appendSlice("' || { handle_module_error '");
+                try module_writer.writeAll("' || { handle_module_error '");
                 try template.appendSqEscaped(module_writer, module_name);
-                try module_writer.appendSlice("'; ZENV_MOD_OK=0; }\n");
+                try module_writer.writeAll("'; ZENV_MOD_OK=0; }\n");
             }
         }
     } else {
         try module_writer.print("echo 'Info: No modules specified to load'\n", .{});
     }
 
-    const module_loading_slice = try module_loading_block.toOwnedSlice();
-    defer allocator.free(module_loading_slice);
-    try replacements.put("MODULE_LOADING_BLOCK", module_loading_slice);
+    try replacements.put("MODULE_LOADING_BLOCK", module_loading_block.written());
 
     // Generate custom setup commands block
-    var custom_setup_commands_block = std.array_list.Managed(u8).init(allocator);
+    var custom_setup_commands_block: std.Io.Writer.Allocating = .init(allocator);
     defer custom_setup_commands_block.deinit();
-    const custom_writer = &custom_setup_commands_block;
+    const custom_writer = &custom_setup_commands_block.writer;
 
     if (env_config.setup != null and env_config.setup.?.commands != null and env_config.setup.?.commands.?.items.len > 0) {
         try custom_writer.print("echo 'Info: Step 5: Running custom setup commands'\n", .{});
@@ -290,14 +288,10 @@ fn createSetupScript(
         try custom_writer.print("\n", .{});
     }
 
-    const custom_commands_slice = try custom_setup_commands_block.toOwnedSlice();
-    defer allocator.free(custom_commands_slice);
-    try replacements.put("CUSTOM_SETUP_COMMANDS_BLOCK", custom_commands_slice);
+    try replacements.put("CUSTOM_SETUP_COMMANDS_BLOCK", custom_setup_commands_block.written());
 
     // Add the hook script block to replacements
-    const setup_hook_slice = try setup_hook_block.toOwnedSlice();
-    defer allocator.free(setup_hook_slice);
-    try replacements.put("SETUP_HOOK_BLOCK", setup_hook_slice);
+    try replacements.put("SETUP_HOOK_BLOCK", setup_hook_block.written());
 
     const processed_content = try template.processTemplateString(allocator, SETUP_ENV_TEMPLATE, replacements);
     return processed_content;

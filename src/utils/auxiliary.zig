@@ -57,7 +57,7 @@ pub fn setupEnvironmentDirectory(
     output.print(allocator, "Ensuring virtual environment base directory '{s}' exists...", .{base_dir}) catch {};
     try runtime.makePath(base_dir);
 
-    const joined = try std.fs.path.join(allocator, &[_][]const u8{ base_dir, env_name });
+    const joined = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_dir, env_name });
     defer allocator.free(joined);
 
     output.print(allocator, "Creating environment directory '{s}'...", .{joined}) catch {};
@@ -69,13 +69,13 @@ pub fn installDependencies(
     env_config: *const EnvironmentConfig,
     env_name: []const u8,
     base_dir: []const u8,
-    all_required_deps: *std.array_list.Managed([]const u8),
+    all_required_deps: *std.ArrayList([]const u8),
     flags: CommandFlags,
     modules_verified: bool,
     command_str: ?[]const u8,
 ) !void {
     // Convert ArrayList to owned slice for more efficient processing
-    const deps_slice = try all_required_deps.toOwnedSlice();
+    const deps_slice = try all_required_deps.toOwnedSlice(allocator);
     // Handle memory cleanup
     defer {
         // Clean up individually owned strings but not config-provided ones
@@ -125,7 +125,7 @@ pub fn setupEnvironment(
         // OR to slices owned by the caller of setupEnvironment (e.g., duplicated from reading files).
         // It does NOT allocate new strings for the deps itself. The caller owns the deps strings.
         // Therefore, we only need to deinit the ArrayList itself.
-        valid_deps_list.deinit();
+        valid_deps_list.deinit(allocator);
     }
 
     // One venv-path derivation for the whole setup; everything below joins
@@ -135,7 +135,7 @@ pub fn setupEnvironment(
     defer allocator.free(venv_dir);
     output.print(allocator, "Environment directory: '{s}'", .{venv_dir}) catch {};
 
-    const req_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "requirements.txt" });
+    const req_abs_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, "requirements.txt" });
     defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
@@ -171,7 +171,7 @@ pub fn setupEnvironment(
     }
     output.print(allocator, "Created requirements file: {s}", .{req_abs_path}) catch {};
 
-    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_dir, "setup_env.sh" });
+    const script_abs_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, "setup_env.sh" });
     defer allocator.free(script_abs_path);
 
     // Generate setup script content using the template

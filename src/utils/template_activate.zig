@@ -42,7 +42,7 @@ fn createActivationScript(
 
     // Scripts directory for hook scripts (absolute, so it can be baked into
     // the generated activate.sh and passed to the shared copyHookScript helper).
-    const scripts_dir = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
+    const scripts_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
     defer allocator.free(scripts_dir);
 
     // Create the scripts directory (idempotent, works for absolute and relative)
@@ -54,7 +54,7 @@ fn createActivationScript(
     };
 
     // Handle activation script copying if present
-    var activate_hook_block = std.array_list.Managed(u8).init(allocator);
+    var activate_hook_block: std.Io.Writer.Allocating = .init(allocator);
     defer activate_hook_block.deinit();
     var activate_hook_path: ?[]const u8 = null;
     defer if (activate_hook_path) |path| allocator.free(path);
@@ -66,7 +66,7 @@ fn createActivationScript(
             defer allocator.free(dest_path);
             activate_hook_path = try allocator.dupe(u8, dest_path);
 
-            try activate_hook_block.print(
+            try activate_hook_block.writer.print(
                 \\
                 \\if [ -f "{s}" ]; then
                 \\  source "{s}" || echo "Warning: Activation script failed with exit code $?"
@@ -78,7 +78,7 @@ fn createActivationScript(
         } else |err| {
             output.printError(allocator, "Failed to copy activation script: {s}", .{@errorName(err)}) catch {};
             // Continue anyway, but add a warning in the script
-            try activate_hook_block.print(
+            try activate_hook_block.writer.print(
                 \\
                 \\echo "Warning: Failed to copy activation script from '{s}'"
                 \\
@@ -86,7 +86,7 @@ fn createActivationScript(
         }
     }
 
-    const script_abs_path = try std.fs.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" });
+    const script_abs_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" });
     defer allocator.free(script_abs_path);
 
     // Create a map for template replacements
@@ -101,7 +101,7 @@ fn createActivationScript(
     try replacements.put("VENV_PATH", venv_path);
 
     // Quoted so a venv path containing spaces survives the shell.
-    const zenv_env_dir_export_line = try std.fmt.allocPrint(allocator, "export ZENV_ENV_DIR=\"{s}\"", .{venv_path});
+    const zenv_env_dir_export_line = try allocator.print("export ZENV_ENV_DIR=\"{s}\"", .{venv_path});
     defer allocator.free(zenv_env_dir_export_line);
     try replacements.put("ZENV_ENV_DIR", zenv_env_dir_export_line);
 
@@ -111,25 +111,21 @@ fn createActivationScript(
     try replacements.put("MODULE_SECTION", module_section);
 
     // Generate activate commands block
-    var activate_commands_block = std.array_list.Managed(u8).init(allocator);
+    var activate_commands_block: std.Io.Writer.Allocating = .init(allocator);
     defer activate_commands_block.deinit();
 
     if (env_config.activate != null and env_config.activate.?.commands != null and env_config.activate.?.commands.?.items.len > 0) {
-        try activate_commands_block.print("# Run custom activation commands\n", .{});
+        try activate_commands_block.writer.print("# Run custom activation commands\n", .{});
         for (env_config.activate.?.commands.?.items) |cmd| {
-            try activate_commands_block.print("{s}\n", .{cmd});
+            try activate_commands_block.writer.print("{s}\n", .{cmd});
         }
-        try activate_commands_block.print("\n", .{});
+        try activate_commands_block.writer.print("\n", .{});
     }
 
-    const activate_commands_slice = try activate_commands_block.toOwnedSlice();
-    defer allocator.free(activate_commands_slice);
-    try replacements.put("ACTIVATE_COMMANDS_BLOCK", activate_commands_slice);
+    try replacements.put("ACTIVATE_COMMANDS_BLOCK", activate_commands_block.written());
 
     // Add the hook script block to replacements
-    const activate_hook_slice = try activate_hook_block.toOwnedSlice();
-    defer allocator.free(activate_hook_slice);
-    try replacements.put("ACTIVATE_HOOK_BLOCK", activate_hook_slice);
+    try replacements.put("ACTIVATE_HOOK_BLOCK", activate_hook_block.written());
 
     const processed_content = try template.processTemplateString(allocator, ACTIVATION_TEMPLATE, replacements);
     defer allocator.free(processed_content);
@@ -146,19 +142,19 @@ fn createActivationScript(
 // shared by the no-cache path and the cache-miss fallback. Module names come
 // from zenv.json, so they go through appendSqEscaped to stay safe inside the
 // single-quoted shell strings.
-fn writeModuleLoadLines(buf: *std.array_list.Managed(u8), modules: []const []const u8) !void {
+fn writeModuleLoadLines(buf: *std.Io.Writer, modules: []const []const u8) !void {
     try buf.print("echo 'Info: Loading {d} modules'\n", .{modules.len});
     for (modules, 0..) |module_name, idx| {
         try buf.print("echo '  - Module {d}: \"", .{idx + 1});
         try template.appendSqEscaped(buf, module_name);
-        try buf.appendSlice("\"'\n");
+        try buf.writeAll("\"'\n");
     }
     for (modules) |module_name| {
-        try buf.appendSlice("safe_module_load '");
+        try buf.writeAll("safe_module_load '");
         try template.appendSqEscaped(buf, module_name);
-        try buf.appendSlice("' || handle_module_error '");
+        try buf.writeAll("' || handle_module_error '");
         try template.appendSqEscaped(buf, module_name);
-        try buf.appendSlice("'\n");
+        try buf.writeAll("'\n");
     }
 }
 
@@ -177,9 +173,9 @@ fn buildModuleSection(
     module_cache: bool,
     venv_path: []const u8,
 ) ![]u8 {
-    var buf = std.array_list.Managed(u8).init(allocator);
-    errdefer buf.deinit();
-    const w = &buf;
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     if (modules.len == 0) {
         // Preserve the historical behavior: still purge on systems with Lmod.
@@ -201,11 +197,11 @@ fn buildModuleSection(
     // Cache-aware path. Bake absolute, shell-single-quoted cache paths.
     try w.print("if command -v module >/dev/null 2>&1; then\n", .{});
 
-    try w.appendSlice("  __zenv_cache='");
+    try w.writeAll("  __zenv_cache='");
     try template.appendSqEscaped(w, venv_path);
     try w.print("/{s}'\n", .{template.MODULE_CACHE_FILE});
 
-    try w.appendSlice("  __zenv_stamp='");
+    try w.writeAll("  __zenv_stamp='");
     try template.appendSqEscaped(w, venv_path);
     try w.print("/{s}'\n", .{template.MODULE_CACHE_STAMP});
 
@@ -233,14 +229,14 @@ fn buildModuleSection(
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null) catch |err| {
+    std.testing.expect(std.mem.find(u8, haystack, needle) != null) catch |err| {
         std.debug.print("expected to find:\n  {s}\nin:\n{s}\n", .{ needle, haystack });
         return err;
     };
 }
 
 fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) == null);
+    try std.testing.expect(std.mem.find(u8, haystack, needle) == null);
 }
 
 test "buildModuleSection: no modules keeps historical purge, no cache machinery" {

@@ -35,8 +35,8 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
     };
     defer allocator.free(content);
 
-    var out = std.array_list.Managed(u8).init(allocator);
-    defer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
 
     var replaced = false;
     var it = std.mem.splitScalar(u8, content, '\n');
@@ -49,21 +49,21 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
         const trimmed = std.mem.trim(u8, line, " \t\r");
         const is_entry = trimmed.len > 0 and trimmed[0] != '#';
         if (is_entry and !replaced and parse_deps.samePackage(trimmed, spec)) {
-            if (!first) try out.append('\n');
-            try out.appendSlice(spec);
+            if (!first) try out.append(allocator, '\n');
+            try out.appendSlice(allocator, spec);
             replaced = true;
         } else {
-            if (!first) try out.append('\n');
-            try out.appendSlice(line);
+            if (!first) try out.append(allocator, '\n');
+            try out.appendSlice(allocator, line);
         }
         first = false;
     }
 
     if (!replaced) {
-        if (!first) try out.append('\n');
-        try out.appendSlice(spec);
+        if (!first) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, spec);
     }
-    try out.append('\n');
+    try out.append(allocator, '\n');
 
     try runtime.writeFileAtomic(allocator, path, out.items);
 }
@@ -156,7 +156,7 @@ pub fn addToPyproject(allocator: Allocator, path: []const u8, spec: []const u8, 
     return true;
 }
 
-const LineList = std.array_list.Managed([]const u8);
+const LineList = std.ArrayList([]const u8);
 
 /// True if `t` (a trimmed line) is a TOML table header like `[project]` or
 /// `[[tool.x]]`. `headerName` returns the inner text (e.g. "project").
@@ -169,22 +169,22 @@ fn headerName(t: []const u8) []const u8 {
 
 /// True if trimmed line `t` is the `key = ...` assignment for `key`.
 fn isKeyLine(t: []const u8, key: []const u8) bool {
-    const eq = std.mem.indexOfScalar(u8, t, '=') orelse return false;
+    const eq = std.mem.findScalar(u8, t, '=') orelse return false;
     return std.mem.eql(u8, std.mem.trim(u8, t[0..eq], " \t"), key);
 }
 
 /// Returns the leading-whitespace slice of `line`.
 fn indentOf(line: []const u8) []const u8 {
-    const end = std.mem.indexOfNone(u8, line, " \t") orelse line.len;
+    const end = std.mem.findNone(u8, line, " \t") orelse line.len;
     return line[0..end];
 }
 
 /// Extracts the string between the first pair of double quotes in `line`, or
 /// null. Used to read existing array entries (`    "flask>=2.0",`).
 fn quotedValue(line: []const u8) ?[]const u8 {
-    const lq = std.mem.indexOfScalar(u8, line, '"') orelse return null;
+    const lq = std.mem.findScalar(u8, line, '"') orelse return null;
     const rest = line[lq + 1 ..];
-    const rq = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    const rq = std.mem.findScalar(u8, rest, '"') orelse return null;
     return rest[0..rq];
 }
 
@@ -198,10 +198,10 @@ fn editPyproject(
     spec: []const u8,
     create_section: bool,
 ) !?[]const u8 {
-    var lines = LineList.init(a);
+    var lines: LineList = .empty;
     var it = std.mem.splitScalar(u8, content, '\n');
     const trailing_newline = std.mem.endsWith(u8, content, "\n");
-    while (it.next()) |line| try lines.append(line);
+    while (it.next()) |line| try lines.append(a, line);
     // A trailing '\n' yields a final empty element; drop it and re-add on join.
     if (trailing_newline and lines.items.len > 0 and lines.items[lines.items.len - 1].len == 0) {
         _ = lines.pop();
@@ -249,8 +249,8 @@ fn editPyproject(
 
     // 3. Edit the existing array (inline or multi-line).
     const kl = key_line.?;
-    const lb = std.mem.indexOfScalar(u8, lines.items[kl], '[') orelse return null;
-    const has_close_on_line = std.mem.indexOfScalarPos(u8, lines.items[kl], lb + 1, ']') != null;
+    const lb = std.mem.findScalar(u8, lines.items[kl], '[') orelse return null;
+    const has_close_on_line = std.mem.findScalarPos(u8, lines.items[kl], lb + 1, ']') != null;
 
     if (has_close_on_line) {
         try editInlineArray(a, &lines, kl, lb, spec);
@@ -262,35 +262,35 @@ fn editPyproject(
 
 fn joinLines(a: Allocator, lines: *LineList, trailing_newline: bool) ![]const u8 {
     const body = try std.mem.join(a, "\n", lines.items);
-    if (trailing_newline) return std.fmt.allocPrint(a, "{s}\n", .{body});
+    if (trailing_newline) return a.print("{s}\n", .{body});
     return body;
 }
 
 /// Appends `\n[section]\nkey = [\n    "spec",\n]` at the end of the document.
 fn appendNewBlock(a: Allocator, lines: *LineList, section: []const u8, key: []const u8, spec: []const u8) !void {
     if (lines.items.len > 0 and lines.items[lines.items.len - 1].len != 0) {
-        try lines.append(""); // blank separator line
+        try lines.append(a, ""); // blank separator line
     }
-    try lines.append(try std.fmt.allocPrint(a, "[{s}]", .{section}));
-    try lines.append(try std.fmt.allocPrint(a, "{s} = [", .{key}));
-    try lines.append(try std.fmt.allocPrint(a, "    \"{s}\",", .{spec}));
-    try lines.append("]");
+    try lines.append(a, try a.print("[{s}]", .{section}));
+    try lines.append(a, try a.print("{s} = [", .{key}));
+    try lines.append(a, try a.print("    \"{s}\",", .{spec}));
+    try lines.append(a, "]");
 }
 
 /// Inserts `key = [\n    "spec",\n]` at line index `at`.
 fn insertKeyBlock(a: Allocator, lines: *LineList, at: usize, key: []const u8, spec: []const u8) !void {
-    try lines.insert(at, try std.fmt.allocPrint(a, "{s} = [", .{key}));
-    try lines.insert(at + 1, try std.fmt.allocPrint(a, "    \"{s}\",", .{spec}));
-    try lines.insert(at + 2, "]");
+    try lines.insert(a, at, try a.print("{s} = [", .{key}));
+    try lines.insert(a, at + 1, try a.print("    \"{s}\",", .{spec}));
+    try lines.insert(a, at + 2, "]");
 }
 
 /// Edits a single-line array `key = [ ... ]` on line `kl`, `lb` = index of '['.
 fn editInlineArray(a: Allocator, lines: *LineList, kl: usize, lb: usize, spec: []const u8) !void {
     const line = lines.items[kl];
-    const rb = std.mem.indexOfScalarPos(u8, line, lb + 1, ']').?;
+    const rb = std.mem.findScalarPos(u8, line, lb + 1, ']').?;
     const inner = std.mem.trim(u8, line[lb + 1 .. rb], " \t");
 
-    var entries = std.array_list.Managed([]const u8).init(a);
+    var entries: std.ArrayList([]const u8) = .empty;
     var replaced = false;
     if (inner.len > 0) {
         var parts = std.mem.splitScalar(u8, inner, ',');
@@ -299,17 +299,17 @@ fn editInlineArray(a: Allocator, lines: *LineList, kl: usize, lb: usize, spec: [
             if (p.len == 0) continue;
             const val = quotedValue(p) orelse p;
             if (!replaced and parse_deps.samePackage(val, spec)) {
-                try entries.append(try std.fmt.allocPrint(a, "\"{s}\"", .{spec}));
+                try entries.append(a, try a.print("\"{s}\"", .{spec}));
                 replaced = true;
             } else {
-                try entries.append(p);
+                try entries.append(a, p);
             }
         }
     }
-    if (!replaced) try entries.append(try std.fmt.allocPrint(a, "\"{s}\"", .{spec}));
+    if (!replaced) try entries.append(a, try a.print("\"{s}\"", .{spec}));
 
     const joined = try std.mem.join(a, ", ", entries.items);
-    lines.items[kl] = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ line[0 .. lb + 1], joined, line[rb..] });
+    lines.items[kl] = try a.print("{s}{s}{s}", .{ line[0 .. lb + 1], joined, line[rb..] });
 }
 
 /// Edits a multi-line array opened on line `kl`, closed by a line whose trimmed
@@ -329,25 +329,25 @@ fn editMultilineArray(a: Allocator, lines: *LineList, kl: usize, sec_end: usize,
         const val = quotedValue(lines.items[i]) orelse continue;
         last_entry = i;
         if (parse_deps.samePackage(val, spec)) {
-            lines.items[i] = try std.fmt.allocPrint(a, "{s}\"{s}\",", .{ indentOf(lines.items[i]), spec });
+            lines.items[i] = try a.print("{s}\"{s}\",", .{ indentOf(lines.items[i]), spec });
             return;
         }
     }
 
     // No match: append a new entry just before the closing bracket. Use the
     // indentation of an existing entry, or the key-line indent + 4 spaces.
-    const indent = if (last_entry) |le| indentOf(lines.items[le]) else try std.fmt.allocPrint(a, "{s}    ", .{indentOf(lines.items[kl])});
+    const indent = if (last_entry) |le| indentOf(lines.items[le]) else try a.print("{s}    ", .{indentOf(lines.items[kl])});
 
     // Ensure the previous last entry carries a trailing comma so the array stays
     // valid once another element follows it.
     if (last_entry) |le| {
         const t = std.mem.trimEnd(u8, lines.items[le], " \t\r");
         if (!std.mem.endsWith(u8, t, ",")) {
-            lines.items[le] = try std.fmt.allocPrint(a, "{s},", .{t});
+            lines.items[le] = try a.print("{s},", .{t});
         }
     }
 
-    try lines.insert(close, try std.fmt.allocPrint(a, "{s}\"{s}\",", .{ indent, spec }));
+    try lines.insert(a, close, try a.print("{s}\"{s}\",", .{ indent, spec }));
 }
 
 // ============================ Tests ============================
@@ -372,14 +372,14 @@ test "pyproject: appends a runtime dep to a multi-line [project].dependencies" {
         \\
     ;
     const out = (try editPyproject(a, src, "project", "dependencies", "flask>=3.0", false)).?;
-    try testing.expect(std.mem.indexOf(u8, out, "\"flask>=3.0\",") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"requests>=2.28\",") != null);
+    try testing.expect(std.mem.find(u8, out, "\"flask>=3.0\",") != null);
+    try testing.expect(std.mem.find(u8, out, "\"requests>=2.28\",") != null);
     // Unrelated table preserved.
-    try testing.expect(std.mem.indexOf(u8, out, "line-length = 100") != null);
+    try testing.expect(std.mem.find(u8, out, "line-length = 100") != null);
     // Appended after the existing entry but still inside the [project] table
     // (before the [tool.ruff] section).
-    try testing.expect(std.mem.indexOf(u8, out, "requests>=2.28").? < std.mem.indexOf(u8, out, "flask>=3.0").?);
-    try testing.expect(std.mem.indexOf(u8, out, "flask>=3.0").? < std.mem.indexOf(u8, out, "[tool.ruff]").?);
+    try testing.expect(std.mem.find(u8, out, "requests>=2.28").? < std.mem.find(u8, out, "flask>=3.0").?);
+    try testing.expect(std.mem.find(u8, out, "flask>=3.0").? < std.mem.find(u8, out, "[tool.ruff]").?);
 }
 
 test "pyproject: replaces an existing runtime dep (updates the pin)" {
@@ -395,9 +395,9 @@ test "pyproject: replaces an existing runtime dep (updates the pin)" {
         \\
     ;
     const out = (try editPyproject(a, src, "project", "dependencies", "flask==3.1", false)).?;
-    try testing.expect(std.mem.indexOf(u8, out, "flask==3.1") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "flask>=2.0") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"numpy\"") != null);
+    try testing.expect(std.mem.find(u8, out, "flask==3.1") != null);
+    try testing.expect(std.mem.find(u8, out, "flask>=2.0") == null);
+    try testing.expect(std.mem.find(u8, out, "\"numpy\"") != null);
 }
 
 test "pyproject: fills an empty inline array" {
@@ -410,7 +410,7 @@ test "pyproject: fills an empty inline array" {
         \\
     ;
     const out = (try editPyproject(a, src, "project", "dependencies", "rich", false)).?;
-    try testing.expect(std.mem.indexOf(u8, out, "dependencies = [\"rich\"]") != null);
+    try testing.expect(std.mem.find(u8, out, "dependencies = [\"rich\"]") != null);
 }
 
 test "pyproject: dev dep creates [dependency-groups] at EOF when absent" {
@@ -424,9 +424,9 @@ test "pyproject: dev dep creates [dependency-groups] at EOF when absent" {
         \\
     ;
     const out = (try editPyproject(a, src, "dependency-groups", "dev", "pytest>=8", true)).?;
-    try testing.expect(std.mem.indexOf(u8, out, "[dependency-groups]") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "dev = [") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"pytest>=8\",") != null);
+    try testing.expect(std.mem.find(u8, out, "[dependency-groups]") != null);
+    try testing.expect(std.mem.find(u8, out, "dev = [") != null);
+    try testing.expect(std.mem.find(u8, out, "\"pytest>=8\",") != null);
 }
 
 test "pyproject: dev dep adds the dev key under an existing [dependency-groups]" {
@@ -443,10 +443,10 @@ test "pyproject: dev dep adds the dev key under an existing [dependency-groups]"
     ;
     const out = (try editPyproject(a, src, "dependency-groups", "dev", "pytest", true)).?;
     // Only one [dependency-groups] header (no duplicate table).
-    const first = std.mem.indexOf(u8, out, "[dependency-groups]").?;
-    try testing.expect(std.mem.indexOfPos(u8, out, first + 1, "[dependency-groups]") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "dev = [") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "coverage") != null);
+    const first = std.mem.find(u8, out, "[dependency-groups]").?;
+    try testing.expect(std.mem.findPos(u8, out, first + 1, "[dependency-groups]") == null);
+    try testing.expect(std.mem.find(u8, out, "dev = [") != null);
+    try testing.expect(std.mem.find(u8, out, "coverage") != null);
 }
 
 test "pyproject: runtime fallback returns null when no [project] table" {
@@ -474,8 +474,8 @@ test "pyproject: appends a comma to a comma-less last entry before inserting" {
         \\
     ;
     const out = (try editPyproject(a, src, "project", "dependencies", "flask", false)).?;
-    try testing.expect(std.mem.indexOf(u8, out, "\"requests\",") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"flask\",") != null);
+    try testing.expect(std.mem.find(u8, out, "\"requests\",") != null);
+    try testing.expect(std.mem.find(u8, out, "\"flask\",") != null);
 }
 
 // --- requirements.txt (I/O via runtime) ---
@@ -492,19 +492,19 @@ test "requirements: append then replace de-dups by package name" {
     {
         const c = try runtime.readFileAlloc(a, path, MAX_FILE);
         defer a.free(c);
-        try testing.expect(std.mem.indexOf(u8, c, "# deps") != null);
-        try testing.expect(std.mem.indexOf(u8, c, "requests") != null);
-        try testing.expect(std.mem.indexOf(u8, c, "flask>=3.0") != null);
+        try testing.expect(std.mem.find(u8, c, "# deps") != null);
+        try testing.expect(std.mem.find(u8, c, "requests") != null);
+        try testing.expect(std.mem.find(u8, c, "flask>=3.0") != null);
     }
     // Re-add flask with a different pin: replace, not duplicate.
     try addToRequirementsTxt(a, path, "flask==3.1");
     {
         const c = try runtime.readFileAlloc(a, path, MAX_FILE);
         defer a.free(c);
-        try testing.expect(std.mem.indexOf(u8, c, "flask==3.1") != null);
-        try testing.expect(std.mem.indexOf(u8, c, "flask>=3.0") == null);
+        try testing.expect(std.mem.find(u8, c, "flask==3.1") != null);
+        try testing.expect(std.mem.find(u8, c, "flask>=3.0") == null);
         // exactly one flask line
-        try testing.expect(std.mem.indexOf(u8, c, "flask") == std.mem.lastIndexOf(u8, c, "flask"));
+        try testing.expect(std.mem.find(u8, c, "flask") == std.mem.findLast(u8, c, "flask"));
     }
 }
 
@@ -547,13 +547,13 @@ test "zenv.json: adds to dependencies and dev_dependencies, preserving order" {
 
     const c = try runtime.readFileAlloc(a, path, MAX_FILE);
     defer a.free(c);
-    try testing.expect(std.mem.indexOf(u8, c, "\"requests\"") != null);
-    try testing.expect(std.mem.indexOf(u8, c, "\"flask==3.1\"") != null);
-    try testing.expect(std.mem.indexOf(u8, c, "flask>=3.0") == null);
-    try testing.expect(std.mem.indexOf(u8, c, "\"dev_dependencies\"") != null);
-    try testing.expect(std.mem.indexOf(u8, c, "\"pytest\"") != null);
+    try testing.expect(std.mem.find(u8, c, "\"requests\"") != null);
+    try testing.expect(std.mem.find(u8, c, "\"flask==3.1\"") != null);
+    try testing.expect(std.mem.find(u8, c, "flask>=3.0") == null);
+    try testing.expect(std.mem.find(u8, c, "\"dev_dependencies\"") != null);
+    try testing.expect(std.mem.find(u8, c, "\"pytest\"") != null);
     // base_dir still precedes the env (key order preserved).
-    try testing.expect(std.mem.indexOf(u8, c, "base_dir").? < std.mem.indexOf(u8, c, "demo").?);
+    try testing.expect(std.mem.find(u8, c, "base_dir").? < std.mem.find(u8, c, "demo").?);
 
     // Re-parse to confirm it's still valid JSON with the expected shape.
     var parsed = try json.parseFromSlice(json.Value, a, c, .{ .allocate = .alloc_always });

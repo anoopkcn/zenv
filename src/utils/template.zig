@@ -1,6 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const fs = std.fs;
 const errors = @import("errors.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
@@ -14,19 +13,19 @@ pub const MODULE_CACHE_VERSION: u32 = 1;
 pub const MODULE_CACHE_FILE = ".zenv_module_cache.sh";
 pub const MODULE_CACHE_STAMP = ".zenv_module_cache.stamp";
 
-/// Appends `value` to `buf` as the body of a shell single-quoted string,
+/// Writes `value` to `w` as the body of a shell single-quoted string,
 /// escaping any embedded single quotes with the classic `'\''` trick. The
 /// caller writes the wrapping single quotes around the call. Use this for any
 /// config-sourced value (venv paths, module names) interpolated into generated
 /// shell so a stray `'` can't break or rewrite the script.
-pub fn appendSqEscaped(buf: *std.array_list.Managed(u8), value: []const u8) !void {
-    for (value) |c| {
-        if (c == '\'') {
-            try buf.appendSlice("'\\''");
-        } else {
-            try buf.append(c);
-        }
+pub fn appendSqEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    var rest = value;
+    while (std.mem.findScalar(u8, rest, '\'')) |q| {
+        try w.writeAll(rest[0..q]);
+        try w.writeAll("'\\''");
+        rest = rest[q + 1 ..];
     }
+    try w.writeAll(rest);
 }
 
 fn accessFile(path: []const u8) bool {
@@ -69,11 +68,11 @@ pub fn copyHookScript(
     var source_path: []const u8 = undefined;
     var path_allocd = false;
 
-    if (std.fs.path.isAbsolute(hook_path)) {
+    if (std.Io.Dir.path.isAbsolute(hook_path)) {
         source_path = hook_path;
     } else {
         // Try relative to cwd (where zenv.json is), then the bare filename.
-        const rel_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
+        const rel_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
         defer allocator.free(rel_path);
 
         if (accessFile(rel_path)) {
@@ -93,7 +92,7 @@ pub fn copyHookScript(
         return error.FileNotFound;
     }
 
-    const dest_path = try std.fs.path.join(allocator, &[_][]const u8{ dest_dir, dest_filename });
+    const dest_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dest_dir, dest_filename });
     errdefer allocator.free(dest_path);
 
     output.print(allocator, "Copying hook script {s} -> {s}", .{ source_path, dest_path }) catch {};
@@ -134,7 +133,7 @@ pub fn processTemplateString(
     replacements: std.StringHashMap([]const u8),
 ) ![]const u8 {
     // Check if we have any placeholders at all to avoid unnecessary work
-    if (std.mem.indexOf(u8, template_content, "@@") == null) {
+    if (std.mem.find(u8, template_content, "@@") == null) {
         return allocator.dupe(u8, template_content); // No placeholders, return a copy
     }
 
@@ -142,8 +141,8 @@ pub fn processTemplateString(
     var estimated_size = template_content.len;
     var pos: usize = 0;
     while (pos < template_content.len) {
-        const placeholder_start = std.mem.indexOfPos(u8, template_content, pos, "@@") orelse break;
-        const placeholder_end = std.mem.indexOfPos(u8, template_content, placeholder_start + 2, "@@") orelse break;
+        const placeholder_start = std.mem.findPos(u8, template_content, pos, "@@") orelse break;
+        const placeholder_end = std.mem.findPos(u8, template_content, placeholder_start + 2, "@@") orelse break;
 
         // Extract placeholder name
         const placeholder_name = template_content[placeholder_start + 2 .. placeholder_end];
@@ -156,26 +155,26 @@ pub fn processTemplateString(
     }
 
     // Use a pre-sized buffer to reduce reallocations
-    var result_buffer = try std.array_list.Managed(u8).initCapacity(allocator, estimated_size);
-    defer result_buffer.deinit();
+    var result_buffer = try std.ArrayList(u8).initCapacity(allocator, estimated_size);
+    defer result_buffer.deinit(allocator);
 
     // Process the template - search for @@PLACEHOLDER@@ patterns and replace them
     pos = 0;
     while (pos < template_content.len) {
         // Find the start of a placeholder
-        const placeholder_start = std.mem.indexOfPos(u8, template_content, pos, "@@") orelse {
+        const placeholder_start = std.mem.findPos(u8, template_content, pos, "@@") orelse {
             // No more placeholders, append the rest of the template and exit
-            try result_buffer.appendSlice(template_content[pos..]);
+            try result_buffer.appendSlice(allocator, template_content[pos..]);
             break;
         };
 
         // Write the content before the placeholder
-        try result_buffer.appendSlice(template_content[pos..placeholder_start]);
+        try result_buffer.appendSlice(allocator, template_content[pos..placeholder_start]);
 
         // Find the end of the placeholder
-        const placeholder_end = std.mem.indexOfPos(u8, template_content, placeholder_start + 2, "@@") orelse {
+        const placeholder_end = std.mem.findPos(u8, template_content, placeholder_start + 2, "@@") orelse {
             // No closing @@ found, treat as literal text
-            try result_buffer.appendSlice(template_content[placeholder_start..]);
+            try result_buffer.appendSlice(allocator, template_content[placeholder_start..]);
             break;
         };
 
@@ -185,10 +184,10 @@ pub fn processTemplateString(
         // Check if we have a replacement for this placeholder
         if (replacements.get(placeholder_name)) |replacement| {
             // Replace with the provided value
-            try result_buffer.appendSlice(replacement);
+            try result_buffer.appendSlice(allocator, replacement);
         } else {
             // No replacement found, leave the placeholder as is
-            try result_buffer.appendSlice(template_content[placeholder_start .. placeholder_end + 2]);
+            try result_buffer.appendSlice(allocator, template_content[placeholder_start .. placeholder_end + 2]);
             output.print(allocator, "Warning: No replacement provided for placeholder @@{s}@@", .{placeholder_name}) catch {};
         }
 
@@ -196,7 +195,7 @@ pub fn processTemplateString(
         pos = placeholder_end + 2;
     }
 
-    return result_buffer.toOwnedSlice();
+    return result_buffer.toOwnedSlice(allocator);
 }
 
 // ============================ Tests ============================

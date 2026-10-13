@@ -40,8 +40,8 @@ const MAX_TRACKED_FILE = 10 * 1024 * 1024;
 /// Resolves a config-relative path against `anchor_dir`; absolute paths are
 /// left untouched. Caller owns the result.
 fn resolvePath(allocator: Allocator, anchor_dir: []const u8, rel: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(rel)) return allocator.dupe(u8, rel);
-    return std.fs.path.join(allocator, &[_][]const u8{ anchor_dir, rel });
+    if (std.Io.Dir.path.isAbsolute(rel)) return allocator.dupe(u8, rel);
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ anchor_dir, rel });
 }
 
 /// Folds one tracked file into `sha`. The logical `key` and a content-length
@@ -76,7 +76,7 @@ pub fn computeTrackedHash(
     var sha = std.crypto.hash.Sha1.init(.{});
 
     {
-        const p = try std.fs.path.join(allocator, &[_][]const u8{ anchor_dir, "zenv.json" });
+        const p = try std.Io.Dir.path.join(allocator, &[_][]const u8{ anchor_dir, "zenv.json" });
         defer allocator.free(p);
         foldFile(allocator, &sha, "config", p);
     }
@@ -128,7 +128,7 @@ pub const Stamp = struct {
 };
 
 fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
-    return std.fs.path.join(allocator, &[_][]const u8{ venv_dir, STAMP_NAME });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, STAMP_NAME });
 }
 
 /// Writes `<venv_dir>/.zenv.stamp` atomically. `flags` are the build-affecting
@@ -154,7 +154,8 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
     const content = runtime.readFileAlloc(allocator, path, 1024 * 1024) catch return null;
     defer allocator.free(content);
 
-    const parsed = json.parseFromSlice(json.Value, allocator, content, .{ .allocate = .alloc_always }) catch return null;
+    // Strings may borrow from `content`; the fields kept below are duped.
+    const parsed = json.parseFromSlice(json.Value, allocator, content, .{ .allocate = .alloc_if_needed }) catch return null;
     defer parsed.deinit();
 
     const root = parsed.value;
@@ -170,10 +171,10 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
     var ok = false;
     defer if (!ok) allocator.free(hash_owned);
 
-    var flag_list = std.array_list.Managed([]const u8).init(allocator);
+    var flag_list: std.ArrayList([]const u8) = .empty;
     defer if (!ok) {
         for (flag_list.items) |f| allocator.free(f);
-        flag_list.deinit();
+        flag_list.deinit(allocator);
     };
 
     if (root.object.get("flags")) |flags_v| {
@@ -181,7 +182,7 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
             for (flags_v.array.items) |fv| {
                 if (fv == .string) {
                     const f = allocator.dupe(u8, fv.string) catch return null;
-                    flag_list.append(f) catch {
+                    flag_list.append(allocator, f) catch {
                         allocator.free(f);
                         return null;
                     };
@@ -190,7 +191,7 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
         }
     }
 
-    const flags_owned = flag_list.toOwnedSlice() catch return null;
+    const flags_owned = flag_list.toOwnedSlice(allocator) catch return null;
     ok = true;
     return Stamp{ .hash = hash_owned, .flags = flags_owned };
 }
@@ -205,14 +206,14 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
 /// already targets the unchanged venv). Items are static literals — the caller
 /// frees only the returned slice.
 pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const u8 {
-    var list = std.array_list.Managed([]const u8).init(allocator);
-    errdefer list.deinit();
-    if (f.force_deps) try list.append("--force");
-    if (f.use_default_python) try list.append("--python");
-    if (f.dev_mode) try list.append("--dev");
-    if (f.use_uv) try list.append("--uv");
-    if (f.no_cache) try list.append("--no-cache");
-    return list.toOwnedSlice();
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer list.deinit(allocator);
+    if (f.force_deps) try list.append(allocator, "--force");
+    if (f.use_default_python) try list.append(allocator, "--python");
+    if (f.dev_mode) try list.append(allocator, "--dev");
+    if (f.use_uv) try list.append(allocator, "--uv");
+    if (f.no_cache) try list.append(allocator, "--no-cache");
+    return list.toOwnedSlice(allocator);
 }
 
 // ===========================================================================
@@ -236,10 +237,10 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
     };
     defer allocator.free(self_exe);
 
-    var argv = std.array_list.Managed([]const u8).init(allocator);
-    defer argv.deinit();
-    try argv.appendSlice(&[_][]const u8{ self_exe, "setup", entry.env_name, "--no-host" });
-    try argv.appendSlice(replay_flags);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &[_][]const u8{ self_exe, "setup", entry.env_name, "--no-host" });
+    try argv.appendSlice(allocator, replay_flags);
 
     // Announce on STDERR before the (silent, possibly slow) rebuild. stderr is
     // safe for every caller: `activate`/`cd` put their shell-eval payload on
@@ -271,7 +272,7 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
 pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) !void {
     if (runtime.env("ZENV_NO_AUTO_SETUP")) |_| return;
 
-    const config_path = std.fs.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" }) catch return;
+    const config_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" }) catch return;
     defer allocator.free(config_path);
 
     // A removed/broken config must not block a working venv; skip the check.
@@ -338,7 +339,7 @@ fn recordingExec(argv: []const []const u8, opts: runtime.ExecOptions) anyerror!r
 
 fn testDir(allocator: Allocator, name: []const u8) ![]u8 {
     const base = runtime.env("TMPDIR") orelse "/tmp";
-    const dir = try std.fs.path.join(allocator, &[_][]const u8{ base, "zenv_autosetup_test", name });
+    const dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base, "zenv_autosetup_test", name });
     runtime.deleteTree(dir) catch {};
     try runtime.makePath(dir);
     return dir;
@@ -350,7 +351,7 @@ fn cleanup(allocator: Allocator, dir: []u8) void {
 }
 
 fn writeAt(allocator: Allocator, dir: []const u8, name: []const u8, content: []const u8) !void {
-    const p = try std.fs.path.join(allocator, &[_][]const u8{ dir, name });
+    const p = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, name });
     defer allocator.free(p);
     try runtime.writeFile(p, content);
 }
@@ -363,7 +364,7 @@ fn makeEntry(allocator: Allocator, name: []const u8, project_dir: []const u8, ve
         .description = null,
         .target_machines_str = try allocator.dupe(u8, "*"),
         .venv_path = try allocator.dupe(u8, venv_path),
-        .aliases = std.array_list.Managed([]const u8).init(allocator),
+        .aliases = .empty,
     };
 }
 
@@ -473,7 +474,7 @@ test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
 
     // Record a stamp matching the current config.
     {
-        const cfg_path = try std.fs.path.join(a, &[_][]const u8{ proj, "zenv.json" });
+        const cfg_path = try std.Io.Dir.path.join(a, &[_][]const u8{ proj, "zenv.json" });
         defer a.free(cfg_path);
         var cfg = try validation.validateAndParse(a, cfg_path);
         defer cfg.deinit();

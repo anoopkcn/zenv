@@ -34,7 +34,7 @@ pub fn getJupyterDataDir(allocator: Allocator) ![]const u8 {
 
     // Fall back to default locations
     if (runtime.env("HOME")) |home| {
-        return try std.fmt.allocPrint(allocator, "{s}/.local/share/jupyter", .{home});
+        return try allocator.print("{s}/.local/share/jupyter", .{home});
     }
 
     return error.InvalidPath;
@@ -45,7 +45,7 @@ pub fn getKernelDir(allocator: Allocator, kernel_name: []const u8) ![]const u8 {
     const jupyter_data_dir = try getJupyterDataDir(allocator);
     defer allocator.free(jupyter_data_dir);
 
-    return try std.fmt.allocPrint(allocator, "{s}/kernels/{s}", .{ jupyter_data_dir, kernel_name });
+    return try allocator.print("{s}/kernels/{s}", .{ jupyter_data_dir, kernel_name });
 }
 
 /// Generate kernel.json content
@@ -65,7 +65,7 @@ pub fn generateKernelJson(allocator: Allocator, spec: KernelSpec) ![]const u8 {
         \\}}
     ;
 
-    return try std.fmt.allocPrint(allocator, template, .{ spec.display_name, spec.python_path });
+    return try allocator.print(template, .{ spec.display_name, spec.python_path });
 }
 
 /// Create a Jupyter kernel for an environment. `env_name` and `venv_path`
@@ -80,14 +80,14 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
     }
 
     // Determine kernel name and display name
-    const kernel_name = custom_name orelse try std.fmt.allocPrint(allocator, "zenv-{s}", .{env_name});
+    const kernel_name = custom_name orelse try allocator.print("zenv-{s}", .{env_name});
     defer if (custom_name == null) allocator.free(kernel_name);
 
-    const display_name = custom_display_name orelse try std.fmt.allocPrint(allocator, "Python ({s})", .{env_name});
+    const display_name = custom_display_name orelse try allocator.print("Python ({s})", .{env_name});
     defer if (custom_display_name == null) allocator.free(display_name);
 
     // Get Python path from environment
-    const python_path = try std.fmt.allocPrint(allocator, "{s}/bin/python", .{venv_path});
+    const python_path = try allocator.print("{s}/bin/python", .{venv_path});
     defer allocator.free(python_path);
 
     // Check if Python executable exists
@@ -128,7 +128,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
     };
 
     // Ensure kernels directory exists
-    const kernels_dir = try std.fmt.allocPrint(allocator, "{s}/kernels", .{jupyter_data_dir});
+    const kernels_dir = try allocator.print("{s}/kernels", .{jupyter_data_dir});
     defer allocator.free(kernels_dir);
 
     runtime.makePath(kernels_dir) catch |err| switch (err) {
@@ -157,7 +157,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
     defer allocator.free(kernel_json);
 
     // Write kernel.json file
-    const kernel_json_path = try std.fmt.allocPrint(allocator, "{s}/kernel.json", .{kernel_dir});
+    const kernel_json_path = try allocator.print("{s}/kernel.json", .{kernel_dir});
     defer allocator.free(kernel_json_path);
 
     runtime.writeFile(kernel_json_path, kernel_json) catch |err| {
@@ -171,7 +171,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
 
 /// Remove a Jupyter kernel for the given environment
 pub fn removeKernel(allocator: Allocator, env_name: []const u8) !void {
-    const kernel_name = try std.fmt.allocPrint(allocator, "zenv-{s}", .{env_name});
+    const kernel_name = try allocator.print("zenv-{s}", .{env_name});
     defer allocator.free(kernel_name);
 
     const kernel_dir = try getKernelDir(allocator, kernel_name);
@@ -203,7 +203,7 @@ pub fn listKernels(allocator: Allocator) !void {
     const jupyter_data_dir = try getJupyterDataDir(allocator);
     defer allocator.free(jupyter_data_dir);
 
-    const kernels_dir = try std.fmt.allocPrint(allocator, "{s}/kernels", .{jupyter_data_dir});
+    const kernels_dir = try allocator.print("{s}/kernels", .{jupyter_data_dir});
     defer allocator.free(kernels_dir);
 
     var dir = runtime.openDir(kernels_dir, .{ .iterate = true }) catch |err| switch (err) {
@@ -251,7 +251,7 @@ pub fn checkJupyter(allocator: Allocator) !void {
 
         try output.print(allocator, "Jupyter data directory: {s}", .{jupyter_data_dir});
 
-        const kernels_dir = try std.fmt.allocPrint(allocator, "{s}/kernels", .{jupyter_data_dir});
+        const kernels_dir = try allocator.print("{s}/kernels", .{jupyter_data_dir});
         defer allocator.free(kernels_dir);
 
         if (runtime.access(kernels_dir)) |_| {
@@ -272,10 +272,10 @@ pub fn checkJupyter(allocator: Allocator) !void {
 
 /// Rename a Jupyter kernel from old environment name to new environment name
 pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name: []const u8, new_venv_path: []const u8) !void {
-    const old_kernel_name = try std.fmt.allocPrint(allocator, "zenv-{s}", .{old_env_name});
+    const old_kernel_name = try allocator.print("zenv-{s}", .{old_env_name});
     defer allocator.free(old_kernel_name);
 
-    const new_kernel_name = try std.fmt.allocPrint(allocator, "zenv-{s}", .{new_env_name});
+    const new_kernel_name = try allocator.print("zenv-{s}", .{new_env_name});
     defer allocator.free(new_kernel_name);
 
     const old_kernel_dir = try getKernelDir(allocator, old_kernel_name);
@@ -314,16 +314,16 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
     };
 
     // Update the kernel.json file with new display name and Python path
-    const kernel_json_path = try std.fmt.allocPrint(allocator, "{s}/kernel.json", .{new_kernel_dir});
+    const kernel_json_path = try allocator.print("{s}/kernel.json", .{new_kernel_dir});
     defer allocator.free(kernel_json_path);
 
     // Regenerate kernel.json with the updated display name and Python path.
     // zenv-managed kernels have a fixed shape, so regenerating is equivalent to
     // editing display_name + argv[0] in place.
-    const new_display_name = try std.fmt.allocPrint(allocator, "Python ({s})", .{new_env_name});
+    const new_display_name = try allocator.print("Python ({s})", .{new_env_name});
     defer allocator.free(new_display_name);
 
-    const new_python_path = try std.fmt.allocPrint(allocator, "{s}/bin/python", .{new_venv_path});
+    const new_python_path = try allocator.print("{s}/bin/python", .{new_venv_path});
     defer allocator.free(new_python_path);
 
     const kernel_json = try generateKernelJson(allocator, .{
@@ -340,7 +340,7 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
 
 /// Check if an environment has an associated Jupyter kernel
 pub fn hasKernel(allocator: Allocator, env_name: []const u8) bool {
-    const kernel_name = std.fmt.allocPrint(allocator, "zenv-{s}", .{env_name}) catch return false;
+    const kernel_name = allocator.print("zenv-{s}", .{env_name}) catch return false;
     defer allocator.free(kernel_name);
 
     const kernel_dir = getKernelDir(allocator, kernel_name) catch return false;

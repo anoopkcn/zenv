@@ -1,12 +1,12 @@
 .{
     .name = .zenv,
-    .version = "0.25.1",
+    .version = "0.26.0",
     .fingerprint = 0x29c2040f7262b616,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .toml = .{
-            .url = "git+https://github.com/sam701/zig-toml#de542063f104e0ffb87bef19c55131ab0fbbc0b7",
-            .hash = "toml-0.3.0-bV14BaWMAQBmIxIiAqiMID-5sOpd41iZHrGCz0_fYUOh",
+            .url = "git+https://github.com/sam701/zig-toml#c661327bd9f02f774426c4fe78f60621411b7173",
+            .hash = "toml-0.3.0-bV14BRmkAQDSILPPyXc31aAXPtJa1Uh8Frug3i6InAUc",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },

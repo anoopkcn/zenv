@@ -18,9 +18,9 @@ pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const 
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
 
-    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version });
+    const install_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, version });
     errdefer allocator.free(install_dir); // returned on success; freed on the error path
-    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
+    const python_bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
     defer allocator.free(python_bin);
 
     // Check if the Python binary exists
@@ -75,7 +75,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         if (entry.kind != .directory) continue;
 
         const version_dir = entry.name;
-        const python_path = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir, "bin", "python3" });
+        const python_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir, "bin", "python3" });
         defer allocator.free(python_path);
 
         // Check if the Python binary exists in this directory
@@ -95,7 +95,7 @@ pub fn listInstalledVersions(allocator: Allocator) !void {
         // Check if this is the default version
         var is_default = false;
         if (default_path) |path| {
-            const install_path = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir });
+            const install_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, version_dir });
             defer allocator.free(install_path);
             is_default = std.mem.eql(u8, install_path, path);
         }
@@ -125,7 +125,7 @@ pub fn setDefaultPythonPath(allocator: Allocator, version: []const u8) !void {
     defer allocator.free(python_path);
 
     // Create/overwrite the default-python file
-    const default_file_path = try std.fs.path.join(allocator, &[_][]const u8{ zenv_dir, "default-python" });
+    const default_file_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir, "default-python" });
     defer allocator.free(default_file_path);
 
     try runtime.writeFile(default_file_path, python_path);
@@ -159,10 +159,10 @@ pub fn getDefaultPythonPath(allocator: Allocator) !?[]const u8 {
 
 // Download the Python source code for the specified version
 pub fn downloadPythonSource(allocator: Allocator, version: []const u8) ![]const u8 {
-    const url = try std.fmt.allocPrint(allocator, "https://www.python.org/ftp/python/{s}/Python-{s}.tgz", .{ version, version });
+    const url = try allocator.print("https://www.python.org/ftp/python/{s}/Python-{s}.tgz", .{ version, version });
     defer allocator.free(url);
 
-    const filename = try std.fmt.allocPrint(allocator, "Python-{s}.tgz", .{version});
+    const filename = try allocator.print("Python-{s}.tgz", .{version});
     defer allocator.free(filename);
 
     // Use our download utility instead of curl
@@ -187,9 +187,9 @@ pub fn extractPythonSource(allocator: Allocator, tarball_path: []const u8, targe
     _ = try runtime.exec(&[_][]const u8{ "tar", "-xzf", tarball_path, "-C", target_dir }, .{});
 
     // Get the extracted directory name (Python-VERSION)
-    const filename = std.fs.path.basename(tarball_path);
+    const filename = std.Io.Dir.path.basename(tarball_path);
     const dirname = filename[0 .. filename.len - 4]; // Remove .tgz
-    const source_dir = try std.fs.path.join(allocator, &[_][]const u8{ target_dir, dirname });
+    const source_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ target_dir, dirname });
 
     return source_dir;
 }
@@ -243,7 +243,7 @@ pub fn buildPython(allocator: Allocator, source_dir: []const u8, install_dir: []
         @max(count - 1, 1)
     else |_|
         1;
-    const cpu_count = try std.fmt.allocPrint(allocator, "{d}", .{cores_to_use});
+    const cpu_count = try allocator.print("{d}", .{cores_to_use});
     defer allocator.free(cpu_count);
 
     // Run make
@@ -282,11 +282,11 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
 
-    const install_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_install_dir, python_version });
+    const install_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, python_version });
     defer allocator.free(install_dir);
 
     // Check if this version is already installed
-    const python_bin = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
+    const python_bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ install_dir, "bin", "python3" });
     defer allocator.free(python_bin);
 
     const python_exists = blk: {

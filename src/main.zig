@@ -52,7 +52,7 @@ fn stdoutWrite(bytes: []const u8) void {
 }
 
 fn printVersion() void {
-    stdoutWrite(options.version);
+    stdoutWrite(options.version ++ "\n");
 }
 
 fn printUsage() void {
@@ -197,7 +197,7 @@ fn printUsage() void {
 }
 
 pub fn main(app: std.process.Init) anyerror!void {
-    // Establish the process-wide I/O context for the whole program (Zig 0.16).
+    // Establish the process-wide I/O context for the whole program.
     runtime.io = app.io;
     runtime.environ_map = app.environ_map;
 
@@ -205,13 +205,12 @@ pub fn main(app: std.process.Init) anyerror!void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Collect args into an owned slice from the std bootstrap. The argv strings
-    // are static (owned by the OS), so we only copy the pointers; the arena owns
-    // the slice itself.
-    var args_builder = std.array_list.Managed([]const u8).init(allocator);
+    // Collect args into an owned slice. The argv strings are static (owned by
+    // the OS), so we only copy the pointers; the arena owns the slice itself.
+    var args_builder: std.ArrayList([]const u8) = .empty;
     var arg_it = app.minimal.args.iterate();
-    while (arg_it.next()) |a| try args_builder.append(a);
-    const args = try args_builder.toOwnedSlice();
+    while (arg_it.next()) |a| try args_builder.append(allocator, a);
+    const args = try args_builder.toOwnedSlice(allocator);
 
     // Command parsing logic - Use args directly for command parsing
     const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
@@ -305,15 +304,15 @@ pub fn main(app: std.process.Init) anyerror!void {
                     process.exit(1);
                 };
 
-                var init_args = std.array_list.Managed([]const u8).init(allocator);
-                defer init_args.deinit();
+                var init_args: std.ArrayList([]const u8) = .empty;
+                defer init_args.deinit(allocator);
 
-                try init_args.append("zenv"); // Args[0] is the program name
-                try init_args.append("init");
-                try init_args.append(env_name);
+                try init_args.append(allocator, "zenv"); // Args[0] is the program name
+                try init_args.append(allocator, "init");
+                try init_args.append(allocator, env_name);
 
                 if (flags_module.positional(args, 1)) |description| {
-                    try init_args.append(description);
+                    try init_args.append(allocator, description);
                 }
 
                 // Run init to create config

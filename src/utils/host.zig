@@ -79,7 +79,7 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
 
         if (!has_wildcards) {
             const middle = pattern[1 .. pattern.len - 1];
-            return std.mem.indexOf(u8, str, middle) != null;
+            return std.mem.find(u8, str, middle) != null;
         }
     }
 
@@ -292,7 +292,7 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
     const norm_hostname = hostname;
 
     // Check if the target contains wildcard characters
-    const has_wildcards = std.mem.indexOfAny(u8, target_machine, "*?") != null;
+    const has_wildcards = std.mem.findAny(u8, target_machine, "*?") != null;
 
     // If target has wildcards, use pattern matching
     if (has_wildcards) {

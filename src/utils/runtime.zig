@@ -1,6 +1,6 @@
-//! Process-wide I/O context for Zig 0.16.
+//! Process-wide I/O context.
 //!
-//! Zig 0.16 threads an `std.Io` instance through every filesystem, process and
+//! Zig (0.16+) threads an `std.Io` instance through every filesystem, process and
 //! environment operation. Rather than thread it as a parameter through every
 //! function in the codebase, we set it once from `main` and expose it here,
 //! mirroring the existing global-state pattern used by `output.zig`.
@@ -20,8 +20,7 @@ pub var io: Io = undefined;
 pub var environ_map: *std.process.Environ.Map = undefined;
 
 /// Looks up an environment variable. Returns a borrowed slice (owned by the
-/// environment block, no need to free) or null if unset. Replaces the removed
-/// `std.process.getEnvVarOwned`.
+/// environment block, no need to free) or null if unset.
 pub fn env(name: []const u8) ?[]const u8 {
     return environ_map.get(name);
 }
@@ -57,7 +56,7 @@ pub fn writeFile(path: []const u8, data: []const u8) !void {
 /// state files (registry.json, zenv.json) where truncate-then-write would
 /// risk losing the whole file.
 pub fn writeFileAtomic(allocator: Allocator, path: []const u8, data: []const u8) !void {
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.zenv-tmp", .{path});
+    const tmp_path = try allocator.print("{s}.zenv-tmp", .{path});
     defer allocator.free(tmp_path);
     errdefer deleteFile(tmp_path) catch {};
 
@@ -130,8 +129,7 @@ pub fn realpathAlloc(allocator: Allocator, path: []const u8) ![:0]u8 {
 
 /// Returns the absolute path of the running zenv binary (caller owns it).
 /// Follows symlinks. Used to re-invoke `zenv` as a subprocess (auto-setup).
-/// Note: `std.fs.selfExePathAlloc` does not exist in Zig 0.16; the API lives
-/// on the `std.process`/`Io` seam. The result is sentinel-terminated — keep the
+/// The result is sentinel-terminated — keep the
 /// `[:0]u8` type so `allocator.free` accounts for the trailing byte.
 pub fn selfExePath(allocator: Allocator) ![:0]u8 {
     return std.process.executablePathAlloc(io, allocator);
