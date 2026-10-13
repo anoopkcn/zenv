@@ -9,6 +9,7 @@ const output = @import("utils/output.zig");
 const flags_module = @import("utils/flags.zig");
 const validation = @import("utils/validation.zig");
 const runtime = @import("utils/runtime.zig");
+const paths = @import("utils/paths.zig");
 const errors = @import("utils/errors.zig");
 
 pub const Command = enum {
@@ -62,8 +63,8 @@ fn printUsage() void {
         \\Manages Python virtual environments based on zenv.json configuration.
         \\
         \\Commands:
-        \\  init [name] [desc]         Initializes a new 'zenv.json' in the current directory.
-        \\                             Creates a 'test' environment if 'name' is not provided.
+        \\  init [name] [desc]         Creates 'zenv.json' with environment 'name', or adds it to an
+        \\                             existing one. 'name' defaults to the directory's name.
         \\                             Use to start defining your environments[z].
         \\
         \\  setup <name>               Creates and configures the virtual environment for '<name>'.
@@ -287,43 +288,26 @@ pub fn main(app: std.process.Init) anyerror!void {
         const init_flag = flags.init_mode;
 
         if (init_flag) {
-            // Check if config file already exists
-            const config_exists = blk: {
-                runtime.access(config_path) catch |err| {
-                    if (err != error.FileNotFound) {
-                        output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
-                        errors.report(allocator, err);
-                        break :blk false;
-                    }
-                    // File doesn't exist
-                    break :blk false;
-                };
-                break :blk true;
+            // The name is the first POSITIONAL argument, skipping flags:
+            // `zenv setup --init myenv` must not create an env named "--init".
+            const env_name = flags_module.positional(args, 0) orelse {
+                output.printError(allocator, "Missing environment name. Usage: zenv setup <name> --init", .{}) catch {};
+                process.exit(1);
             };
-
-            if (!config_exists) {
-                // Create init args from the POSITIONAL arguments, skipping flags:
-                // `zenv setup --init myenv` must not create an env named "--init".
-                const env_name = flags_module.positional(args, 0) orelse {
-                    output.printError(allocator, "Missing environment name. Usage: zenv setup <name> --init", .{}) catch {};
-                    process.exit(1);
-                };
-
-                var init_args: std.ArrayList([]const u8) = .empty;
-                defer init_args.deinit(allocator);
-
-                try init_args.append(allocator, "zenv"); // Args[0] is the program name
-                try init_args.append(allocator, "init");
-                try init_args.append(allocator, env_name);
-
-                if (flags_module.positional(args, 1)) |description| {
-                    try init_args.append(allocator, description);
-                }
-
-                // Run init to create config
-                output.print(allocator, "--init flag detected. Creating config file first...", .{}) catch {};
-                commands.handleInitCommand(allocator, init_args.items);
-                output.print(allocator, "Proceeding with setup...", .{}) catch {};
+            if (!paths.isValidEnvName(env_name)) {
+                output.printError(allocator, "Invalid environment name '{s}'. Use only letters, digits, '-', '_' and '.'.", .{env_name}) catch {};
+                process.exit(1);
+            }
+            // Writes zenv.json, or adds the env to an existing one; an env the
+            // file already defines is simply set up.
+            const outcome = commands.initConfig(allocator, env_name, flags_module.positional(args, 1)) catch |err| {
+                output.printError(allocator, "Could not add '{s}' to zenv.json: {s}", .{ env_name, @errorName(err) }) catch {};
+                process.exit(1);
+            };
+            switch (outcome) {
+                .created => output.print(allocator, "--init: created zenv.json with environment '{s}'", .{env_name}) catch {},
+                .added => output.print(allocator, "--init: added environment '{s}' to zenv.json", .{env_name}) catch {},
+                .exists => output.print(allocator, "--init: zenv.json already defines '{s}'; using it", .{env_name}) catch {},
             }
         }
 

@@ -93,29 +93,23 @@ test "initConfigJson writes every key in order and escapes user text" {
     try std.testing.expect(std.mem.find(u8, no_deps, "\"dependency_file\": null") != null);
 }
 
-pub fn handleInitCommand(
-    allocator: Allocator,
-    args: []const []const u8,
-) void {
+const INIT_USAGE =
+    \\Usage: zenv init [name] [description]
+    \\Creates zenv.json with environment <name>, or adds <name> to an existing zenv.json.
+    \\  name         defaults to the current directory's name
+    \\  description  defaults to [project].description from pyproject.toml, if any
+;
+
+pub const InitOutcome = enum { created, added, exists };
+
+/// Defines environment `env_name` in ./zenv.json: writes a new file, or adds
+/// the env to an existing one. `exists` (nothing written) when the file
+/// already defines it. A null `description` is taken from pyproject.toml.
+pub fn initConfig(allocator: Allocator, env_name: []const u8, description: ?[]const u8) !InitOutcome {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const config_path = "zenv.json";
-
-    // Check if file exists
-    const file_exists = blk: {
-        runtime.access(config_path) catch |err| {
-            if (err != error.FileNotFound) {
-                output.printError(allocator, "Accessing current directory: {s}", .{@errorName(err)}) catch {};
-                std.process.exit(1);
-            }
-            // File doesn't exist
-            break :blk false;
-        };
-        break :blk true;
-    };
-
-    if (file_exists) {
-        output.printError(allocator, "{s} already exists. Please remove or rename it first.", .{config_path}) catch {};
-        std.process.exit(1);
-    }
 
     // Point dependency_file at an existing requirements.txt, else pyproject.toml.
     var dependency_file: ?[]const u8 = null;
@@ -123,34 +117,102 @@ pub fn handleInitCommand(
         if (runtime.access(candidate)) |_| {
             dependency_file = candidate;
             break;
-        } else |err| if (err != error.FileNotFound) {
-            output.printError(allocator, "Accessing {s}: {s}", .{ candidate, @errorName(err) }) catch {};
+        } else |err| if (err != error.FileNotFound) return err;
+    }
+
+    const desc = description orelse pyproject: {
+        const content = runtime.readFileAlloc(a, "pyproject.toml", 10 * 1024 * 1024) catch break :pyproject null;
+        break :pyproject try deps.pyprojectDescription(a, content);
+    } orelse "Env config created by zenv";
+
+    const template = try initConfigJson(a, env_name, desc, dependency_file);
+
+    runtime.access(config_path) catch |err| {
+        if (err != error.FileNotFound) return err;
+        try runtime.writeFile(config_path, template);
+        return .created;
+    };
+    return if (try manifest.addEnvToZenvJson(a, config_path, env_name, template)) .added else .exists;
+}
+
+/// An env name from directory `dir`'s name: characters an env name cannot
+/// hold become '-'. "test" when nothing usable is left.
+pub fn defaultEnvName(allocator: Allocator, dir: []const u8) ![]u8 {
+    const base = std.Io.Dir.path.basename(dir);
+    const name = try allocator.dupe(u8, base);
+    for (name) |*c| {
+        if (!std.ascii.isAlphanumeric(c.*) and c.* != '_' and c.* != '-' and c.* != '.') c.* = '-';
+    }
+    if (paths.isValidEnvName(name)) return name;
+    allocator.free(name);
+    return allocator.dupe(u8, "test");
+}
+
+test "defaultEnvName uses the directory name, made valid" {
+    const a = std.testing.allocator;
+    for ([_][2][]const u8{
+        .{ "/home/u/my-proj", "my-proj" },
+        .{ "/home/u/My Project (v2)", "My-Project--v2-" },
+        .{ "/home/u/proj.d/", "proj.d" },
+        .{ "/", "test" },
+        .{ "..", "test" },
+    }) |case| {
+        const got = try defaultEnvName(a, case[0]);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(case[1], got);
+    }
+}
+
+pub fn handleInitCommand(
+    allocator: Allocator,
+    args: []const []const u8,
+) void {
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            output.rawOut(allocator, INIT_USAGE ++ "\n", .{}) catch {};
+            return;
+        }
+        if (std.mem.startsWith(u8, arg, "-")) {
+            output.printError(allocator, "Unknown option '{s}' for 'zenv init'.\n" ++ INIT_USAGE, .{arg}) catch {};
             std.process.exit(1);
         }
     }
 
-    const env_name = if (args.len > 2) args[2] else "test";
-    const env_desc = if (args.len > 3) args[3] else "Env config created by zenv";
+    var owned_name: ?[]u8 = null;
+    defer if (owned_name) |n| allocator.free(n);
+    const env_name = positional(args, 0) orelse blk: {
+        const cwd = runtime.cwdRealpath(allocator) catch |err| {
+            output.printError(allocator, "Reading the current directory: {s}", .{@errorName(err)}) catch {};
+            std.process.exit(1);
+        };
+        defer allocator.free(cwd);
+        owned_name = defaultEnvName(allocator, cwd) catch {
+            output.printError(allocator, "Out of memory", .{}) catch {};
+            std.process.exit(1);
+        };
+        break :blk owned_name.?;
+    };
+    if (!paths.isValidEnvName(env_name)) {
+        output.printError(allocator, "Invalid environment name '{s}'. Use only letters, digits, '-', '_' and '.'.", .{env_name}) catch {};
+        std.process.exit(1);
+    }
 
-    const processed_content = initConfigJson(allocator, env_name, env_desc, dependency_file) catch |err| {
-        output.printError(allocator, "Building {s}: {s}", .{ config_path, @errorName(err) }) catch {};
+    const outcome = initConfig(allocator, env_name, positional(args, 1)) catch |err| {
+        if (err == error.InvalidFormat) {
+            output.printError(allocator, "zenv.json exists but is not a JSON object; fix it or remove it first.", .{}) catch {};
+        } else {
+            output.printError(allocator, "Writing zenv.json: {s}", .{@errorName(err)}) catch {};
+        }
         std.process.exit(1);
     };
-    defer allocator.free(processed_content);
-
-    // Write the new zenv.json
-    var file = runtime.createFile(config_path, .{}) catch |err| {
-        output.printError(allocator, "Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
-        std.process.exit(1);
-    };
-    defer file.close(runtime.io);
-
-    file.writeStreamingAll(runtime.io, processed_content) catch |err| {
-        output.printError(allocator, "Writing to {s}: {s}", .{ config_path, @errorName(err) }) catch {};
-        std.process.exit(1);
-    };
-
-    output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{env_name}) catch {};
+    switch (outcome) {
+        .created => output.print(allocator, "Created zenv.json with environment '{s}'. Run 'zenv setup {s}'", .{ env_name, env_name }) catch {},
+        .added => output.print(allocator, "Added environment '{s}' to zenv.json. Run 'zenv setup {s}'", .{ env_name, env_name }) catch {},
+        .exists => {
+            output.printError(allocator, "zenv.json already defines environment '{s}'. Pick another name: zenv init <name>", .{env_name}) catch {};
+            std.process.exit(1);
+        },
+    }
 }
 
 pub fn handleSetupCommand(

@@ -90,6 +90,8 @@ zenv setup <name>
 # This will also register the environment to global ZENV_DIR/registry.json
 ```
 
+`name` defaults to the project directory's name (characters an environment name cannot contain become `-`), and `description` to `[project].description` from `pyproject.toml` when there is one. If `zenv.json` already exists, `zenv init` adds the new environment to it (the file is rewritten with 2-space indentation) and refuses only when that name is already defined. `zenv setup <name> --init` does the same and then sets the environment up; if `zenv.json` already defines `<name>`, it just sets it up.
+
 **A minimal example of a `zenv.json` file**:
 
 ```json
@@ -413,8 +415,8 @@ Usage: zenv <command> [name|id] [options]
 Manages Python virtual environments based on zenv.json configuration.
 
 Commands:
-  init [name] [desc]         Initializes a new 'zenv.json' in the current directory.
-                             Creates a 'test' environment if 'name' is not provided.
+  init [name] [desc]         Creates 'zenv.json' with environment 'name', or adds it to an
+                             existing one. 'name' defaults to the directory's name.
                              Use to start defining your environments[z].
 
   setup <name>               Creates and configures the virtual environment for '<name>'.

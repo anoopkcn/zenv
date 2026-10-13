@@ -122,6 +122,22 @@ pub fn parsePyprojectToml(
     return count;
 }
 
+/// `[project].description` of the pyproject.toml `content`, duped into
+/// `allocator`; null when absent, empty or the document does not parse.
+pub fn pyprojectDescription(allocator: Allocator, content: []const u8) !?[]u8 {
+    var parser = toml.Parser(toml.Table).init(allocator);
+    defer parser.deinit();
+    var parsed = parser.parseString(content) catch return null;
+    defer parsed.deinit();
+    const project = parsed.value.get("project") orelse return null;
+    if (project != .table) return null;
+    const desc = project.table.get("description") orelse return null;
+    if (desc != .string) return null;
+    const trimmed = std.mem.trim(u8, desc.string, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
 // Parse dependencies from requirements.txt format content
 // Returns the number of dependencies found
 pub fn parseRequirementsTxt(
@@ -468,4 +484,20 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
         try testing.expect(std.mem.find(u8, d, "pytest") == null);
         try testing.expect(std.mem.find(u8, d, "ruff") == null);
     }
+}
+
+test "pyprojectDescription reads [project].description only" {
+    const a = std.testing.allocator;
+    const d = (try pyprojectDescription(a,
+        \\[tool.x]
+        \\description = "not this"
+        \\[project]
+        \\name = "demo"
+        \\description = "  A demo project  "
+    )).?;
+    defer a.free(d);
+    try std.testing.expectEqualStrings("A demo project", d);
+    try std.testing.expect((try pyprojectDescription(a, "[project]\nname = \"x\"\n")) == null);
+    try std.testing.expect((try pyprojectDescription(a, "[project]\ndescription = \"\"\n")) == null);
+    try std.testing.expect((try pyprojectDescription(a, "not = = toml")) == null);
 }

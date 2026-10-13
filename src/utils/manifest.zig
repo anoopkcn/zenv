@@ -127,6 +127,34 @@ pub fn addToZenvJson(
     try runtime.writeFileAtomic(allocator, path, out);
 }
 
+/// Adds environment `env_name` to the zenv.json at `path`, taking its object
+/// from `template`, a zenv.json document that defines it (as `zenv init`
+/// writes). Returns false, writing nothing, when the file already has that
+/// environment. Re-emits the document like addToZenvJson.
+pub fn addEnvToZenvJson(allocator: Allocator, path: []const u8, env_name: []const u8, template: []const u8) !bool {
+    const content = try runtime.readFileAlloc(allocator, path, MAX_FILE);
+    defer allocator.free(content);
+
+    var parsed = json.parseFromSlice(json.Value, allocator, content, .{ .allocate = .alloc_always }) catch return error.InvalidFormat;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidFormat;
+    if (parsed.value.object.contains(env_name)) return false;
+
+    // Parsed into the same arena, so the new entry lives as long as the document.
+    const a = parsed.arena.allocator();
+    const tmpl = try json.parseFromSliceLeaky(json.Value, a, template, .{ .allocate = .alloc_always });
+    if (tmpl != .object) return error.InvalidFormat;
+    const env_value = tmpl.object.get(env_name) orelse return error.InvalidFormat;
+    try parsed.value.object.put(a, try a.dupe(u8, env_name), env_value);
+
+    const out = try json.Stringify.valueAlloc(allocator, parsed.value, .{ .whitespace = .indent_2 });
+    defer allocator.free(out);
+    const with_newline = try std.mem.concat(allocator, u8, &.{ out, "\n" });
+    defer allocator.free(with_newline);
+    try runtime.writeFileAtomic(allocator, path, with_newline);
+    return true;
+}
+
 // =======================================================================
 // pyproject.toml
 // =======================================================================
@@ -561,4 +589,40 @@ test "zenv.json: adds to dependencies and dev_dependencies, preserving order" {
     const demo = parsed.value.object.get("demo").?;
     try testing.expectEqual(@as(usize, 2), demo.object.get("dependencies").?.array.items.len);
     try testing.expectEqual(@as(usize, 1), demo.object.get("dev_dependencies").?.array.items.len);
+}
+
+test "zenv.json: addEnvToZenvJson appends a new env and refuses an existing one" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const path = ".zig-cache/tmp/zenv-manifest-add-env.json";
+    runtime.deleteFile(path) catch {};
+    defer runtime.deleteFile(path) catch {};
+
+    const original =
+        \\{ "base_dir": "envs", "old": { "target_machines": ["*"], "dependencies": ["requests"] } }
+    ;
+    try runtime.writeFile(path, original);
+    const template =
+        \\{ "base_dir": ".zenv", "new": { "target_machines": ["*"], "description": "d" } }
+    ;
+
+    try testing.expect(!try addEnvToZenvJson(a, path, "old", template));
+    const unchanged = try runtime.readFileAlloc(a, path, MAX_FILE);
+    defer a.free(unchanged);
+    try testing.expectEqualStrings(original, unchanged);
+
+    try testing.expect(try addEnvToZenvJson(a, path, "new", template));
+    const c = try runtime.readFileAlloc(a, path, MAX_FILE);
+    defer a.free(c);
+    var parsed = try json.parseFromSlice(json.Value, a, c, .{});
+    defer parsed.deinit();
+    const keys = parsed.value.object.keys();
+    try testing.expectEqual(@as(usize, 3), keys.len);
+    try testing.expectEqualStrings("new", keys[2]); // appended after the existing envs
+    try testing.expectEqualStrings("envs", parsed.value.object.get("base_dir").?.string); // file's own base_dir kept
+    try testing.expectEqualStrings("d", parsed.value.object.get("new").?.object.get("description").?.string);
+    try testing.expectEqual(@as(usize, 1), parsed.value.object.get("old").?.object.get("dependencies").?.array.items.len);
+
+    try runtime.writeFile(path, "[1, 2]");
+    try testing.expectError(error.InvalidFormat, addEnvToZenvJson(a, path, "new", template));
 }
