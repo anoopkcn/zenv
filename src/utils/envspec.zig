@@ -112,6 +112,41 @@ pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8)
     return ops.toOwnedSlice(allocator);
 }
 
+/// Activation for an env with `"python": false`: its bin/ on PATH and
+/// ZENV_ENV_DIR, without the venv variables. VIRTUAL_ENV would make uv and pip
+/// target a directory that has no Python in it.
+pub fn plainOps(allocator: Allocator, venv_path: []const u8) ![]const Op {
+    const bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
+    var ops: std.ArrayList(Op) = .empty;
+    try ops.append(allocator, .{ .op = .prepend, .name = "PATH", .value = bin });
+    try ops.append(allocator, .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path });
+    return ops.toOwnedSlice(allocator);
+}
+
+/// `value` with `${ZENV_ENV_DIR}` and `${ZENV_PROJECT_DIR}` replaced by the
+/// env and project directories. Anything else, `$HOME` included, stays
+/// literal, so the value is the same in every shell and in `zenv run`.
+pub fn expandValue(allocator: Allocator, value: []const u8, venv_path: []const u8, project_dir: []const u8) ![]const u8 {
+    const env_dir_ref = try std.mem.replaceOwned(u8, allocator, value, "${ZENV_ENV_DIR}", venv_path);
+    return std.mem.replaceOwned(u8, allocator, env_dir_ref, "${ZENV_PROJECT_DIR}", project_dir);
+}
+
+/// The `env` entries of zenv.json as ops, expanded, in file order. Applied
+/// after the venv ops, so they may extend PATH in front of the env's bin/.
+pub fn userOps(allocator: Allocator, env_config: *const EnvironmentConfig, venv_path: []const u8, project_dir: []const u8) ![]const Op {
+    var ops: std.ArrayList(Op) = .empty;
+    for (env_config.env.items) |v| try ops.append(allocator, .{
+        .op = switch (v.kind) {
+            .set => .set,
+            .prepend => .prepend,
+            .append => .append,
+        },
+        .name = v.name,
+        .value = try expandValue(allocator, v.value, venv_path, project_dir),
+    });
+    return ops.toOwnedSlice(allocator);
+}
+
 /// Reads `<venv_path>/.zenv_module_cache.json`. Null when missing or
 /// malformed. Results are allocated with `allocator` (use an arena).
 pub fn readModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache {
@@ -167,23 +202,26 @@ pub fn isIdentifier(name: []const u8) bool {
 /// Builds the Spec for `env_config`. Call at the end of setup, after the setup
 /// script has (re)written the module cache files and created the venv.
 /// `activate_script` is the hook's path inside the venv (already copied), if
-/// any. Everything is allocated with, or borrowed from, `allocator` and
+/// any. `project_dir` anchors `${ZENV_PROJECT_DIR}` in `env` values.
+/// Everything is allocated with, or borrowed from, `allocator` and
 /// `env_config` (use an arena).
 pub fn build(
     allocator: Allocator,
     env_config: *const EnvironmentConfig,
     env_name: []const u8,
     venv_path: []const u8,
+    project_dir: []const u8,
     activate_script: ?[]const u8,
 ) !Spec {
     const modules = env_config.modules.items;
+    const venv_ops = if (env_config.python) try venvOps(allocator, venv_path, env_name) else try plainOps(allocator, venv_path);
     return .{
         .name = env_name,
         .venv = venv_path,
         .modules = modules,
         .module_cache_enabled = env_config.module_cache,
         .module_cache = if (modules.len > 0 and env_config.module_cache) readModuleCache(allocator, venv_path) else null,
-        .ops = try venvOps(allocator, venv_path, env_name),
+        .ops = try std.mem.concat(allocator, Op, &.{ venv_ops, try userOps(allocator, env_config, venv_path, project_dir) }),
         .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
         .activate_script = activate_script,
     };
@@ -349,6 +387,56 @@ test "venvOps mirrors bin/activate + activate.sh exports, in order" {
 
     const no_prompt = try venvOps(arena.allocator(), "/p/.zenv/demo", null);
     try testing.expectEqual(@as(usize, 5), no_prompt.len);
+}
+
+test "plainOps puts bin/ on PATH without the venv variables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ops = try plainOps(arena.allocator(), "/p/.zenv/demo");
+    try testing.expectEqual(@as(usize, 2), ops.len);
+    try testing.expectEqual(OpKind.prepend, ops[0].op);
+    try testing.expectEqualStrings("PATH", ops[0].name);
+    try testing.expectEqualStrings("/p/.zenv/demo/bin", ops[0].value);
+    try testing.expectEqualStrings("ZENV_ENV_DIR", ops[1].name);
+    for (ops) |op| try testing.expect(!std.mem.startsWith(u8, op.name, "VIRTUAL_ENV") and !std.mem.startsWith(u8, op.name, "PYTHON"));
+}
+
+test "build picks plainOps for a Python-free env" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg = EnvironmentConfig.init(arena.allocator());
+    cfg.python = false;
+    const spec = try build(arena.allocator(), &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    try testing.expectEqual(@as(usize, 2), spec.ops.len);
+    cfg.python = true;
+    const with_python = try build(arena.allocator(), &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    try testing.expectEqualStrings("VIRTUAL_ENV", with_python.ops[0].name);
+}
+
+test "expandValue replaces only the two zenv directories" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const out = try expandValue(arena.allocator(), "${ZENV_PROJECT_DIR}/data:${ZENV_ENV_DIR}/bin:$HOME/${OTHER}:${ZENV_ENV_DIR}", "/p/.zenv/demo", "/p");
+    try testing.expectEqualStrings("/p/data:/p/.zenv/demo/bin:$HOME/${OTHER}:/p/.zenv/demo", out);
+}
+
+test "build appends env entries after the venv ops, expanded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg = EnvironmentConfig.init(a);
+    try cfg.env.append(a, .{ .name = "DATA", .value = "${ZENV_PROJECT_DIR}/data" });
+    try cfg.env.append(a, .{ .name = "PATH", .value = "${ZENV_ENV_DIR}/tools", .kind = .prepend });
+    const spec = try build(a, &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    const n = spec.ops.len;
+    try testing.expectEqualStrings("VIRTUAL_ENV", spec.ops[0].name);
+    try testing.expectEqualStrings("DATA", spec.ops[n - 2].name);
+    try testing.expectEqual(OpKind.set, spec.ops[n - 2].op);
+    try testing.expectEqualStrings("/p/data", spec.ops[n - 2].value);
+    try testing.expectEqual(OpKind.prepend, spec.ops[n - 1].op);
+    try testing.expectEqualStrings("/p/.zenv/demo/tools", spec.ops[n - 1].value);
+    // Activation needs no shell for them: `zenv run` keeps the direct launch.
+    try testing.expect(directReason(&spec, null) == null);
 }
 
 test "relocate moves venv paths and the name, nothing else" {

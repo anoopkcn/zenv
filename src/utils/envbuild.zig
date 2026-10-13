@@ -50,6 +50,8 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     // Copy the setup hook first so a bad path fails before any work is done.
     const setup_hook = try copySetupHook(a, opts);
 
+    if (!opts.env_config.python) return runWithoutPython(a, opts, setup_hook);
+
     if (flags.use_default_python) info(a, "--python: using only the zenv-pinned Python", .{});
     if (flags.dev_mode) info(a, "--dev: will install the project as an editable package", .{});
     if (flags.no_cache) info(a, "--no-cache: package caches are disabled", .{});
@@ -81,8 +83,11 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     // Activate for everything below.
     const venv_python = try join(a, &[_][]const u8{ opts.venv_dir, "bin", "python" });
     try env.put("VIRTUAL_ENV", opts.venv_dir);
+    try env.put("ZENV_ENV_DIR", opts.venv_dir);
     try envspec.applyOp(&env, .{ .op = .prepend, .name = "PATH", .value = try join(a, &[_][]const u8{ opts.venv_dir, "bin" }) });
     _ = env.orderedRemove("PYTHONHOME");
+    // The env's own variables, so installs and hooks see what activation will.
+    try applyUserEnv(a, opts, &env);
 
     if (!flags.use_uv) try seedPip(a, &env, venv_python, chosen);
 
@@ -112,6 +117,46 @@ pub fn run(allocator: Allocator, opts: Options) !void {
 
     banner(a, "completed");
 }
+
+/// Setup for an env with `"python": false`: modules, a bin/ for the project's
+/// own tools, and the hooks; no interpreter, venv or installs. A venv left
+/// from when the env had Python is refused rather than taken apart, since its
+/// bin/ mixes installed entry points with the user's own files.
+fn runWithoutPython(a: Allocator, opts: Options, setup_hook: ?[]const u8) !void {
+    info(a, "\"python\": false: building without a Python venv", .{});
+    if (try hasPythonVenv(a, opts.venv_dir)) {
+        return fail(a, "Environment '{s}' still has a Python venv in {s}, but zenv.json now says \"python\": false. Remove it with 'zenv rm {s}', then run 'zenv setup {s}'.", .{ opts.env_name, opts.venv_dir, opts.env_name, opts.env_name });
+    }
+
+    var env = try runtime.environ_map.clone(a);
+    _ = try loadModules(a, opts, &env);
+
+    const bin = try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "bin" });
+    runtime.makePath(bin) catch |err| return fail(a, "Could not create {s}: {s}", .{ bin, @errorName(err) });
+    try envspec.applyOp(&env, .{ .op = .prepend, .name = "PATH", .value = bin });
+    try env.put("ZENV_ENV_DIR", opts.venv_dir);
+    try applyUserEnv(a, opts, &env);
+
+    try runHooks(a, opts, &env, setup_hook);
+    banner(a, "completed");
+}
+
+/// Applies the `env` entries of zenv.json to `env`, as activation will.
+fn applyUserEnv(a: Allocator, opts: Options, env: *Map) !void {
+    for (try envspec.userOps(a, opts.env_config, opts.venv_dir, opts.project_dir)) |op| try envspec.applyOp(env, op);
+}
+
+/// Whether `venv_dir` holds any part of a Python venv. bin/ alone does not
+/// count: a Python-free env has one too.
+fn hasPythonVenv(a: Allocator, venv_dir: []const u8) !bool {
+    for (PYTHON_PARTS) |p| {
+        if (lexists(try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, p }))) return true;
+    }
+    return false;
+}
+
+/// What venv creation adds besides bin/ (bin/python is its interpreter link).
+const PYTHON_PARTS = [_][]const u8{ "bin/python", "lib", "lib64", "include", "pyvenv.cfg" };
 
 // ---------------------------------------------------------------------------
 // Output and process helpers
@@ -666,14 +711,11 @@ fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Ma
         return;
     }
 
-    const parts = [_][]const u8{ "bin", "lib", "lib64", "include", "pyvenv.cfg" };
-    var partial = false;
-    for (parts) |p| {
-        if (lexists(try join(a, &[_][]const u8{ venv_dir, p }))) partial = true;
-    }
-    if (partial) {
+    // A bin/ without the other parts is a Python-free env gaining Python:
+    // venv.create fills it in and keeps the user's files there.
+    if (try hasPythonVenv(a, venv_dir)) {
         info(a, "Existing venv {s} seems corrupted/incomplete. Clearing it and recreating.", .{venv_dir});
-        for (parts) |p| {
+        for ([_][]const u8{ "bin", "lib", "lib64", "include", "pyvenv.cfg" }) |p| {
             const path = try join(a, &[_][]const u8{ venv_dir, p });
             if (!lexists(path)) continue;
             // A file or link (lib64), else a directory. A part that cannot be
@@ -1063,4 +1105,54 @@ test "installerArgv for uv and pip" {
     const want_pip = [_][]const u8{ "/v/bin/python", "-m", "pip", "install", "--upgrade", "pip" };
     try testing.expectEqual(want_pip.len, pip.len);
     for (want_pip, pip) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "hasPythonVenv: bin/ alone is a Python-free env, any venv part is not" {
+    const test_support = @import("../test_support.zig");
+    test_support.setupRuntime();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = ".zig-cache/tmp/zenv-has-python-venv-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    try runtime.makePath(root ++ "/bin");
+    try runtime.writeFile(root ++ "/bin/hello", "#!/bin/sh\n");
+    try testing.expect(!try hasPythonVenv(a, root));
+
+    try runtime.writeFile(root ++ "/pyvenv.cfg", "home = /usr/bin\n");
+    try testing.expect(try hasPythonVenv(a, root));
+    try runtime.deleteFile(root ++ "/pyvenv.cfg");
+    try runtime.writeFile(root ++ "/bin/python", "");
+    try testing.expect(try hasPythonVenv(a, root));
+}
+
+test "runWithoutPython keeps bin/ and refuses a leftover Python venv" {
+    const test_support = @import("../test_support.zig");
+    test_support.setupRuntime();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = ".zig-cache/tmp/zenv-run-without-python-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    try runtime.makePath(root ++ "/bin");
+    try runtime.writeFile(root ++ "/bin/hello", "#!/bin/sh\n");
+
+    var cfg = EnvironmentConfig.init(a);
+    cfg.python = false;
+    const opts = Options{ .env_config = &cfg, .env_name = "plain", .venv_dir = root, .project_dir = ".", .deps = &.{}, .flags = .{} };
+
+    // No module system in the test environment and no hooks: only bin/ is made.
+    try runWithoutPython(a, opts, null);
+    try runtime.access(root ++ "/bin/hello");
+    try testing.expect(!try hasPythonVenv(a, root));
+
+    // The env had Python before: refused, nothing removed.
+    try runtime.makePath(root ++ "/lib");
+    try testing.expectError(error.ProcessError, runWithoutPython(a, opts, null));
+    try runtime.access(root ++ "/lib");
+    try runtime.access(root ++ "/bin/hello");
 }

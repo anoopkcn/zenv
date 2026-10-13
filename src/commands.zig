@@ -189,6 +189,11 @@ pub fn handleSetupCommand(
     // Non-null: getAndValidateEnvironment just errored otherwise.
     const env_name = positional(args, 0).?;
 
+    if (!env_config.python) {
+        if (flags.dev_mode) return noPython(allocator, env_name, "--dev installs the project into it");
+        if (flags.create_jupyter_kernel) return noPython(allocator, env_name, "--jupyter needs Python");
+    }
+
     const display_target = if (env_config.target_machines.items.len > 0) env_config.target_machines.items[0] else "any";
 
     // Set up logging to a file inside the environment directory. Setup runs in
@@ -766,7 +771,12 @@ pub fn handleCdCommand(
 
     const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
     // Rebuild the env first if its config/dependency files changed (silent).
-    try autosetup.ensureUpToDate(allocator, registry.get(ref));
+    // A failed rebuild still prints the directory: the project is where the
+    // user goes to fix zenv.json, and `cd $(zenv cd ...)` would otherwise land
+    // in $HOME. The gate has already shown the rebuild's errors on stderr.
+    autosetup.ensureUpToDate(allocator, registry.get(ref)) catch |err| {
+        if (err != error.AutoSetupFailed) return err;
+    };
 
     // Output just the project directory path
     output.rawOut(allocator, "{s}\n", .{registry.get(ref).project_dir}) catch |e| {
@@ -944,6 +954,26 @@ pub fn handleAddCommand(
     // The project's zenv.json tells us which manifest (if any) backs this env.
     const zenv_json_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
     defer allocator.free(zenv_json_path);
+
+    // Turning Python on is the user's call, made in zenv.json, not a side
+    // effect of adding a package.
+    if (try pythonDisabled(allocator, zenv_json_path, env_name)) {
+        const retry = try std.mem.join(allocator, " ", args[1..]);
+        defer allocator.free(retry);
+        output.printError(allocator, "'{s}' has no Python (\"python\": false in zenv.json), so packages cannot be added.", .{env_name}) catch {};
+        output.printError(allocator, "Set \"python\": true for '{s}' in zenv.json, then re-run: zenv {s}", .{ env_name, retry }) catch {};
+        return error.NoPython;
+    }
+    // Python was just turned on for an env built without it: build the venv
+    // first (zenv.json changed, so the gate rebuilds).
+    if (!try venvHasPython(allocator, entry.venv_path)) {
+        try autosetup.ensureUpToDate(allocator, entry);
+        if (!try venvHasPython(allocator, entry.venv_path)) {
+            output.printError(allocator, "Environment '{s}' has no Python venv yet. Run 'zenv setup {s}' first.", .{ env_name, env_name }) catch {};
+            return error.NoPython;
+        }
+    }
+
     const dep_file = try readDependencyFile(allocator, zenv_json_path, env_name);
     defer if (dep_file) |df| allocator.free(df);
 
@@ -977,6 +1007,39 @@ fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const 
         .string => |s| try allocator.dupe(u8, s),
         else => null,
     };
+}
+
+/// Whether zenv.json at `path` sets `"python": false` for `env_name`. False
+/// when the file/env/field is absent or unparsable, like readDependencyFile.
+fn pythonDisabled(allocator: Allocator, path: []const u8, env_name: []const u8) !bool {
+    const content = runtime.readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) return false;
+        return err;
+    };
+    defer allocator.free(content);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const env_obj = parsed.value.object.get(env_name) orelse return false;
+    if (env_obj != .object) return false;
+    const py = env_obj.object.get("python") orelse return false;
+    return py == .bool and !py.bool;
+}
+
+/// Whether the venv at `venv_path` has its interpreter link, bin/python.
+fn venvHasPython(allocator: Allocator, venv_path: []const u8) !bool {
+    const py = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin", "python" });
+    defer allocator.free(py);
+    runtime.access(py) catch return false;
+    return true;
+}
+
+/// Refuses a Python-only action on a Python-free env, saying how to enable it.
+fn noPython(allocator: Allocator, env_name: []const u8, why: []const u8) error{NoPython} {
+    output.printError(allocator, "'{s}' has no Python (\"python\": false in zenv.json); {s}.", .{ env_name, why }) catch {};
+    output.printError(allocator, "Set \"python\": true for '{s}' in zenv.json to use it.", .{env_name}) catch {};
+    return error.NoPython;
 }
 
 /// Installs `package` into the activated environment via pip (or uv when
@@ -1138,6 +1201,25 @@ fn buildRunArgv(
     try argv.appendSlice(allocator, &[_][]const u8{ "/bin/bash", "-c", run_runner, "zenv", activate_path, command });
     try argv.appendSlice(allocator, command_args);
     return argv.toOwnedSlice(allocator);
+}
+
+test "pythonDisabled reads only an explicit false" {
+    const test_support = @import("test_support.zig");
+    test_support.setupRuntime();
+    const a = std.testing.allocator;
+    const root = ".zig-cache/tmp/zenv-python-disabled-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    try runtime.makePath(root);
+    const path = root ++ "/zenv.json";
+    try runtime.writeFile(path,
+        \\{ "base_dir": ".zenv", "off": { "python": false }, "on": { "python": true }, "unset": {} }
+    );
+    try std.testing.expect(try pythonDisabled(a, path, "off"));
+    try std.testing.expect(!try pythonDisabled(a, path, "on"));
+    try std.testing.expect(!try pythonDisabled(a, path, "unset"));
+    try std.testing.expect(!try pythonDisabled(a, path, "missing"));
+    try std.testing.expect(!try pythonDisabled(a, root ++ "/nope.json", "off"));
 }
 
 test "buildRunArgv passes command and args through verbatim" {
@@ -1526,6 +1608,10 @@ fn handleJupyterCreate(
     // Rebuild the env first if its config/dependency files changed (silent), so
     // the kernel is created against an up-to-date environment.
     try autosetup.ensureUpToDate(allocator, entry);
+
+    const zenv_json_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" });
+    defer allocator.free(zenv_json_path);
+    if (try pythonDisabled(allocator, zenv_json_path, entry.env_name)) return noPython(allocator, entry.env_name, "a Jupyter kernel needs Python");
 
     try jupyter.createKernel(allocator, entry.env_name, entry.venv_path, custom_name, custom_display_name);
 }

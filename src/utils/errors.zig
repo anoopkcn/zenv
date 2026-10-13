@@ -39,6 +39,7 @@ pub const ZenvError = error{
     KernelNotFound, // Jupyter kernel for the environment is missing
     KernelExists, // Jupyter kernel with that name already exists
     AutoSetupFailed, // A silent auto-setup (triggered by a config change) failed
+    NoPython, // A Python-only action on an env with "python": false
 };
 
 /// Maps any error that reaches the top level to a single user-facing message,
@@ -86,7 +87,7 @@ pub fn report(allocator: Allocator, err: anyerror) void {
         error.KernelExists => output.printError(allocator, "A Jupyter kernel with that name already exists", .{}) catch {},
         // Already reported by the process / module loader / auto-setup gate /
         // setup base-dir guard; just exit (no message).
-        error.ProcessError, error.ModuleLoadError, error.AutoSetupFailed, error.BaseDirIsZenvDir => {},
+        error.ProcessError, error.ModuleLoadError, error.AutoSetupFailed, error.BaseDirIsZenvDir, error.NoPython => {},
         else => output.printError(allocator, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {},
     }
     std.process.exit(1);

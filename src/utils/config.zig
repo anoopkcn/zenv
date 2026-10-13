@@ -59,6 +59,17 @@ pub const ScriptConfig = struct {
     }
 };
 
+/// One entry of an env's `env` object in zenv.json: set NAME to `value`, or
+/// add `value` to the front or back of a PATH-like NAME. `value` is as
+/// written, before `${ZENV_ENV_DIR}` / `${ZENV_PROJECT_DIR}` expansion.
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+    kind: Kind = .set,
+
+    pub const Kind = enum { set, prepend, append };
+};
+
 pub const EnvironmentConfig = struct {
     /// Every owned string and list in this config is allocated with `allocator`.
     allocator: Allocator,
@@ -79,6 +90,13 @@ pub const EnvironmentConfig = struct {
     // produces and activate replays it instead of re-running Lmod. Only has an
     // effect when `modules` is non-empty.
     module_cache: bool = true,
+    // When false, the env has no Python venv: setup only loads modules, runs
+    // the hooks and writes activation, for projects that use zenv just for
+    // modules and settings. Dependencies are then a validation error.
+    python: bool = true,
+    // `env` from zenv.json, in file order: variables activation sets and
+    // deactivate restores.
+    env: ArrayList(EnvVar) = .empty,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
         return .{
@@ -109,6 +127,12 @@ pub const EnvironmentConfig = struct {
 
         if (self.setup) |*setup_config| setup_config.deinit(allocator);
         if (self.activate) |*activate_config| activate_config.deinit(allocator);
+
+        for (self.env.items) |v| {
+            allocator.free(v.name);
+            allocator.free(v.value);
+        }
+        self.env.deinit(allocator);
     }
 };
 

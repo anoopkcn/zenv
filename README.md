@@ -293,9 +293,14 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "modules": ["<module1>", "<module2>"],
     "modules_file": "<path to modules file OR null>"
     "module_cache": true,
+    "python": true,
     "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
     "dependencies": ["<package name with or without version>"],
     "dev_dependencies": ["<development dependency, typically added via 'zenv add --dev'>"],
+    "env": {
+      "<NAME>": "<value>",
+      "<PATH_LIKE_NAME>": { "prepend": "<value>" }
+    },
     "setup": {
       "commands": ["<list of shell commands which is run during setup>"],
       "script": "<path to a shell script which is run during setup>"
@@ -321,6 +326,30 @@ The machine identity that `target_machines` is matched against is taken from `$S
 
 **Host-aware selection (shared filesystems).** When several machines share a filesystem (e.g. HPC login/compute nodes), you can register one environment per machine — distinct names like `env_machine1`, `env_machine2`, each with its own `target_machines` — and give them all the **same alias** (e.g. `zenv alias create dev env_machine1`, then `... dev env_machine2`). Resolving that alias, or the `.` current-directory shortcut, then auto-selects the environment whose `target_machines` matches the machine you are on, so the *same* command (`zenv run dev`, `zenv activate .`, `zenv cd .`) works on every node. If the current host matches none of the candidates — or more than one (e.g. two share a `*`/`any` target) — resolution reports an ambiguity listing each candidate and its target machines; use the exact environment name or id to disambiguate. A unique alias (one holder) still resolves regardless of host.
 
+### Environment variables
+
+The `env` object sets environment variables for the environment, in the order written:
+
+```json
+"env": {
+  "PROJECT_DATA": "${ZENV_PROJECT_DIR}/data",
+  "OMP_NUM_THREADS": "8",
+  "PATH": { "prepend": "${ZENV_PROJECT_DIR}/scripts" },
+  "LD_LIBRARY_PATH": { "append": "/opt/foo/lib" }
+}
+```
+
+A string value sets the variable; `{"prepend": ...}` or `{"append": ...}` adds an entry to the front or back of a `:`-separated variable instead of replacing it. In values, `${ZENV_ENV_DIR}` (the environment directory) and `${ZENV_PROJECT_DIR}` (the directory holding `zenv.json`) are replaced by zenv; everything else, `$HOME` included, is taken literally, so the value is the same in every shell.
+
+Unlike `export` lines in `activate.commands`, these are recorded as data in `zenv-env.json`, which means:
+
+- `deactivate`, and switching to another environment, restores each variable's previous value (or unsets it if it was not set);
+- they work in bash, zsh, csh/tcsh and fish (`activate.commands` run only in bash and zsh);
+- `zenv run` applies them directly, without starting a shell to source `activate.sh`;
+- `zenv setup` applies them too, so package installs and `setup` hooks see them.
+
+Variables zenv's activation manages (`VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `ZENV_ENV_DIR`, `PYTHONHOME`, `PS1`, and names starting with `_ZENV_` or `_OLD_VIRTUAL_`) cannot be set, and `PATH` can only be prepended or appended to. Use `activate.commands` / `activate.script` for anything that needs shell logic.
+
 For custom scripts, you can use `activate_hook` and `setup_hook` to specify paths to shell scripts that will be copied to the environment's directory and executed during activation or setup. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
 The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
@@ -339,11 +368,36 @@ The cache is used only when it is trustworthy; otherwise activation transparentl
 
 If your login shell is not bash (e.g. zsh), `module` is not visible to the bash that `zenv setup` uses to load modules. zenv then defines it from `$LMOD_CMD`, the way Lmod's own bash init does.
 
-When this auto-rebuild fires, zenv prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` followed by a completion line) so you know a rebuild happened and why. It is on stderr deliberately: commands like `zenv activate` / `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. The notice appears only when a rebuild actually runs — a routine activation with no changes stays silent. Set `ZENV_NO_AUTO_SETUP=1` to disable the auto-rebuild (and its notice) entirely.
+When this auto-rebuild fires, zenv prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` followed by a completion line) so you know a rebuild happened and why. It is on stderr deliberately: commands like `zenv activate` / `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. The notice appears only when a rebuild actually runs — a routine activation with no changes stays silent. Set `ZENV_NO_AUTO_SETUP=1` to disable the auto-rebuild (and its notice) entirely. If the rebuild fails, its errors are printed and the command stops, except `zenv cd`, which still prints the project directory so you can go fix `zenv.json`.
 
 **Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed. To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`). When a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. `zenv setup --force` always re-captures.
 
 The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance, re-run `zenv setup` (or `zenv setup --force`) to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
+
+### Environments without Python
+
+For a project that is not a Python project, set `"python": false` to use a zenv environment only for its modules, environment variables and settings. `zenv setup` then loads the modules (and captures the module cache), creates the environment directory with an empty `bin/` that activation puts on `PATH`, runs the `setup` hooks and writes the activation scripts. It does not look for a Python interpreter, create a venv or install anything, so `uv` is not needed either.
+
+```json
+{
+  "base_dir": ".zenv",
+  "tools": {
+    "target_machines": ["*"],
+    "python": false,
+    "modules": ["GCC", "CMake"],
+    "setup": { "commands": ["cp scripts/build.sh \"$ZENV_ENV_DIR/bin/\""] },
+    "env": { "PROJECT_DATA": "/p/scratch/mydata" }
+  }
+}
+```
+
+Activation and `zenv run` set `ZENV_ENV_DIR` and put `<env>/bin` on `PATH`, but do not export `VIRTUAL_ENV` (tools like uv and pip would otherwise target a directory that has no Python in it). The `setup` hooks also see `ZENV_ENV_DIR`.
+
+A Python-free environment cannot have `dependencies`, `dev_dependencies` or a `dependency_file` (`zenv validate` reports them), and `zenv add`, `zenv setup --dev`, `--jupyter` and `zenv jupyter create` refuse it with a message saying what to change.
+
+**Adding Python later.** Set `"python": true` (or remove the key) and run `zenv setup <name>`, or simply `zenv add <name> <pkg> --uv`: the environment is rebuilt with a venv in the same directory, keeping the modules, the hooks and any files you put in `bin/`.
+
+**Removing Python.** Going the other way is not done in place, because a venv's `bin/` mixes installed entry points with your own files. Setup stops and asks you to run `zenv rm <name>` and then `zenv setup <name>`; the environment is rebuilt from `zenv.json`.
 
 ## Help
 

@@ -4,6 +4,7 @@ const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
 const config_module = @import("config.zig");
+const envspec = @import("envspec.zig");
 const runtime = @import("runtime.zig");
 
 /// Represents an error found during validation
@@ -259,6 +260,34 @@ fn validateAndBuildEnvironment(
         }
     }
 
+    // python: optional boolean. A Python-free env has nothing to install into.
+    if (value.object.get("python")) |py| {
+        if (py == .bool) {
+            env.python = py.bool;
+        } else if (py != .null) {
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', 'python' must be a boolean or null", .{env_name}),
+                .field_path = try allocator.print("{s}.python", .{env_name}),
+            });
+        }
+    }
+    if (!env.python) {
+        const fields = [_]struct { name: []const u8, set: bool }{
+            .{ .name = "dependencies", .set = env.dependencies.items.len > 0 },
+            .{ .name = "dev_dependencies", .set = env.dev_dependencies.items.len > 0 },
+            .{ .name = "dependency_file", .set = env.dependency_file != null },
+        };
+        for (fields) |f| {
+            if (!f.set) continue;
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', '{s}' needs Python, but 'python' is false. Set \"python\": true or remove '{s}'.", .{ env_name, f.name, f.name }),
+                .field_path = try allocator.print("{s}.{s}", .{ env_name, f.name }),
+            });
+        }
+    }
+
+    try buildEnvVars(allocator, errors, value, env_name, &env.env);
+
     // setup / activate: optional script objects.
     env.setup = try validateAndBuildScriptObject(allocator, errors, value, env_name, "setup");
     env.activate = try validateAndBuildScriptObject(allocator, errors, value, env_name, "activate");
@@ -267,7 +296,7 @@ fn validateAndBuildEnvironment(
     const allowed = [_][]const u8{
         "target_machines", "description",      "modules",         "modules_file", "dependencies",
         "dependency_file", "dev_dependencies", "fallback_python", "setup",        "activate",
-        "module_cache",
+        "module_cache",    "python",           "env",
     };
     var fi = value.object.iterator();
     while (fi.next()) |e| {
@@ -338,6 +367,73 @@ fn buildOptStringArray(
     const built = try config_module.Parse.getStringArray(allocator, v);
     out.deinit(allocator);
     out.* = built;
+}
+
+/// Variables zenv's activation owns. Setting them from `env` would break the
+/// venv or the prompt, or (PYTHONHOME, kept by the venv convention) would not
+/// be unset again by deactivate.
+const RESERVED_ENV_NAMES = [_][]const u8{ "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ZENV_ENV_DIR", "PYTHONHOME", "PS1" };
+/// Prefixes of the variables activation saves old values in.
+const RESERVED_ENV_PREFIXES = [_][]const u8{ "_ZENV_", "_OLD_VIRTUAL_" };
+
+/// Why `name` cannot be set from `env` with `kind`, or null when it can.
+fn envNameProblem(name: []const u8, kind: config_module.EnvVar.Kind) ?[]const u8 {
+    if (!envspec.isIdentifier(name)) return "is not a valid variable name";
+    for (RESERVED_ENV_NAMES) |r| if (std.mem.eql(u8, name, r)) return "is managed by zenv's activation";
+    for (RESERVED_ENV_PREFIXES) |r| if (std.mem.startsWith(u8, name, r)) return "is managed by zenv's activation";
+    if (kind == .set and std.mem.eql(u8, name, "PATH")) return "can only be extended: use {\"prepend\": ...} or {\"append\": ...}";
+    return null;
+}
+
+// Validates+builds the optional `env` object: NAME -> "value" (set), or
+// NAME -> {"prepend": "value"} / {"append": "value"}.
+fn buildEnvVars(
+    allocator: Allocator,
+    errors: *ErrorList,
+    value: json.Value,
+    env_name: []const u8,
+    out: *std.ArrayList(config_module.EnvVar),
+) !void {
+    const v = value.object.get("env") orelse return;
+    if (v == .null) return;
+    if (v != .object) {
+        try errors.append(allocator, ValidationError{
+            .message = try allocator.print("In environment '{s}', 'env' must be an object or null", .{env_name}),
+            .field_path = try allocator.print("{s}.env", .{env_name}),
+        });
+        return;
+    }
+    var it = v.object.iterator();
+    while (it.next()) |e| {
+        const name = e.key_ptr.*;
+        var kind: config_module.EnvVar.Kind = .set;
+        const text: ?[]const u8 = switch (e.value_ptr.*) {
+            .string => |s| s,
+            .object => |o| blk: {
+                if (o.count() != 1) break :blk null;
+                const key = o.keys()[0];
+                kind = if (std.mem.eql(u8, key, "prepend")) .prepend else if (std.mem.eql(u8, key, "append")) .append else break :blk null;
+                break :blk if (o.values()[0] == .string) o.values()[0].string else null;
+            },
+            else => null,
+        };
+        const problem: ?[]const u8 = if (text == null)
+            "must be a string, {\"prepend\": \"...\"} or {\"append\": \"...\"}"
+        else
+            envNameProblem(name, kind);
+        if (problem) |p| {
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("In environment '{s}', env variable '{s}' {s}", .{ env_name, name, p }),
+                .field_path = try allocator.print("{s}.env.{s}", .{ env_name, name }),
+            });
+            continue;
+        }
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        const owned_value = try allocator.dupe(u8, text.?);
+        errdefer allocator.free(owned_value);
+        try out.append(allocator, .{ .name = owned_name, .value = owned_value, .kind = kind });
+    }
 }
 
 // Validates+builds an optional `setup`/`activate` object into a ScriptConfig.
@@ -797,6 +893,97 @@ test "validateJsonContent: module_cache true/absent is valid" {
         \\{ "base_dir": "zenv", "e1": { "target_machines": ["*"], "module_cache": true } }
     ;
     try testing.expect((try validateJsonContent(a, content)) == null);
+}
+
+test "validateJsonContent: python must be boolean and false forbids dependencies" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "zenv",
+        \\  "plain": { "target_machines": ["*"], "python": false, "dependencies": [], "dependency_file": null },
+        \\  "bad": { "target_machines": ["*"], "python": "no" },
+        \\  "deps": { "target_machines": ["*"], "python": false, "dependencies": ["numpy"], "dependency_file": "requirements.txt" }
+        \\}
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expectEqual(@as(usize, 3), errs.items.len);
+    for ([_][]const u8{ "bad.python", "deps.dependencies", "deps.dependency_file" }) |want| {
+        const found = for (errs.items) |e| {
+            if (std.mem.eql(u8, e.field_path.?, want)) break true;
+        } else false;
+        try testing.expect(found);
+    }
+}
+
+test "loadConfig: python defaults to true and reads false" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "zenv", "on": { "target_machines": ["*"] }, "off": { "target_machines": ["*"], "python": false } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .errors => |*e| {
+            freeErrors(a, e);
+            return error.TestUnexpectedResult;
+        },
+        .config => |*cfg| {
+            defer cfg.deinit();
+            try testing.expect(cfg.getEnvironment("on").?.python);
+            try testing.expect(!cfg.getEnvironment("off").?.python);
+        },
+    }
+}
+
+test "loadConfig: env keeps file order, kinds and raw values" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "zenv", "e": { "target_machines": ["*"], "env": {
+        \\  "DATA": "${ZENV_PROJECT_DIR}/data",
+        \\  "PATH": { "prepend": "${ZENV_ENV_DIR}/tools" },
+        \\  "LD_LIBRARY_PATH": { "append": "/opt/x/lib" },
+        \\  "EMPTY": ""
+        \\} } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .errors => |*e| {
+            freeErrors(a, e);
+            return error.TestUnexpectedResult;
+        },
+        .config => |*cfg| {
+            defer cfg.deinit();
+            const vars = cfg.getEnvironment("e").?.env.items;
+            try testing.expectEqual(@as(usize, 4), vars.len);
+            try testing.expectEqualStrings("DATA", vars[0].name);
+            try testing.expectEqualStrings("${ZENV_PROJECT_DIR}/data", vars[0].value);
+            try testing.expectEqual(config_module.EnvVar.Kind.set, vars[0].kind);
+            try testing.expectEqual(config_module.EnvVar.Kind.prepend, vars[1].kind);
+            try testing.expectEqual(config_module.EnvVar.Kind.append, vars[2].kind);
+            try testing.expectEqualStrings("", vars[3].value);
+        },
+    }
+}
+
+test "validateJsonContent: bad env entries are reported by name" {
+    const a = testing.allocator;
+    const content =
+        \\{ "base_dir": "zenv", "e": { "target_machines": ["*"], "env": {
+        \\  "OK": "1",
+        \\  "1BAD": "x",
+        \\  "VIRTUAL_ENV": "/x",
+        \\  "_ZENV_ACTIVE": "1",
+        \\  "PATH": "/x",
+        \\  "NUM": 3,
+        \\  "BOTH": { "prepend": "a", "append": "b" },
+        \\  "WHAT": { "insert": "a" }
+        \\} } }
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    const want = [_][]const u8{ "e.env.1BAD", "e.env.VIRTUAL_ENV", "e.env._ZENV_ACTIVE", "e.env.PATH", "e.env.NUM", "e.env.BOTH", "e.env.WHAT" };
+    try testing.expectEqual(want.len, errs.items.len);
+    for (want, errs.items) |w, e| try testing.expectEqualStrings(w, e.field_path.?);
 }
 
 test "validateJsonContent: missing required base_dir is reported" {

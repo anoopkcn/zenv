@@ -97,11 +97,29 @@ pub fn setupEnvironment(
     defer allocator.free(venv_dir);
     output.print(allocator, "Environment directory: '{s}'", .{venv_dir}) catch {};
 
+    // A Python-free env installs nothing, so it gets no requirements.txt.
+    if (env_config.python) try writeRequirements(allocator, venv_dir, valid_deps_list.items);
+
+    try envbuild.run(allocator, .{
+        .env_config = env_config,
+        .env_name = env_name,
+        .venv_dir = venv_dir,
+        .project_dir = cwd_path,
+        .deps = valid_deps_list.items,
+        .flags = flags,
+    });
+
+    output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
+}
+
+// Writes the validated dependencies to `<venv_dir>/requirements.txt`, the
+// record of what setup installed.
+fn writeRequirements(allocator: Allocator, venv_dir: []const u8, deps: []const []const u8) !void {
     const req_abs_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_dir, "requirements.txt" });
     defer allocator.free(req_abs_path);
 
     // Write the validated dependencies to the requirements file
-    output.print(allocator, "Writing {d} validated dependencies to {s}", .{ valid_deps_list.items.len, req_abs_path }) catch {};
+    output.print(allocator, "Writing {d} validated dependencies to {s}", .{ deps.len, req_abs_path }) catch {};
     {
         var req_file = try runtime.createFile(req_abs_path, .{});
 
@@ -117,11 +135,11 @@ pub fn setupEnvironment(
         var fw = req_file.writer(runtime.io, &wbuf);
         const writer = &fw.interface;
 
-        if (valid_deps_list.items.len == 0) {
+        if (deps.len == 0) {
             output.print(allocator, "Warning: No valid dependencies found! Writing only a comment to requirements file.", .{}) catch {};
             try writer.writeAll("# No valid dependencies found\n");
         } else {
-            for (valid_deps_list.items) |dep| {
+            for (deps) |dep| {
                 try writer.print("{s}\n", .{dep});
                 errors.debugLog(allocator, "Wrote dependency to file: {s}", .{dep});
             }
@@ -132,17 +150,6 @@ pub fn setupEnvironment(
         output.print(allocator, "Requirements file successfully written and flushed", .{}) catch {};
     }
     output.print(allocator, "Created requirements file: {s}", .{req_abs_path}) catch {};
-
-    try envbuild.run(allocator, .{
-        .env_config = env_config,
-        .env_name = env_name,
-        .venv_dir = venv_dir,
-        .project_dir = cwd_path,
-        .deps = valid_deps_list.items,
-        .flags = flags,
-    });
-
-    output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
 }
 
 // ============================ Tests ============================

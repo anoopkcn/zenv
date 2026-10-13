@@ -287,6 +287,12 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
     defer allocator.free(res.stderr);
 
     if (res.term != .exited or res.term.exited != 0) {
+        // The rebuild ran silently; surface its errors (e.g. what to change in
+        // zenv.json) so the user need not open the log for them.
+        var lines = std.mem.splitScalar(u8, res.stderr, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "ERROR:")) output.rawErr(allocator, "{s}\n", .{line}) catch {};
+        }
         output.rawErr(allocator, "ERROR: auto-setup failed; see {s}/zenv_setup.log\n", .{entry.venv_path}) catch {};
         return error.AutoSetupFailed;
     }
