@@ -15,6 +15,8 @@ const errors = @import("utils/errors.zig");
 pub const Command = enum {
     setup,
     activate,
+    ls,
+    /// Former name of `ls`, still accepted.
     list,
     register,
     deregister,
@@ -104,9 +106,9 @@ fn printUsage() void {
         \\  cd <name|id|.>             Outputs the project directory path for an environment.
         \\                             To use: cd $(zenv cd <name|id|.>)
         \\
-        \\  list                       Lists registered environments accessible on this machine.
+        \\  ls                         Lists registered environments accessible on this machine.
         \\
-        \\  list --all                 Lists all registered environments.
+        \\  ls --all                   Lists all registered environments.
         \\
         \\  register <name>            Adds the environment '<name>' (from current 'zenv.json') to the
         \\                             global registry[a], making it accessible from any location.
@@ -279,6 +281,7 @@ pub fn main(app: std.process.Init) anyerror!void {
         // Registry-backed commands proceed to registry/config loading below.
         .setup,
         .activate,
+        .ls,
         .list,
         .register,
         .deregister,
@@ -381,7 +384,7 @@ fn dispatch(
     switch (command) {
         .setup => try commands.handleSetupCommand(allocator, config.?, registry, args),
         .activate => try commands.handleActivateCommand(allocator, registry, args),
-        .list => try commands.handleListCommand(allocator, registry, args),
+        .ls, .list => try commands.handleListCommand(allocator, registry, args),
         .register => try commands.handleRegisterCommand(allocator, config.?, registry, args),
         .deregister => try commands.handleDeregisterCommand(allocator, registry, args),
         .rm => try commands.handleRmCommand(allocator, registry, args),

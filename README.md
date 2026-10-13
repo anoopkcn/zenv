@@ -117,9 +117,9 @@ Check the [Configuration Reference](#configuration-reference) for full list of k
 List all environments registered for the current machine:
 
 ```bash
-zenv list # for listing envs configured for current computer
+zenv ls # for listing envs configured for current computer
 # OR
-zenv list --all # for listing all available envs in the registry
+zenv ls --all # for listing all available envs in the registry
 ```
 
 Example output:
@@ -487,9 +487,9 @@ Commands:
   cd <name|id|.>             Outputs the project directory path for an environment.
                              To use: cd $(zenv cd <name|id|.>)
 
-  list                       Lists registered environments accessible on this machine.
+  ls                         Lists registered environments accessible on this machine.
 
-  list --all                 Lists all registered environments.
+  ls --all                   Lists all registered environments.
 
   register <name>            Adds the environment '<name>' (from current 'zenv.json') to the
                              global registry[a], making it accessible from any location.

@@ -540,7 +540,7 @@ fn present(allocator: Allocator, registry: *const EnvironmentRegistry, identifie
         }
     } else if (err == error.EnvironmentNotRegistered) {
         output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
-        output.rawErr(allocator, "Use 'zenv list' to see all available environments with their IDs.\n", .{}) catch {};
+        output.rawErr(allocator, "Use 'zenv ls' to see all available environments with their IDs.\n", .{}) catch {};
     }
     return err;
 }
@@ -651,7 +651,7 @@ pub fn handleListCommand(
     defer stdout.flush() catch {};
     const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
     if (args.len > 3 or (args.len == 3 and !list_all)) {
-        output.printError(allocator, "Unexpected argument '{s}'. Usage: zenv list [--all]", .{args[args.len - 1]}) catch {};
+        output.printError(allocator, "Unexpected argument '{s}'. Usage: zenv ls [--all]", .{args[args.len - 1]}) catch {};
         return error.ArgsError;
     }
 
@@ -721,7 +721,7 @@ pub fn handleListCommand(
         if (!list_all and current_hostname != null) {
             stdout.print(
                 \\No environments found for the current machine ('{s}')
-                \\Use 'zenv list --all' to see all registered environments.
+                \\Use 'zenv ls --all' to see all registered environments.
                 \\
             , .{current_hostname.?}) catch {};
         } else if (!list_all and current_hostname == null) {
@@ -1477,7 +1477,7 @@ fn handleAliasCreate(
     const env_identifier = args[4];
 
     // Check if alias name would conflict with existing commands
-    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "rename", "python", "log", "run", "add", "validate", "alias", "jupyter", "hook", "help", "version" };
+    const reserved_names = [_][]const u8{ "setup", "activate", "ls", "list", "register", "deregister", "cd", "init", "rm", "rename", "python", "log", "run", "add", "validate", "alias", "jupyter", "hook", "help", "version" };
     for (reserved_names) |reserved| {
         if (std.mem.eql(u8, alias_name, reserved)) {
             output.printError(allocator, "Alias name '{s}' conflicts with existing command.", .{alias_name}) catch {};
