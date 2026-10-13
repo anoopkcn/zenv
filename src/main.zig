@@ -95,10 +95,12 @@ fn printUsage() void {
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.
+        \\                             Exits with the command's exit status.
         \\
         \\  add <name|id|.> <package>  Installs <package> into the environment and records it in the
         \\                             project's manifest (requirements.txt / pyproject.toml / zenv.json).
-        \\                             <package> may include a version (e.g. 'flask>=2.0').
+        \\                             <package> may include a version (e.g. 'flask>=2.0'); adding a
+        \\                             package again updates its recorded version.
         \\                             Options: --dev (dev dependency), --zenv (record only in
         \\                             zenv.json), --uv (use uv instead of pip).
         \\                             Refused for environments with "python": false.
@@ -116,10 +118,10 @@ fn printUsage() void {
         \\  deregister <name|id|.>     Removes an environment from the global registry.
         \\                             The virtual environment files are NOT deleted.
         \\
-        \\  rename <old|id> <new>      Renames an environment from 'old' to 'new'.
-        \\                             Updates the registry, renames the virtual environment directory,
-        \\                             updates generated scripts, and updates any associated Jupyter kernels.
-        \\                             Preserves all configuration and metadata.
+        \\  rename <old|id> <new>      Renames an environment from 'old' to 'new': its registry entry,
+        \\                             its directory and generated scripts, its entry in zenv.json and
+        \\                             its Jupyter kernel. Nothing changes if 'new' is already a name,
+        \\                             alias or id, or its directory exists.
         \\
         \\  rm <name|id|.>             De-registers the environment AND permanently deletes its
         \\                             virtual environment directory from the filesystem.
@@ -133,21 +135,23 @@ fn printUsage() void {
         \\  alias <subcommand>         Manages environment aliases for easier access:
         \\    create <alias> <env>     Creates an alias for an environment.
         \\    remove <alias>           Removes the alias (from every environment sharing it).
-        \\    list                     Lists all defined aliases.
+        \\    ls                       Lists all defined aliases.
         \\    show <alias>             Shows what environment an alias points to.
         \\
         \\  jupyter <subcommand>       Manages Jupyter kernels for environments:
         \\    create <env_name>        Creates a Jupyter kernel for the environment. The kernel starts
         \\                             through 'zenv run', so it gets the env's modules; the env
         \\                             needs ipykernel ('zenv add <env> ipykernel').
+        \\                             --name <kernel> and --display-name <text> replace the
+        \\                             defaults 'zenv-<env_name>' and 'Python (<env_name>)'.
         \\    remove <env_name>        Removes the Jupyter kernel for the specified environment.
-        \\    list                     Lists all zenv-managed Jupyter kernels.
+        \\    ls                       Lists all zenv-managed Jupyter kernels.
         \\    check                    Checks if Jupyter is installed and available.
         \\
         \\  python <subcommand>        (Experimental feature) Manages Python installations:
         \\    install <version>        Downloads and installs a specific Python version for zenv.
         \\    pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
-        \\    list                     Shows Python versions installed and managed by zenv.
+        \\    ls                       Shows Python versions installed and managed by zenv.
         \\
         \\  version, -v, --version     Prints the installed zenv version.
         \\
@@ -218,6 +222,19 @@ fn printUsage() void {
         \\  from the current directory. This works when you're in a directory containing
         \\  a zenv.json file and have registered environments for that directory.
         \\  From a subdirectory of the project, use 'zenv activate --auto .' instead.
+        \\
+        \\Automatic rebuilds:
+        \\  'run', 'activate', 'cd' and 'jupyter create' first rebuild an environment whose
+        \\  entry in zenv.json, or a file that entry names (dependency_file, modules_file,
+        \\  setup.script), changed since its last setup. A notice goes to stderr.
+        \\
+        \\Environment variables:
+        \\  ZENV_DIR                   Where zenv keeps its registry and Python installs
+        \\                             (default: $HOME/.zenv).
+        \\  ZENV_NO_AUTO_SETUP=1       Turns automatic rebuilds off.
+        \\  ZENV_RUN_SHELL=1           'zenv run' sources activate.sh in bash instead of starting
+        \\                             the command directly.
+        \\  ZENV_DEBUG=1               Prints debug output.
         \\
     ;
     stdoutWrite(usage);

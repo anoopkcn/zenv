@@ -888,7 +888,7 @@ pub fn handlePythonCommand(
     // Check if we have a subcommand
     if (args.len < 3) {
         output.printError(allocator, "Missing subcommand for 'python' command", .{}) catch {};
-        output.print(allocator, "Available subcommands: install, pin, list", .{}) catch {};
+        output.print(allocator, "Available subcommands: install, pin, ls", .{}) catch {};
         return error.ArgsError;
     }
 
@@ -918,12 +918,12 @@ pub fn handlePythonCommand(
 
         const version = args[3];
         try python.setDefaultPythonPath(allocator, version);
-    } else if (std.mem.eql(u8, subcommand, "list")) {
+    } else if (std.mem.eql(u8, subcommand, "ls") or std.mem.eql(u8, subcommand, "list")) {
         // Python list command - list all installed versions
         try python.listInstalledVersions(allocator);
     } else {
         output.printError(allocator, "Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
-        output.print(allocator, "Available subcommands: install, pin, list", .{}) catch {};
+        output.print(allocator, "Available subcommands: install, pin, ls", .{}) catch {};
         return error.ArgsError;
     }
 }
@@ -1436,7 +1436,7 @@ pub fn handleAliasCommand(
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing alias subcommand.
-            \\Usage: zenv alias <create|remove|list|show> [arguments]
+            \\Usage: zenv alias <create|remove|ls|show> [arguments]
         , .{}) catch {};
         return error.ArgsError;
     }
@@ -1447,14 +1447,14 @@ pub fn handleAliasCommand(
         try handleAliasCreate(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "remove")) {
         try handleAliasRemove(allocator, registry, args);
-    } else if (std.mem.eql(u8, subcommand, "list")) {
+    } else if (std.mem.eql(u8, subcommand, "ls") or std.mem.eql(u8, subcommand, "list")) {
         try handleAliasList(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "show")) {
         try handleAliasShow(allocator, registry, args);
     } else {
         output.printError(allocator,
             \\Unknown alias subcommand '{s}'.
-            \\Usage: zenv alias <create|remove|list|show> [arguments]
+            \\Usage: zenv alias <create|remove|ls|show> [arguments]
         , .{subcommand}) catch {};
         return error.ArgsError;
     }
@@ -1616,7 +1616,7 @@ pub fn handleJupyterCommand(
     if (args.len < 3) {
         output.printError(allocator,
             \\Missing jupyter subcommand.
-            \\Usage: zenv jupyter <create|remove|list|check> [arguments]
+            \\Usage: zenv jupyter <create|remove|ls|check> [arguments]
         , .{}) catch {};
         return error.ArgsError;
     }
@@ -1627,14 +1627,14 @@ pub fn handleJupyterCommand(
         try handleJupyterCreate(allocator, registry, args);
     } else if (std.mem.eql(u8, subcommand, "remove")) {
         try handleJupyterRemove(allocator, registry, args);
-    } else if (std.mem.eql(u8, subcommand, "list")) {
+    } else if (std.mem.eql(u8, subcommand, "ls") or std.mem.eql(u8, subcommand, "list")) {
         try handleJupyterList(allocator);
     } else if (std.mem.eql(u8, subcommand, "check")) {
         try handleJupyterCheck(allocator);
     } else {
         output.printError(allocator,
             \\Unknown jupyter subcommand '{s}'.
-            \\Usage: zenv jupyter <create|remove|list|check> [arguments]
+            \\Usage: zenv jupyter <create|remove|ls|check> [arguments]
         , .{subcommand}) catch {};
         return error.ArgsError;
     }
