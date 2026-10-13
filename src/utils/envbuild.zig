@@ -18,7 +18,7 @@ const runtime = @import("runtime.zig");
 const output = @import("output.zig");
 const envspec = @import("envspec.zig");
 const venv = @import("venv.zig");
-const template = @import("template.zig");
+const shell = @import("shell.zig");
 const python_mod = @import("python.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
 const CommandFlags = @import("flags.zig").CommandFlags;
@@ -778,7 +778,7 @@ fn copySetupHook(a: Allocator, opts: Options) !?[]const u8 {
     const src = setup.script orelse return null;
     const scripts_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "scripts" });
     runtime.makePath(scripts_dir) catch {};
-    return template.copyHookScript(a, src, scripts_dir, "setup_hook.sh", opts.project_dir) catch |err| {
+    return shell.copyHookScript(a, src, scripts_dir, "setup_hook.sh", opts.project_dir) catch |err| {
         output.printError(a, "Failed to copy setup script '{s}': {s}", .{ src, @errorName(err) }) catch {};
         return error.FileNotFound;
     };
@@ -802,9 +802,9 @@ fn runHooks(a: Allocator, opts: Options, env: *const Map, hook: ?[]const u8) !vo
         // `set +e`: bash 3.2 (macOS /bin/bash) otherwise aborts inside the
         // sourced file despite the `||`; bash 5 already ignores -e there.
         try w.writeAll("set +e\necho 'INFO: Running setup script: ");
-        try template.appendSqEscaped(w, path);
+        try shell.appendSqEscaped(w, path);
         try w.writeAll("'\n. '");
-        try template.appendSqEscaped(w, path);
+        try shell.appendSqEscaped(w, path);
         try w.writeAll("' || echo \"WARNING: Setup script failed with exit code $?\"\n");
     }
     const t = try runStep(a, &.{ "/bin/bash", "-c", script.written() }, env, opts.project_dir);

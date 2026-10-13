@@ -15,13 +15,83 @@ const configurations = @import("utils/config.zig");
 const validation = @import("utils/validation.zig");
 const output = @import("utils/output.zig");
 const runtime = @import("utils/runtime.zig");
-const template = @import("utils/template.zig");
 const envspec = @import("utils/envspec.zig");
 const activation = @import("utils/activation.zig");
 const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
+
+/// The starter zenv.json for `zenv init`: one environment for any machine,
+/// with every key present so users can see what is configurable. Written with
+/// the JSON writer, so a name or description containing `"` or `\` stays
+/// valid JSON. Caller owns the result.
+fn initConfigJson(allocator: Allocator, env_name: []const u8, description: []const u8, dependency_file: ?[]const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
+    const none = [_][]const u8{};
+
+    try s.beginObject();
+    try s.objectField("base_dir");
+    try s.write(".zenv");
+    try s.objectField(env_name);
+    try s.beginObject();
+    try s.objectField("target_machines");
+    try s.write([_][]const u8{"*"});
+    try s.objectField("description");
+    try s.write(description);
+    try s.objectField("fallback_python");
+    try s.write(null);
+    try s.objectField("modules");
+    try s.write(none);
+    try s.objectField("modules_file");
+    try s.write(null);
+    try s.objectField("module_cache");
+    try s.write(true);
+    try s.objectField("dependencies");
+    try s.write(none);
+    try s.objectField("dependency_file");
+    try s.write(dependency_file);
+    for ([_][]const u8{ "setup", "activate" }) |hook| {
+        try s.objectField(hook);
+        try s.beginObject();
+        try s.objectField("commands");
+        try s.write(none);
+        try s.objectField("script");
+        try s.write(null);
+        try s.endObject();
+    }
+    try s.endObject();
+    try s.endObject();
+    try out.writer.writeByte('\n');
+    return out.toOwnedSlice();
+}
+
+test "initConfigJson writes every key in order and escapes user text" {
+    const a = std.testing.allocator;
+    const text = try initConfigJson(a, "my\"env", "a \\ \"quoted\" desc", "requirements.txt");
+    defer a.free(text);
+
+    // base_dir first, then the env, as the old template had it.
+    try std.testing.expect(std.mem.startsWith(u8, text, "{\n  \"base_dir\": \".zenv\",\n  \"my\\\"env\": {"));
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+    defer parsed.deinit();
+    const env_obj = parsed.value.object.get("my\"env").?.object;
+    try std.testing.expectEqualStrings("a \\ \"quoted\" desc", env_obj.get("description").?.string);
+    try std.testing.expectEqualStrings("*", env_obj.get("target_machines").?.array.items[0].string);
+    try std.testing.expectEqualStrings("requirements.txt", env_obj.get("dependency_file").?.string);
+    try std.testing.expect(env_obj.get("module_cache").?.bool);
+    try std.testing.expect(env_obj.get("activate").?.object.get("script").? == .null);
+    const keys = [_][]const u8{ "target_machines", "description", "fallback_python", "modules", "modules_file", "module_cache", "dependencies", "dependency_file", "setup", "activate" };
+    try std.testing.expectEqual(keys.len, env_obj.count());
+    for (keys, env_obj.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+
+    const no_deps = try initConfigJson(a, "e", "d", null);
+    defer a.free(no_deps);
+    try std.testing.expect(std.mem.find(u8, no_deps, "\"dependency_file\": null") != null);
+}
 
 pub fn handleInitCommand(
     allocator: Allocator,
@@ -47,96 +117,28 @@ pub fn handleInitCommand(
         std.process.exit(1);
     }
 
-    // Use a static string as the default target_machine
-    const hostname = "*";
-
-    // The init config is a plain template: build the replacements below and run
-    // them through the shared engine directly (no per-template wrapper needed).
-    const JSON_CONFIG_TEMPLATE = @embedFile("utils/templates/zenv.json.template");
-
-    // Create a map for template replacements
-    var replacements = std.StringHashMap([]const u8).init(allocator);
-    defer replacements.deinit();
-
-    // Add common replacements for all templates
-    replacements.put("HOSTNAME", hostname) catch |err| {
-        output.printError(allocator, "Creating HOSTNAME replacement: {s}", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
-
-    // Determine the dependency file (used by both templates)
-    const dev_dep_file_value: []const u8 = blk: {
-        var requirements_txt_found: bool = false;
-        // Check for requirements.txt
-        if (runtime.access("requirements.txt")) |_| {
-            requirements_txt_found = true;
-        } else |err| {
-            if (err == error.FileNotFound) {
-                requirements_txt_found = false;
-            } else {
-                // For errors other than FileNotFound, print and exit
-                output.printError(allocator, "Accessing requirements.txt: {s}", .{@errorName(err)}) catch {};
-                std.process.exit(1);
-            }
-        }
-
-        if (requirements_txt_found) {
-            break :blk "\"requirements.txt\"";
-        }
-
-        // Check for pyproject.toml
-        var pyproject_toml_found: bool = false;
-        if (runtime.access("pyproject.toml")) |_| {
-            pyproject_toml_found = true;
-        } else |err| {
-            if (err == error.FileNotFound) {
-                pyproject_toml_found = false;
-            } else {
-                output.printError(allocator, "Accessing pyproject.toml: {s}", .{@errorName(err)}) catch {};
-                std.process.exit(1);
-            }
-        }
-
-        if (pyproject_toml_found) {
-            break :blk "\"pyproject.toml\"";
-        }
-
-        // Neither file exists
-        break :blk "null";
-    };
-
-    replacements.put("DEV_DEPENDENCY_FILE", dev_dep_file_value) catch |err| {
-        output.printError(allocator, "Adding DEV_DEPENDENCY_FILE replacement: {s}", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
-
-    var custom_env_name: []const u8 = "test";
-    var custom_env_desc: []const u8 = "Env config created by zenv";
-
-    if (args.len > 2) {
-        custom_env_name = args[2];
-        if (args.len > 3) {
-            custom_env_desc = args[3];
+    // Point dependency_file at an existing requirements.txt, else pyproject.toml.
+    var dependency_file: ?[]const u8 = null;
+    for ([_][]const u8{ "requirements.txt", "pyproject.toml" }) |candidate| {
+        if (runtime.access(candidate)) |_| {
+            dependency_file = candidate;
+            break;
+        } else |err| if (err != error.FileNotFound) {
+            output.printError(allocator, "Accessing {s}: {s}", .{ candidate, @errorName(err) }) catch {};
+            std.process.exit(1);
         }
     }
 
-    replacements.put("ENV_NAME", custom_env_name) catch |err| {
-        output.printError(allocator, "Adding ENV_NAME replacement: {s}", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
-    replacements.put("ENV_DESCRIPTION", custom_env_desc) catch |err| {
-        output.printError(allocator, "Adding ENV_DESCRIPTION replacement: {s}", .{@errorName(err)}) catch {};
-        std.process.exit(1);
-    };
+    const env_name = if (args.len > 2) args[2] else "test";
+    const env_desc = if (args.len > 3) args[3] else "Env config created by zenv";
 
-    // Process the custom template
-    const processed_content = template.processTemplateString(allocator, JSON_CONFIG_TEMPLATE, replacements) catch |err| {
-        output.printError(allocator, "Processing custom template: {s}", .{@errorName(err)}) catch {};
+    const processed_content = initConfigJson(allocator, env_name, env_desc, dependency_file) catch |err| {
+        output.printError(allocator, "Building {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
     };
     defer allocator.free(processed_content);
 
-    // Write template to file
+    // Write the new zenv.json
     var file = runtime.createFile(config_path, .{}) catch |err| {
         output.printError(allocator, "Creating {s}: {s}", .{ config_path, @errorName(err) }) catch {};
         std.process.exit(1);
@@ -148,7 +150,7 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
 
-    output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{custom_env_name}) catch {};
+    output.print(allocator, "Created zenv.json. Run 'zenv setup {s}'", .{env_name}) catch {};
 }
 
 pub fn handleSetupCommand(

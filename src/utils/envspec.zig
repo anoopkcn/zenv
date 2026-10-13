@@ -237,7 +237,7 @@ pub fn readSpec(allocator: Allocator, venv_path: []const u8) ?json.Parsed(Spec) 
 }
 
 /// The cluster identity the module cache is keyed on: `${SYSTEMNAME:-$(hostname)}`,
-/// exactly as setup.template writes it into the stamp. Caller owns the result.
+/// the same rule the generated activate scripts check. Caller owns the result.
 pub fn currentSystem(allocator: Allocator) ![]const u8 {
     if (runtime.env("SYSTEMNAME")) |s| {
         if (s.len > 0) return allocator.dupe(u8, s);

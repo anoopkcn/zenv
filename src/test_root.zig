@@ -4,7 +4,7 @@
 test {
     _ = @import("utils/validation.zig");
     _ = @import("utils/parse_deps.zig");
-    _ = @import("utils/template.zig");
+    _ = @import("utils/shell.zig");
     _ = @import("utils/config.zig");
     _ = @import("utils/activation.zig");
     _ = @import("utils/venv.zig");

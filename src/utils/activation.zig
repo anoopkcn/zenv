@@ -19,18 +19,18 @@ const Writer = std.Io.Writer;
 const envspec = @import("envspec.zig");
 const Spec = envspec.Spec;
 const Op = envspec.Op;
-const template = @import("template.zig");
+const shell = @import("shell.zig");
 const runtime = @import("runtime.zig");
 const output = @import("output.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
 
-const sq = template.appendSqEscaped;
+const sq = shell.appendSqEscaped;
 
 pub const Shell = enum { sh, csh };
 
-/// The script `zenv activate` prints for `shell`.
-pub fn fileName(shell: Shell) []const u8 {
-    return switch (shell) {
+/// The script `zenv activate` prints for `flavour`.
+pub fn fileName(flavour: Shell) []const u8 {
+    return switch (flavour) {
         .sh => "activate.sh",
         .csh => "activate.csh",
     };
@@ -63,7 +63,7 @@ pub fn generate(allocator: Allocator, env_config: *const EnvironmentConfig, env_
     var hook: ?[]const u8 = null;
     if (env_config.activate) |act| {
         if (act.script) |src| {
-            hook = template.copyHookScript(a, src, scripts_dir, "activate_hook.sh", cwd) catch |err| blk: {
+            hook = shell.copyHookScript(a, src, scripts_dir, "activate_hook.sh", cwd) catch |err| blk: {
                 output.printError(allocator, "Failed to copy activation script '{s}': {s}", .{ src, @errorName(err) }) catch {};
                 break :blk null;
             };

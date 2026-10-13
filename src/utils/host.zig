@@ -228,9 +228,9 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 // `hostname` differs per node (jrlogin01 vs jrc0042). Keying off `$SYSTEMNAME`
 // first means one `target_machines` entry (e.g. "jureca") matches on login and
 // compute nodes alike, instead of only the nodes whose hostname happens to carry
-// the cluster name. This mirrors the `${SYSTEMNAME:-$(hostname)}` rule the setup
-// and activate templates already use for the module-cache key, so matching and
-// caching agree on one cluster identity. Off HPC, `$SYSTEMNAME` is unset and we
+// the cluster name. This mirrors the `${SYSTEMNAME:-$(hostname)}` rule that keys
+// the module cache (envspec.currentSystem, and the check in generated
+// activate scripts), so matching and caching agree on one cluster identity. Off HPC, `$SYSTEMNAME` is unset and we
 // fall back to the previous hostname behaviour unchanged.
 pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Attempting to get machine identity from environment variable...", .{});
