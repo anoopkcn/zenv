@@ -19,14 +19,6 @@ Environments are registered globally, so you can activate one, run a command in 
 
 ## Installation
 
-### Homebrew (macOS / Linux)
-
-```sh
-brew install anoopkcn/zenv/zenv
-```
-
-Upgrade later with `brew upgrade zenv`.
-
 ### Use install script
 
 ```sh
@@ -35,6 +27,14 @@ curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | bas
 
 Run the same command to update an already installed `zenv`
 
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew install anoopkcn/zenv/zenv
+```
+
+Upgrade later with `brew upgrade zenv`.
 
 ### Alternative methods of installation
 
