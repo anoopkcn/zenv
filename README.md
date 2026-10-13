@@ -1,23 +1,21 @@
 # zenv
 
-Python Environment Manager for HPC and Development Systems
+Project environments, defined in one file
 
-`zenv` is a command-line tool written in Zig that manages Python virtual environments, primarily designed for High-Performance Computing (HPC) environments and development systems. It also manages environments for projects that are not Python projects: the modules, environment variables and settings a project needs, without a venv.
+`zenv` builds and activates the environment a project needs, as described in a `zenv.json` next to its code: environment variables, HPC modules, setup and activation hooks, and a Python virtual environment with its packages. Each part is optional. A C++ project can use zenv for its compilers and variables alone, and a Python project on a laptop for nothing but its venv.
+
+Environments are registered globally, so you can activate one, run a command in it, or `cd` to its project by name from any directory, or have it activate when you enter the project. The same `zenv.json` works on a laptop and on an HPC cluster, where it can hold a separate environment for each machine and where zenv caches the slow `module load`. zenv is a single binary written in Zig and does not need Python to run.
 
 ## Features
 
-### Core Functionality
-
-The tool provides several key features:
-
-1. **Environment Management**: Create, activate, and manage Python virtual environments with configurations stored in `zenv.json`
-2. **Registry**: Track environments globally so they can be activated from any directory
-3. **System Targeting**: Configure environments for specific machines or clusters
-4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules (dependencies that the loaded modules put on `PYTHONPATH` are not reinstalled; `zenv setup --force` installs them anyway)
-5. **Add packages on the fly**: `zenv add` installs a package into an environment and records it in the project's manifest (`requirements.txt` / `pyproject.toml` / `zenv.json`)
-6. **Module Integration**: Load HPC modules required for environment setup
-7. **Environment variables**: Set variables per environment in `zenv.json`; `deactivate` restores them
-8. **Environments without Python**: Use zenv for a project's modules, variables and settings alone (`"python": false`)
+- **One file per project.** `zenv.json` holds one or more environments. `zenv init` writes a starting point from what it finds in the project, and `zenv validate` checks it.
+- **Variables and modules as data.** Environment variables and the result of `module load` are recorded rather than re-executed, so activation is fast on clusters and `deactivate` (or switching to another environment) restores the variables they changed.
+- **Python when the project needs it.** A venv built with pip or uv from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
+- **Use it from anywhere.** Refer to an environment by name, id, alias, or `.` for the project you are in. `zenv run` runs a command in it without activating, `zenv cd` takes you to its project, and Jupyter kernels start through `zenv run` so they get the environment's modules.
+- **Activate on `cd`.** A zsh or bash hook activates a project's environment when you enter the project and deactivates it when you leave.
+- **Always current.** When `zenv.json` or a file it names changes, the next `zenv run`, `zenv activate` or `zenv cd` rebuilds the environment first.
+- **One config, many machines.** `target_machines` ties each environment to the machines it is for, and on a shared filesystem one alias picks the environment that matches the machine you are on.
+- **Most shells.** Activation scripts for bash, zsh, csh/tcsh and fish.
 
 ## Installation
 
@@ -96,21 +94,27 @@ zenv setup <name>
 
 For a project that is not a Python project, add `--no-python` (`zenv init <name> --no-python`, or `zenv setup <name> --init --no-python`) to get an environment without Python; see [Environments without Python](#environments-without-python).
 
-**A minimal example of a `zenv.json` file**:
+**A small example of a `zenv.json` file**, with one environment for any machine and one for the JURECA cluster:
 
 ```json
 {
   "base_dir": "zenv",
   "test": {
     "target_machines": ["*"],
-    "description": "Basic environment JURECA and any machine",
+    "description": "Test environment for any machine",
+    "dependency_file": "requirements.txt",
+    "env": { "PROJECT_DATA": "${ZENV_PROJECT_DIR}/data" }
+  },
+  "test-jureca": {
+    "target_machines": ["jureca"],
+    "description": "Test environment on JURECA, with Python from the modules",
     "modules": ["Stages/2025", "StdEnv", "Python"],
     "dependency_file": "requirements.txt"
   }
 }
 ```
 
-Check the [Configuration Reference](#configuration-reference) for full list of key-values. The optional `dependency_file` can be a `requirements.txt` OR `pyproject.toml` file. If you run `zenv init` then it will be automatically populated according to what is found in the project.
+Check the [Configuration Reference](#configuration-reference) for the full list of keys. The optional `dependency_file` can be a `requirements.txt` or a `pyproject.toml` file; `zenv init` fills it in from what it finds in the project.
 
 ### Listing environments
 
@@ -203,7 +207,7 @@ The hook runs `zenv activate --auto`, which you can also use by hand: `source $(
 
 ### Direct run without activation
 
-One could run commands and tools without explicit activation of Environments using `zenv run` command
+`zenv run` runs a command inside an environment without activating it in your shell:
 
 ```bash
 zenv run <name|id> <command>
@@ -296,12 +300,9 @@ A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<n
 
 ### Registering and Deregistering Environments
 
-A metadata information about the environments are stored at `ZENV_DIR/registry.json`. by default `ZENV_DIR` is `$HOME/.zenv`.
-But one can set `ZENV_DIR` environment variable as any directory with write permission.
+zenv keeps a record of every environment in `ZENV_DIR/registry.json`, which is what lets you use an environment by name from any directory. `ZENV_DIR` defaults to `$HOME/.zenv`; set it to any writable directory to keep the registry elsewhere.
 
-Register an environment in the global registry:
-
-**This is done automatically when you run `zenv setup <name>`**
+`zenv setup <name>` registers the environment for you. To register one by hand:
 
 ```bash
 zenv register <name>
