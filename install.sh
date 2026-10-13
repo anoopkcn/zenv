@@ -19,7 +19,10 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 # Clean up temporary files on exit
 cleanup() { rm -f "${api_response_file:-}" "${TMP_DOWNLOAD_PATH:-}"; rm -rf "${TMP_EXTRACT_DIR:-}"; }
-trap cleanup EXIT ERR INT TERM
+trap cleanup EXIT
+# Exit on a signal (the EXIT trap then cleans up) instead of resuming the script.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- Check Requirements ---
 for cmd in curl grep sed uname mkdir chmod mktemp mv tar; do
@@ -86,7 +89,7 @@ success "Installation successful!"
 # --- Setup PATH ---
 if [ "$NO_MODIFY_PATH" = "1" ]; then
   info "Skipping PATH modification (ZENV_NO_MODIFY_PATH=1)"
-elif echo "$PATH" | grep -q "${INSTALL_DIR}"; then
+elif case ":${PATH}:" in *":${INSTALL_DIR}:"*) true ;; *) false ;; esac; then
   info "${INSTALL_DIR} is already in your PATH."
 else
   info "Adding ${INSTALL_DIR} to your PATH"

@@ -61,12 +61,6 @@ pub fn getAndValidateEnvironment(
         return error.EnvironmentNotFound;
     };
 
-    // Use validation function from config module (already validates required fields)
-    if (config_module.ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        output.printError(allocator, "Invalid environment configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
-        return err;
-    }
-
     // If modules_file is specified, read modules from the file
     if (env_config.modules_file) |modules_file_path| {
         errors.debugLog(allocator, "Modules file specified: {s}", .{modules_file_path});
@@ -101,11 +95,6 @@ pub fn getAndValidateEnvironment(
         mutable_env_config.modules = modules_from_file;
 
         output.print(allocator, "Loaded {d} modules from file for environment '{s}'", .{ mutable_env_config.modules.items.len, env_name }) catch {};
-
-        // Debug: Print actual loaded modules to verify content
-        for (mutable_env_config.modules.items, 0..) |module, i| {
-            errors.debugLog(allocator, "Module #{d} loaded: '{s}' (len={d})", .{ i + 1, module, module.len });
-        }
     }
 
     // Check if hostname validation is needed
@@ -114,70 +103,21 @@ pub fn getAndValidateEnvironment(
         return env_config;
     }
 
-    // Get current hostname
-    var hostname: []const u8 = undefined;
-    hostname = getSystemHostname(allocator) catch |err| { // Call the local function
+    const hostname = getSystemHostname(allocator) catch |err| {
         output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
         return err;
     };
     defer allocator.free(hostname);
 
-    // Validate hostname against target_machines using the internal helper
     errors.debugLog(allocator, "Comparing current hostname '{s}' with target machines for env '{s}'", .{ hostname, env_name });
-
-    const hostname_matches = validateEnvironmentForMachine(env_config, hostname);
-
-    if (!hostname_matches) {
-        // Format the target machines for the error message, handle OOM gracefully
-        var formatted_targets: []const u8 = undefined;
-        var formatted_targets_allocated = false;
-        format_block: {
-            var targets_buffer: std.ArrayList(u8) = .empty;
-            defer targets_buffer.deinit(allocator);
-
-            // Attempt to format the string
-            targets_buffer.appendSlice(allocator, "[") catch |err| {
-                output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                break :format_block; // Use placeholder
-            };
-            for (env_config.target_machines.items, 0..) |target, i| {
-                if (i > 0) {
-                    targets_buffer.appendSlice(allocator, ", ") catch |err| {
-                        output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                        break :format_block;
-                    };
-                }
-                targets_buffer.print(allocator, "\"{s}\"", .{target}) catch |err| {
-                    output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                    break :format_block;
-                };
-            }
-            targets_buffer.appendSlice(allocator, "]") catch |err| {
-                output.printError(allocator, "Failed to format target machines for error message: {s}", .{@errorName(err)}) catch {};
-                break :format_block;
-            };
-
-            // If formatting succeeded, duplicate the result
-            formatted_targets = allocator.dupe(u8, targets_buffer.items) catch |err| {
-                output.printError(allocator, "Failed to allocate memory for formatted target machines: {s}", .{@errorName(err)}) catch {};
-                break :format_block; // Use placeholder
-            };
-            formatted_targets_allocated = true; // Mark that we need to free this later
+    if (!validateEnvironmentForMachine(env_config, hostname)) {
+        var targets: std.Io.Writer.Allocating = .init(allocator);
+        defer targets.deinit();
+        for (env_config.target_machines.items, 0..) |target, i| {
+            targets.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", target }) catch {};
         }
-
-        // If formatting failed (OOM before allocation), use a placeholder
-        if (!formatted_targets_allocated) {
-            formatted_targets = "<...>";
-        }
-
-        output.printError(allocator, "Current machine ('{s}') does not match target machines ('{s}') specified for environment '{s}'.", .{ hostname, formatted_targets, env_name }) catch {};
+        output.printError(allocator, "Current machine ('{s}') does not match target machines ([{s}]) specified for environment '{s}'.", .{ hostname, targets.written(), env_name }) catch {};
         output.printError(allocator, "Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
-
-        // Free the allocated string if it exists
-        if (formatted_targets_allocated) {
-            allocator.free(formatted_targets);
-        }
-
         return error.TargetMachineMismatch;
     }
 
@@ -185,178 +125,60 @@ pub fn getAndValidateEnvironment(
     return env_config;
 }
 
-// Function to read modules from a file
-pub fn readModulesFromFile(
-    allocator: Allocator,
-    file_path: []const u8,
-) !std.ArrayList([]const u8) {
+/// Module names from `file_path`, one per line, in first-seen order without
+/// duplicates. Blank lines and `#` comments are skipped; CRLF line ends and a
+/// UTF-8 BOM are accepted. Names are owned by `allocator`.
+pub fn readModulesFromFile(allocator: Allocator, file_path: []const u8) !std.ArrayList([]const u8) {
     var modules_list: std.ArrayList([]const u8) = .empty;
     errdefer {
-        for (modules_list.items) |item| {
-            allocator.free(item);
-        }
+        for (modules_list.items) |item| allocator.free(item);
         modules_list.deinit(allocator);
     }
 
-    // Open and read the file
     const file_content = try runtime.readFileAlloc(allocator, file_path, 1024 * 1024);
     defer allocator.free(file_content);
+    const bom = "\xEF\xBB\xBF";
+    const content = if (std.mem.startsWith(u8, file_content, bom)) file_content[bom.len..] else file_content;
 
-    errors.debugLog(allocator, "Reading modules from file: {s}", .{file_path});
-
-    // Debug the file content with hex representation for all bytes (debug only)
-    if (errors.isDebugEnabled(allocator) and file_content.len > 0) {
-        const debug_len = @min(file_content.len, 100);
-        var hex_buf: std.ArrayList(u8) = .empty;
-        defer hex_buf.deinit(allocator);
-
-        for (file_content[0..debug_len]) |byte| {
-            hex_buf.print(allocator, "{X:0>2} ", .{byte}) catch {};
-        }
-        errors.debugLog(allocator, "File content (up to 100 bytes): {s}", .{hex_buf.items});
-    }
-
-    // Skip BOM if present
-    var content_to_process = file_content;
-    if (file_content.len >= 3 and file_content[0] == 0xEF and file_content[1] == 0xBB and file_content[2] == 0xBF) {
-        content_to_process = file_content[3..];
-        errors.debugLog(allocator, "UTF-8 BOM detected and skipped", .{});
-    }
-
-    // Set of names already in `modules_list` (keys borrow the list's strings),
-    // to drop duplicates while keeping first-seen order.
-    var modules_set = std.StringHashMap(void).init(allocator);
-    defer modules_set.deinit();
-
-    // Process the file line by line using straightforward approach
-    var line_start: usize = 0;
-    var line_number: usize = 0;
-
-    while (line_start < content_to_process.len) {
-        line_number += 1;
-
-        // Find end of line
-        var line_end: usize = line_start;
-        while (line_end < content_to_process.len and
-            content_to_process[line_end] != '\n' and
-            content_to_process[line_end] != '\r')
-        {
-            line_end += 1;
-        }
-
-        // Extract the line
-        const line = content_to_process[line_start..line_end];
-
-        // Skip empty lines and comments
-        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-        if (trimmed.len == 0 or trimmed[0] == '#') {
-            // Move to next line
-            line_start = skipNewline(content_to_process, line_end);
-            continue;
-        }
-
-        // Process this line as a single module name without tokenizing
-        if (trimmed.len > 0) {
-            // Debug output for every line
-            errors.debugLog(allocator, "Line {d}: '{s}' (len={d})", .{ line_number, trimmed, trimmed.len });
-
-            // Create a fresh copy of the module name
-            const module_name = try allocator.dupe(u8, trimmed);
-
-            // Check if module contains special characters
-            var is_valid = true;
-            for (module_name) |char| {
-                if (char < 32 or char > 126) {
-                    is_valid = false;
-                    break;
-                }
-            }
-
-            if (!is_valid) {
-                // Only log the issue but still use the name
-                output.print(allocator, "Warning: Module name contains non-printable characters: '{s}'", .{module_name}) catch {};
-            }
-
-            // Check if we've already seen this module
-            const gop = modules_set.getOrPut(module_name) catch |err| {
-                allocator.free(module_name);
-                return err;
-            };
-            if (!gop.found_existing) {
-                modules_list.append(allocator, module_name) catch |err| {
-                    _ = modules_set.remove(module_name);
-                    allocator.free(module_name);
-                    return err;
-                };
-                errors.debugLog(allocator, "  - Found module: '{s}'", .{module_name});
-            } else {
-                // Free the duplicate since we already have this module
-                allocator.free(module_name);
-            }
-        }
-
-        // Move to next line
-        line_start = skipNewline(content_to_process, line_end);
+    var lines = std.mem.tokenizeAny(u8, content, "\r\n");
+    next: while (lines.next()) |line| {
+        const name = std.mem.trim(u8, line, &std.ascii.whitespace);
+        if (name.len == 0 or name[0] == '#') continue;
+        for (modules_list.items) |seen| if (std.mem.eql(u8, seen, name)) continue :next;
+        try modules_list.ensureUnusedCapacity(allocator, 1);
+        modules_list.appendAssumeCapacity(try allocator.dupe(u8, name));
+        errors.debugLog(allocator, "  - Found module: '{s}'", .{name});
     }
 
     if (modules_list.items.len == 0) {
         output.print(allocator, "Warning: No valid modules found in file. Ensure it contains valid module names.", .{}) catch {};
     } else {
         output.print(allocator, "Found {d} unique modules in file.", .{modules_list.items.len}) catch {};
-
-        // Additional debug: print the module list again to confirm what we're returning
-        for (modules_list.items, 0..) |module, i| {
-            errors.debugLog(allocator, "Module #{d}: '{s}' (len={d})", .{ i + 1, module, module.len });
-        }
     }
     return modules_list;
-}
-
-// Helper function to skip newline characters (handles both LF and CRLF)
-fn skipNewline(content: []const u8, pos: usize) usize {
-    if (pos >= content.len) return content.len;
-
-    if (content[pos] == '\r') {
-        if (pos + 1 < content.len and content[pos + 1] == '\n') {
-            return pos + 2; // Skip CRLF
-        }
-        return pos + 1; // Skip CR
-    } else if (content[pos] == '\n') {
-        return pos + 1; // Skip LF
-    }
-
-    return pos; // No newline to skip
-}
-
-pub fn validateModules(
-    allocator: Allocator,
-    env_config: *const EnvironmentConfig,
-) !bool {
-    // Module availability is no longer probed at setup time (Lmod is slow and
-    // unreliable to query); modules are loaded lazily at activation instead. This
-    // always reports success and only logs.
-    const modules = env_config.modules.items;
-    if (modules.len == 0) {
-        output.print(allocator, "No modules to validate.", .{}) catch {};
-        return true;
-    }
-
-    errors.debugLog(allocator, "Module validation has been disabled. Assuming all {d} modules are available.", .{modules.len});
-
-    // Log the modules being loaded from file for debugging purposes
-    if (env_config.modules_file != null) {
-        errors.debugLog(allocator, "Modules loaded from file: {s}", .{env_config.modules_file.?});
-        for (modules) |module| {
-            errors.debugLog(allocator, "  - {s}", .{module});
-        }
-    }
-
-    return true;
 }
 
 // ============================ Tests ============================
 const testing = std.testing;
 const test_support = @import("../test_support.zig");
+
+test "readModulesFromFile: BOM, CRLF, comments and duplicates" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const path = ".zig-cache/tmp/zenv-modules-file.txt";
+    try runtime.makePath(".zig-cache/tmp");
+    defer runtime.deleteFile(path) catch {};
+    try runtime.writeFile(path, "\xEF\xBB\xBFStages/2026\r\n# a comment\r\n\r\n  GCC  \nPython/3.13.5\nGCC\n");
+
+    var list = try readModulesFromFile(a, path);
+    defer {
+        for (list.items) |m| a.free(m);
+        list.deinit(a);
+    }
+    const want = [_][]const u8{ "Stages/2026", "GCC", "Python/3.13.5" };
+    try testing.expectEqual(want.len, list.items.len);
+    for (want, list.items) |w, got| try testing.expectEqualStrings(w, got);
+}
 
 test "getHostnameFromCommand trims output and rejects empty/failed runs" {
     test_support.setupRuntime();

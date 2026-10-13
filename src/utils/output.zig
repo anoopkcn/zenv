@@ -20,11 +20,7 @@ pub fn startLogging(allocator: Allocator, path: []const u8) !void {
     }
 
     const dir_path = std.Io.Dir.path.dirname(path) orelse ".";
-    runtime.makePath(dir_path) catch |err| {
-        if (err != error.PathAlreadyExists) {
-            return err;
-        }
-    };
+    try runtime.makePath(dir_path);
 
     log_file = try runtime.createFile(path, .{ .truncate = false, .read = true });
     log_enabled = true;

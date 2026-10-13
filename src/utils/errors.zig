@@ -35,10 +35,10 @@ pub const ZenvError = error{
     PathAlreadyExists, // Added for path conflicts
     InvalidPath, // Added for invalid paths
     BaseDirIsZenvDir, // base_dir resolves to the global ZENV_DIR; setup refused
-    JupyterNotFound, // Jupyter is not installed / not on PATH
     KernelNotFound, // Jupyter kernel for the environment is missing
     KernelExists, // Jupyter kernel with that name already exists
     AutoSetupFailed, // A silent auto-setup (triggered by a config change) failed
+    MissingEnvSpec, // The venv has no usable zenv-env.json (built by an older zenv)
     NoPython, // A Python-only action on an env with "python": false
 };
 
@@ -62,10 +62,8 @@ pub fn report(allocator: Allocator, err: anyerror) void {
         error.MissingHostname => output.printError(allocator, "HOSTNAME is not set or inaccessible which is required for validation", .{}) catch {},
         error.PathResolutionFailed => output.printError(allocator, "Failed to resolve a required file path (e.g., requirements file)", .{}) catch {},
         error.TargetMachineMismatch => output.printError(allocator, "Current machine does not match the target specified for this environment", .{}) catch {},
-        error.AmbiguousIdentifier => output.printError(allocator, "Ambiguous identifier (see the candidates above). Use the exact env name or id", .{}) catch {},
         error.RegistryError => output.printError(allocator, "Failed to access the environment registry. Check permissions for ZENV_DIR", .{}) catch {},
         error.ArgsError => output.printError(allocator, "Invalid command-line arguments provided. Check usage with 'zenv help'", .{}) catch {},
-        error.EnvironmentNotRegistered => output.printError(allocator, "The specified environment is not registered. Use 'zenv register <name>'", .{}) catch {},
         error.MissingPythonExecutable => {
             output.printError(allocator, "A required Python executable was not found or is not configured", .{}) catch {};
             output.printError(allocator, "Use 'zenv python install <version>' or configure 'fallback_python' in zenv.json", .{}) catch {};
@@ -78,16 +76,26 @@ pub fn report(allocator: Allocator, err: anyerror) void {
         error.PathTraversalAttempt => output.printError(allocator, "A path traversal attempt was detected and blocked for security reasons", .{}) catch {},
         error.EnvironmentVariableNotFound => output.printError(allocator, "A required environment variable was not found. Please ensure it is set", .{}) catch {},
         error.InvalidWtf8 => output.printError(allocator, "An environment variable contained invalid UTF-8 (WTF-8) characters", .{}) catch {},
-        error.EnvironmentAlreadyExists => output.printError(allocator, "An environment with that name already exists", .{}) catch {},
-        error.InvalidEnvironmentName => output.printError(allocator, "Invalid environment name. Use only alphanumeric characters, hyphens, underscores, and dots", .{}) catch {},
-        error.PathAlreadyExists => output.printError(allocator, "The target path already exists", .{}) catch {},
         error.InvalidPath => output.printError(allocator, "Invalid file or directory path", .{}) catch {},
-        error.JupyterNotFound => output.printError(allocator, "Jupyter is not installed or not on PATH. Install it (e.g. 'pip install jupyter')", .{}) catch {},
-        error.KernelNotFound => output.printError(allocator, "The Jupyter kernel for this environment was not found", .{}) catch {},
-        error.KernelExists => output.printError(allocator, "A Jupyter kernel with that name already exists", .{}) catch {},
-        // Already reported by the process / module loader / auto-setup gate /
-        // setup base-dir guard; just exit (no message).
-        error.ProcessError, error.ModuleLoadError, error.AutoSetupFailed, error.BaseDirIsZenvDir, error.NoPython => {},
+        // Already reported where they were raised (the process, module loader,
+        // auto-setup gate, setup base-dir guard, identifier resolution, or the
+        // command that refused); just exit (no message).
+        error.ProcessError,
+        error.ModuleLoadError,
+        error.AutoSetupFailed,
+        error.BaseDirIsZenvDir,
+        error.NoPython,
+        error.EnvironmentNotRegistered,
+        error.AmbiguousIdentifier,
+        error.EnvironmentAlreadyExists,
+        error.InvalidEnvironmentName,
+        error.AliasAlreadyExists,
+        error.AliasNotFound,
+        error.PathAlreadyExists,
+        error.KernelExists,
+        error.KernelNotFound,
+        error.MissingEnvSpec,
+        => {},
         else => output.printError(allocator, "An unexpected error occurred: {s}", .{@errorName(err)}) catch {},
     }
     std.process.exit(1);

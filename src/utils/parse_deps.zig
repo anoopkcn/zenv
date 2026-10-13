@@ -1,41 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap(void);
-const config = @import("config.zig");
 const errors = @import("errors.zig");
 const output = @import("output.zig");
 const toml = @import("toml");
-
-// Helper to check if a string is a common metadata field, not a dependency
-fn isLikelyPythonPackageName(package_name: []const u8) bool {
-    // Skip common metadata fields
-    const meta_fields = [_][]const u8{ "name", "version", "description", "authors", "license", "keywords", "classifiers", "readme", "homepage", "repository", "documentation", "requires-python", "python-requires", "url", "project", "tool", "build-system", "dev-dependencies" };
-
-    // If it's a known metadata field, it's not a package
-    for (meta_fields) |field| {
-        if (std.mem.eql(u8, package_name, field)) {
-            return false;
-        }
-    }
-
-    // If the string starts with a bracket or brace, not a package name
-    if (package_name.len > 0 and (package_name[0] == '{' or package_name[0] == '[')) {
-        return false;
-    }
-
-    // If the string has spaces but no version operator or extras bracket, it's
-    // prose (e.g. a description or classifier), not a package. A real requirement
-    // may legitimately contain a space, as in "numpy>=1.26.0, <2.0" or
-    // "mkdocstrings[python] >= 0.19" — those always carry an operator or '['.
-    // (Keying on the comma instead would mis-accept prose like "Fast, simple".)
-    if (std.mem.find(u8, package_name, " ") != null and
-        std.mem.findAny(u8, package_name, "<>=~[") == null)
-    {
-        return false;
-    }
-
-    return true;
-}
 
 /// Extracts the bare package name from a PEP 508 requirement spec, dropping any
 /// version constraint, extras, marker, or surrounding whitespace. Used for
@@ -49,10 +17,34 @@ pub fn packageBaseName(spec: []const u8) []const u8 {
     return std.mem.trim(u8, spec[0..end], " \t");
 }
 
-/// True when two requirement specs name the same package (case-insensitive,
-/// ignoring version/extras/markers). Allocation-free.
+/// True when two requirement specs name the same package, ignoring
+/// version/extras/markers. Names compare as PEP 503 normalizes them:
+/// case-insensitively, with any run of '-', '_' and '.' equal to one '-'
+/// (`Flask_Login` is `flask-login`). Allocation-free.
 pub fn samePackage(a: []const u8, b: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(packageBaseName(a), packageBaseName(b));
+    const x = packageBaseName(a);
+    const y = packageBaseName(b);
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        const cx = nextNormalized(x, &i);
+        if (cx != nextNormalized(y, &j)) return false;
+        if (cx == null) return true;
+    }
+}
+
+fn isNameSeparator(c: u8) bool {
+    return c == '-' or c == '_' or c == '.';
+}
+
+/// The next byte of `name` from `i.*` in PEP 503 normal form, advancing `i`.
+fn nextNormalized(name: []const u8, i: *usize) ?u8 {
+    if (i.* >= name.len) return null;
+    const c = name[i.*];
+    i.* += 1;
+    if (!isNameSeparator(c)) return std.ascii.toLower(c);
+    while (i.* < name.len and isNameSeparator(name[i.*])) i.* += 1;
+    return '-';
 }
 
 // Parse a pyproject.toml file and extract PEP 621 dependencies.
@@ -104,10 +96,6 @@ pub fn parsePyprojectToml(
             .string => |s| s, // e.g. "numpy>=1.26.0, <2.0" — kept verbatim
             else => continue,
         };
-        if (!isLikelyPythonPackageName(spec)) {
-            output.print(allocator, "  - Skipping non-package entry: {s}", .{spec}) catch {};
-            continue;
-        }
         const dep = try allocator.dupe(u8, spec);
         output.print(allocator, "  - TOML dependency: {s}", .{dep}) catch {};
         try deps_list.append(allocator, dep);
@@ -216,18 +204,12 @@ pub fn validateDependencies(
             continue;
         }
 
-        // Extract the package name to check for duplicates (case-insensitive check)
-        const package_name_raw = name;
-
-        // Convert package name to lowercase for case-insensitive duplicate check
-        // Reuse the same buffer to avoid repeated allocations
+        // The PEP 503 normal form of the name is the duplicate key (see
+        // samePackage). One buffer is reused for every dependency.
         lowercase_buf.clearRetainingCapacity();
-        try lowercase_buf.ensureTotalCapacity(allocator, package_name_raw.len);
-        for (package_name_raw) |c| {
-            try lowercase_buf.append(allocator, std.ascii.toLower(c));
-        }
+        var pos: usize = 0;
+        while (nextNormalized(name, &pos)) |c| try lowercase_buf.append(allocator, c);
 
-        // Check if we've already seen this package (case-insensitive)
         if (seen_packages.contains(lowercase_buf.items)) {
             output.print(allocator, "Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep}) catch {};
             continue;
@@ -244,26 +226,6 @@ pub fn validateDependencies(
     }
 
     return valid_deps;
-}
-
-// Helper function to determine if a dependency was provided in the config
-// Used for memory management to avoid double freeing strings
-// Requires access to EnvironmentConfig, which needs to be imported by the caller.
-pub fn isConfigProvidedDependency(env_config: *const config.EnvironmentConfig, dep: []const u8) bool {
-    for (env_config.dependencies.items) |config_dep| {
-        if (std.mem.eql(u8, config_dep, dep)) {
-            return true;
-        }
-    }
-    // dev_dependencies are appended into the setup dep list the same way
-    // (borrowed, not duped), so they must be recognized here too — otherwise
-    // setup's cleanup would free config-owned strings and double-free them.
-    for (env_config.dev_dependencies.items) |config_dep| {
-        if (std.mem.eql(u8, config_dep, dep)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // ============================ Tests ============================
@@ -332,16 +294,10 @@ test "samePackage is case-insensitive and ignores constraints" {
     try testing.expect(samePackage("flask[async]>=2", "FLASK"));
     try testing.expect(!samePackage("flask", "flask-login"));
     try testing.expect(!samePackage("requests", "httpx"));
-}
-
-test "isLikelyPythonPackageName filters TOML metadata fields" {
-    try testing.expect(isLikelyPythonPackageName("requests"));
-    try testing.expect(!isLikelyPythonPackageName("name"));
-    try testing.expect(!isLikelyPythonPackageName("version"));
-    // A multi-constraint specifier may contain a space and is still a package.
-    try testing.expect(isLikelyPythonPackageName("numpy>=1.26.0, <2.0"));
-    // Prose with spaces but no version operators is not a package.
-    try testing.expect(!isLikelyPythonPackageName("Programming Language :: Python :: 3"));
+    // PEP 503: '-', '_' and '.' runs are one separator.
+    try testing.expect(samePackage("flask_login>=0.6", "Flask-Login"));
+    try testing.expect(samePackage("zope.interface", "zope__interface"));
+    try testing.expect(!samePackage("flasklogin", "flask-login"));
 }
 
 test "validateDependencies keeps any PEP 508 line that starts with a name" {

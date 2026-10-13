@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const CommandFlags = @import("utils/flags.zig").CommandFlags;
 const positional = @import("utils/flags.zig").positional;
+const unknownFlag = @import("utils/flags.zig").unknownFlag;
 const paths = @import("utils/paths.zig");
 const env = @import("utils/environment.zig");
 const deps = @import("utils/parse_deps.zig");
@@ -22,6 +23,29 @@ const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
+
+/// The flags each command takes (see printUsage in main.zig).
+pub const SETUP_FLAGS = [_][]const u8{ "--init", "--no-python", "--dev", "--uv", "--no-host", "--python", "--force", "--no-cache", "--jupyter" };
+const REGISTER_FLAGS = [_][]const u8{"--no-host"};
+const ADD_FLAGS = [_][]const u8{ "--dev", "--zenv", "--uv" };
+
+/// Refuses a flag that `zenv <command>` does not take, naming the ones it does.
+pub fn checkFlags(allocator: Allocator, args: []const []const u8, allowed: []const []const u8) error{ArgsError}!void {
+    const bad = unknownFlag(args, allowed) orelse return;
+    output.printError(allocator, "Unknown option '{s}' for 'zenv {s}'. Options: {f}", .{ bad, args[1], joinedFlags(allowed) }) catch {};
+    return error.ArgsError;
+}
+
+fn joinedFlags(list: []const []const u8) std.fmt.Alt([]const []const u8, formatFlags) {
+    return .{ .data = list };
+}
+
+fn formatFlags(list: []const []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    for (list, 0..) |f, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.writeAll(f);
+    }
+}
 
 /// The starter zenv.json for `zenv init`: one environment for any machine,
 /// with every key present so users can see what is configurable. Written with
@@ -317,6 +341,8 @@ pub fn handleSetupCommand(
     const env_dir_path = try paths.venvPath(allocator, setup_cwd, config.base_dir, env_name);
     defer allocator.free(env_dir_path);
 
+    // The env directory holds the setup log, so it is created first.
+    try runtime.makePath(env_dir_path);
     const log_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ env_dir_path, "zenv_setup.log" });
     defer allocator.free(log_path);
 
@@ -325,80 +351,41 @@ pub fn handleSetupCommand(
 
     // Log the command that was used to start the setup
     var command_str: std.ArrayList(u8) = .empty;
-    // Note: don't free command_str until after installation is complete
     for (args, 0..) |arg, i| {
-        if (i > 0) {
-            command_str.print(allocator, " ", .{}) catch {};
-        }
-        if (std.mem.find(u8, arg, " ") != null) {
-            // Quote arguments with spaces
-            command_str.print(allocator, "\"{s}\"", .{arg}) catch {};
+        if (i > 0) try command_str.append(temp_allocator, ' ');
+        // Quote arguments with spaces
+        if (std.mem.findScalar(u8, arg, ' ') != null) {
+            try command_str.print(temp_allocator, "\"{s}\"", .{arg});
         } else {
-            command_str.print(allocator, "{s}", .{arg}) catch {};
+            try command_str.appendSlice(temp_allocator, arg);
         }
     }
     output.print(allocator, "Command: {s}", .{command_str.items}) catch {};
     output.print(allocator, "Setting up environment: {s} (Target: {s})", .{ env_name, display_target }) catch {};
 
-    // 0. Check the availability of modules
-    if (env_config.modules.items.len > 0) {
-        // Use the improved validateModules function
-        const modules_available = env.validateModules(allocator, env_config) catch |err| {
-            output.printError(allocator, "Failed to validate modules: {s}", .{@errorName(err)}) catch {};
-            return error.ModuleLoadError;
-        };
-
-        if (!modules_available) {
-            // Error messages already printed by validateModules
-            return error.ModuleLoadError;
-        }
-
-        output.print(allocator, "All modules appear to be available.", .{}) catch {};
-    }
-
-    // 1. Combine Dependencies
+    // 1. Combine Dependencies. The list and the strings parsed from the
+    // dependency file live in temp_arena; config strings are borrowed.
     var all_required_deps: std.ArrayList([]const u8) = .empty;
-    // Track ownership of item strings properly
-    var deps_need_cleanup = true;
-    // Defer cleanup if needed
-    defer {
-        if (deps_need_cleanup) {
-            // We need to free duped lines from parseRequirementsTxt if they exist
-            for (all_required_deps.items) |item| {
-                // Free any item that was duped by utility functions
-                if (!deps.isConfigProvidedDependency(env_config, item)) {
-                    allocator.free(item);
-                }
-            }
-            all_required_deps.deinit(allocator);
-        } else {
-            // Just deinit the list if we don't need to cleanup individual items
-            all_required_deps.deinit(allocator);
-        }
-    }
 
     // Add dependencies from config
     if (env_config.dependencies.items.len > 0) {
         output.print(allocator, "Adding {d} dependencies from configuration:", .{env_config.dependencies.items.len}) catch {};
         for (env_config.dependencies.items) |dep| {
             output.print(allocator, "  - Config dependency: {s}", .{dep}) catch {};
-            // Don't dupe here, assume config owns them or they are literals
-            try all_required_deps.append(allocator, dep);
         }
+        try all_required_deps.appendSlice(temp_allocator, env_config.dependencies.items);
     } else {
         output.print(allocator, "No dependencies specified in configuration.", .{}) catch {};
     }
 
     // Add development dependencies from config (e.g. those recorded by
-    // `zenv add --dev`). Borrowed from config like the runtime deps above, so
-    // the cleanup defer must treat them as config-provided (see
-    // parse_deps.isConfigProvidedDependency).
+    // `zenv add --dev`).
     if (env_config.dev_dependencies.items.len > 0) {
         output.print(allocator, "Adding {d} development dependencies from configuration:", .{env_config.dev_dependencies.items.len}) catch {};
         for (env_config.dev_dependencies.items) |dep| {
             output.print(allocator, "  - Dev dependency: {s}", .{dep}) catch {};
-            try all_required_deps.append(allocator, dep);
         }
+        try all_required_deps.appendSlice(temp_allocator, env_config.dev_dependencies.items);
     }
 
     // Add dependencies from requirements file if specified
@@ -432,11 +419,10 @@ pub fn handleSetupCommand(
 
         if (is_toml) {
             output.print(allocator, "Detected TOML file format, parsing as pyproject.toml", .{}) catch {};
-            req_file_dep_count = try deps.parsePyprojectToml(allocator, req_content, &all_required_deps);
+            req_file_dep_count = try deps.parsePyprojectToml(temp_allocator, req_content, &all_required_deps);
         } else {
             output.print(allocator, "Parsing as requirements.txt format", .{}) catch {};
-            // Use the new utility function
-            req_file_dep_count = try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
+            req_file_dep_count = try deps.parseRequirementsTxt(temp_allocator, req_content, &all_required_deps);
         }
 
         if (req_file_dep_count > 0) {
@@ -448,49 +434,25 @@ pub fn handleSetupCommand(
         output.print(allocator, "No requirements file specified in configuration.", .{}) catch {};
     }
 
-    // Get base_dir from config
-    const base_dir = config.base_dir;
-
     // Debug output - print the combined dependencies
     output.print(allocator, "Combined dependency list ({d} items):", .{all_required_deps.items.len}) catch {};
     for (all_required_deps.items) |dep| {
         output.print(allocator, "  - {s}", .{dep}) catch {};
     }
 
-    // 2. Create venv base directory structure using base_dir
-    try aux.setupEnvironmentDirectory(allocator, base_dir, env_name);
+    // 2. Build the environment: modules, venv, dependencies, hooks.
+    try aux.setupEnvironment(allocator, env_config, env_name, env_dir_path, setup_cwd, all_required_deps.items, flags);
 
-    // 3. Install dependencies
-    aux.installDependencies(
-        allocator,
-        env_config,
-        env_name,
-        base_dir,
-        &all_required_deps,
-        flags,
-    ) catch |err| {
-        command_str.deinit(allocator);
-        return err;
-    };
-    deps_need_cleanup = false;
-    command_str.deinit(allocator);
-
-    // 4. Record activation as data (zenv-env.json) and render the per-shell
+    // 3. Record activation as data (zenv-env.json) and render the per-shell
     // activation scripts from it.
     try activation.generate(allocator, env_config, env_name, env_dir_path);
 
-    // 5. Register the environment in the global registry
-    const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
-        output.printError(allocator, "Failed to get current working directory: {s}", .{@errorName(err)}) catch {};
-        return err;
-    };
-    defer allocator.free(cwd_path);
-
-    // register() persists registry.json itself (like deregister/rename).
+    // 4. Register the environment in the global registry; register() persists
+    // registry.json itself (like deregister/rename).
     try registry.register(
         env_name,
-        cwd_path,
-        base_dir,
+        setup_cwd,
+        config.base_dir,
         env_config.description,
         env_config.target_machines.items,
     );
@@ -596,7 +558,11 @@ pub fn handleActivateCommand(
             continue;
         }
         const prefix = "--shell=";
-        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        if (!std.mem.startsWith(u8, arg, prefix)) {
+            if (!std.mem.startsWith(u8, arg, "-")) continue;
+            output.printError(allocator, "Unknown option '{s}' for 'zenv activate'. Options: --shell=<shell>, --auto", .{arg}) catch {};
+            return error.ArgsError;
+        }
         shell = activation.parseShell(arg[prefix.len..]) orelse {
             output.printError(allocator, "Unsupported shell '{s}'. Supported: sh, bash, zsh, csh, tcsh, fish.", .{arg[prefix.len..]}) catch {};
             return error.ArgsError;
@@ -689,39 +655,25 @@ pub fn handleListCommand(
         return error.ArgsError;
     }
 
-    var current_hostname: ?[]const u8 = null;
-    var hostname_allocd = false; // Track if hostname was allocated
-    var use_hostname_filter = !list_all; // New variable to track if we should use hostname filter
-
-    if (use_hostname_filter) {
-        // Get hostname directly using the utility function
-        current_hostname = env.getSystemHostname(allocator) catch |err| blk: {
-            output.print(allocator,
-                \\Could not determine current hostname for filtering: {s}
-                \\Listing all registered environments instead.
-            , .{@errorName(err)}) catch {};
-            use_hostname_filter = false;
-            break :blk null; // fall through and list everything
-        };
-        // This part only runs if the catch block wasn't executed
-        if (current_hostname != null) {
-            hostname_allocd = true; // Mark that we need to free it
-        }
-    }
-    // Ensure hostname is freed if allocated using optional chaining
-    defer if (hostname_allocd) if (current_hostname) |hostname| allocator.free(hostname);
+    // Without --all, only this machine's envs; a host that cannot be
+    // determined lists everything.
+    const current_hostname: ?[]const u8 = if (list_all) null else env.getSystemHostname(allocator) catch |err| blk: {
+        output.print(allocator,
+            \\Could not determine current hostname for filtering: {s}
+            \\Listing all registered environments instead.
+        , .{@errorName(err)}) catch {};
+        break :blk null;
+    };
+    defer if (current_hostname) |h| allocator.free(h);
 
     var count: usize = 0;
     for (registry.entries.items) |entry| {
         const env_name = entry.env_name;
-        const target_machines_str = entry.target_machines_str; // Renamed
+        const target_machines_str = entry.target_machines_str;
 
-        // Filter by target machine if requested and hostname was successfully
-        // obtained. hostMatchesTargets owns the comma-list matching rules.
-        if (use_hostname_filter and current_hostname != null) {
-            if (!env.hostMatchesTargets(current_hostname.?, target_machines_str)) {
-                continue;
-            }
+        // hostMatchesTargets owns the comma-list matching rules.
+        if (current_hostname) |h| {
+            if (!env.hostMatchesTargets(h, target_machines_str)) continue;
         }
 
         // Print environment name, ID, and target machine string
@@ -812,6 +764,7 @@ pub fn handleRegisterCommand(
         return error.EnvironmentNotFound;
     };
 
+    try checkFlags(allocator, args, &REGISTER_FLAGS);
     const flags = CommandFlags.fromArgs(args);
 
     // Log flags if they're set
@@ -824,12 +777,6 @@ pub fn handleRegisterCommand(
         output.printError(allocator, "Environment '{s}' not found in configuration.", .{env_name}) catch {};
         return error.EnvironmentNotFound;
     };
-
-    // Validate the environment config
-    if (ZenvConfig.validateEnvironment(env_config, env_name)) |err| {
-        output.printError(allocator, "Invalid configuration for '{s}': {s}", .{ env_name, @errorName(err) }) catch {};
-        return err;
-    }
 
     // Check hostname validation if needed
     if (!flags.skip_hostname_check) {
@@ -941,7 +888,7 @@ pub fn handlePythonCommand(
     // Check if we have a subcommand
     if (args.len < 3) {
         output.printError(allocator, "Missing subcommand for 'python' command", .{}) catch {};
-        output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
+        output.print(allocator, "Available subcommands: install, pin, list", .{}) catch {};
         return error.ArgsError;
     }
 
@@ -957,21 +904,15 @@ pub fn handlePythonCommand(
             output.print(allocator, "No version specified, will install default version", .{}) catch {};
         }
 
-        // Install Python
+        // Installing does not pin; `zenv python pin` does.
         python.installPython(allocator, version) catch |err| {
             output.printError(allocator, "Python installation failed: {s}", .{@errorName(err)}) catch {};
             return err;
         };
-
-        // DO NOT PINN PYTHON VERSION HERE
-        // const installed_version = version orelse python.DEFAULT_PYTHON_VERSION;
-        // try output.print(allocator,"Pinning newly installed Python {s}", .{installed_version});
-        // try python.setDefaultPythonPath(allocator, installed_version);
-    } else if (std.mem.eql(u8, subcommand, "use") or std.mem.eql(u8, subcommand, "pin")) {
-        // Python use [version] command
+    } else if (std.mem.eql(u8, subcommand, "pin") or std.mem.eql(u8, subcommand, "use")) {
         if (args.len < 4) {
-            output.printError(allocator, "Missing version argument for 'python use' command", .{}) catch {};
-            output.print(allocator, "Usage: zenv python use <version>", .{}) catch {};
+            output.printError(allocator, "Missing version argument for 'python pin' command", .{}) catch {};
+            output.print(allocator, "Usage: zenv python pin <version>", .{}) catch {};
             return error.ArgsError;
         }
 
@@ -982,7 +923,7 @@ pub fn handlePythonCommand(
         try python.listInstalledVersions(allocator);
     } else {
         output.printError(allocator, "Unknown subcommand '{s}' for 'python' command", .{subcommand}) catch {};
-        output.print(allocator, "Available subcommands: install, use, list", .{}) catch {};
+        output.print(allocator, "Available subcommands: install, pin, list", .{}) catch {};
         return error.ArgsError;
     }
 }
@@ -1082,6 +1023,7 @@ pub fn handleAddCommand(
         output.printError(allocator, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]", .{}) catch {};
         return error.ArgsError;
     };
+    try checkFlags(allocator, args, &ADD_FLAGS);
     const flags = CommandFlags.fromArgs(args);
 
     const ref = registry.resolve(allocator, env_id) catch |e| return present(allocator, registry, env_id, e);
@@ -1104,9 +1046,12 @@ pub fn handleAddCommand(
     const zenv_json_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
     defer allocator.free(zenv_json_path);
 
+    const info = try readEnvJson(allocator, zenv_json_path, env_name);
+    defer if (info.dependency_file) |df| allocator.free(df);
+
     // Turning Python on is the user's call, made in zenv.json, not a side
     // effect of adding a package.
-    if (try pythonDisabled(allocator, zenv_json_path, env_name)) {
+    if (!info.python) {
         const retry = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(retry);
         output.printError(allocator, "'{s}' has no Python (\"python\": false in zenv.json), so packages cannot be added.", .{env_name}) catch {};
@@ -1123,57 +1068,62 @@ pub fn handleAddCommand(
         }
     }
 
-    const dep_file = try readDependencyFile(allocator, zenv_json_path, env_name);
-    defer if (dep_file) |df| allocator.free(df);
+    // Recording the package changes a tracked manifest. If the env is up to
+    // date now, the install below makes it up to date again, so the build
+    // record is renewed rather than left to trigger a rebuild on the next run.
+    const was_fresh = !(autosetup.isStale(allocator, entry) catch true);
 
     // 1. Install into the venv (only persist below if this succeeds).
     try installPackage(allocator, entry.venv_path, package, flags.use_uv);
 
     // 2. Persist to the appropriate manifest.
-    try persistAddedPackage(allocator, project_dir, zenv_json_path, env_name, dep_file, package, flags.dev_mode, flags.zenv_only);
+    persistAddedPackage(allocator, project_dir, zenv_json_path, env_name, info.dependency_file, package, flags.dev_mode, flags.zenv_only) catch |err| {
+        output.printError(allocator, "'{s}' is installed in '{s}', but recording it failed: {s}. Add it to the manifest by hand.", .{ package, env_name, @errorName(err) }) catch {};
+        return err;
+    };
+    if (was_fresh) autosetup.restamp(allocator, project_dir, env_name, entry.venv_path) catch {};
 
     output.print(allocator, "Added '{s}' to environment '{s}'.", .{ package, env_name }) catch {};
 }
 
-/// Reads `dependency_file` for `env_name` from the zenv.json at `path`. Returns
-/// an owned copy, or null when the file/env/field is absent (or unparsable —
-/// add stays best-effort and falls back to zenv.json in that case).
-fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const u8) !?[]const u8 {
+/// What `add` and `jupyter create` need from an env's entry in zenv.json,
+/// read without validating the whole file.
+const EnvJsonInfo = struct {
+    /// False only for an explicit `"python": false`.
+    python: bool = true,
+    /// Owned by the caller.
+    dependency_file: ?[]const u8 = null,
+};
+
+/// Reads `env_name`'s entry from the zenv.json at `path`. Defaults when the
+/// file, env or field is absent or unparsable: add stays best-effort and falls
+/// back to zenv.json then.
+fn readEnvJson(allocator: Allocator, path: []const u8, env_name: []const u8) !EnvJsonInfo {
     const content = runtime.readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        if (err == error.FileNotFound) return null;
+        if (err == error.FileNotFound) return .{};
         return err;
     };
     defer allocator.free(content);
 
-    // Strings may borrow from `content`; the one we return is duped.
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{ .allocate = .alloc_if_needed }) catch return null;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return .{};
     defer parsed.deinit();
-    if (parsed.value != .object) return null;
-    const env_obj = parsed.value.object.get(env_name) orelse return null;
-    if (env_obj != .object) return null;
-    const df = env_obj.object.get("dependency_file") orelse return null;
-    return switch (df) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => null,
-    };
+    if (parsed.value != .object) return .{};
+    const env_obj = parsed.value.object.get(env_name) orelse return .{};
+    if (env_obj != .object) return .{};
+
+    var info: EnvJsonInfo = .{};
+    if (env_obj.object.get("python")) |py| info.python = !(py == .bool and !py.bool);
+    if (env_obj.object.get("dependency_file")) |df| {
+        if (df == .string) info.dependency_file = try allocator.dupe(u8, df.string);
+    }
+    return info;
 }
 
-/// Whether zenv.json at `path` sets `"python": false` for `env_name`. False
-/// when the file/env/field is absent or unparsable, like readDependencyFile.
+/// Whether zenv.json at `path` sets `"python": false` for `env_name`.
 pub fn pythonDisabled(allocator: Allocator, path: []const u8, env_name: []const u8) !bool {
-    const content = runtime.readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        if (err == error.FileNotFound) return false;
-        return err;
-    };
-    defer allocator.free(content);
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return false;
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const env_obj = parsed.value.object.get(env_name) orelse return false;
-    if (env_obj != .object) return false;
-    const py = env_obj.object.get("python") orelse return false;
-    return py == .bool and !py.bool;
+    const info = try readEnvJson(allocator, path, env_name);
+    if (info.dependency_file) |df| allocator.free(df);
+    return !info.python;
 }
 
 /// Whether the venv at `venv_path` has its interpreter link, bin/python.
@@ -1206,12 +1156,7 @@ fn installPackage(allocator: Allocator, venv_path: []const u8, package: []const 
         return err;
     };
 
-    const ok = blk: {
-        if (term != .exited) break :blk false;
-        if (term.exited != 0) break :blk false;
-        break :blk true;
-    };
-    if (!ok) {
+    if (term != .exited or term.exited != 0) {
         output.printError(allocator, "Package installation failed; nothing was recorded.", .{}) catch {};
         return error.ProcessError;
     }
@@ -1472,38 +1417,15 @@ pub fn handleValidateCommand(
         std.process.exit(1);
     }
 
-    // Modified validate implementation for single file validation
-    const validateSingleFile = struct {
-        fn handleValidationError(err: anyerror) void {
-            // Use a modified error handler with the correct file path
-            switch (err) {
-                error.ConfigFileNotFound, error.JsonParseError, error.InvalidFormat, error.ConfigInvalid => {
-                    // Syntax check already printed details
-                    std.process.exit(1);
-                },
-                else => std.process.exit(1),
-            }
-        }
-    }.handleValidationError;
-
-    if (validation.validateConfigFile(allocator, validate_config_path)) |errors_opt| {
-        if (errors_opt) |found| {
-            // Errors were found and already printed by validateConfigFile
-            // Clean up errors
-            var errors = found;
-            for (errors.items) |*err| {
-                err.deinit(allocator);
-            }
-            errors.deinit(allocator);
-            std.process.exit(1);
-        } else {
-            // No errors found
-            output.print(allocator, "Configuration file is valid!", .{}) catch {};
-        }
-    } else |err| {
-        validateSingleFile(err);
+    // validateConfigFile prints what it finds; any finding or failure exits 1.
+    const found = validation.validateConfigFile(allocator, validate_config_path) catch std.process.exit(1);
+    if (found) |list| {
+        var errors = list;
+        for (errors.items) |*err| err.deinit(allocator);
+        errors.deinit(allocator);
         std.process.exit(1);
     }
+    output.print(allocator, "Configuration file is valid!", .{}) catch {};
 }
 
 pub fn handleAliasCommand(
@@ -1737,17 +1659,20 @@ fn handleJupyterCreate(
 
     // Parse optional flags
     var i: usize = 4;
-    while (i < args.len) {
-        if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
-            custom_name = args[i + 1];
-            i += 2;
-        } else if (std.mem.eql(u8, args[i], "--display-name") and i + 1 < args.len) {
-            custom_display_name = args[i + 1];
-            i += 2;
-        } else {
-            output.printError(allocator, "Unknown flag: {s}", .{args[i]}) catch {};
+    while (i < args.len) : (i += 2) {
+        const slot = if (std.mem.eql(u8, args[i], "--name"))
+            &custom_name
+        else if (std.mem.eql(u8, args[i], "--display-name"))
+            &custom_display_name
+        else {
+            output.printError(allocator, "Unknown option '{s}' for 'zenv jupyter create'. Options: --name, --display-name", .{args[i]}) catch {};
+            return error.ArgsError;
+        };
+        if (i + 1 >= args.len) {
+            output.printError(allocator, "Option '{s}' needs a value.", .{args[i]}) catch {};
             return error.ArgsError;
         }
+        slot.* = args[i + 1];
     }
 
     // Same host-aware resolver as every other command: ids, aliases and "."
@@ -1818,129 +1743,138 @@ pub fn handleRenameCommand(
     const old_identifier = args[2];
     const new_name = args[3];
 
+    // Everything that can refuse the rename is checked before anything moves.
+    // The name becomes a directory next to the venv, so it must not be a path.
+    if (!paths.isValidEnvName(new_name)) {
+        output.printError(allocator, "Invalid environment name '{s}'. Use only letters, digits, '-', '_' and '.'.", .{new_name}) catch {};
+        return error.InvalidEnvironmentName;
+    }
+    if (registry.nameTaken(new_name)) {
+        output.printError(allocator, "'{s}' is already an environment name, alias or id.", .{new_name}) catch {};
+        return error.EnvironmentAlreadyExists;
+    }
+
     var ref = registry.resolve(allocator, old_identifier) catch |e| return present(allocator, registry, old_identifier, e);
 
-    // Owned copies: the FS orchestration and rollback messages need old_name /
-    // old_venv_path to outlive registry.rename (which frees the entry's copies).
+    // Owned copies: the FS orchestration and rollback messages need these to
+    // outlive registry.rename (which frees the entry's copies).
     const old_name = try allocator.dupe(u8, registry.get(ref).env_name);
     defer allocator.free(old_name);
-
     const old_venv_path = try allocator.dupe(u8, registry.get(ref).venv_path);
     defer allocator.free(old_venv_path);
+    const project_dir = try allocator.dupe(u8, registry.get(ref).project_dir);
+    defer allocator.free(project_dir);
+
     const parent_dir = std.Io.Dir.path.dirname(old_venv_path) orelse {
         output.printError(allocator, "Invalid virtual environment path", .{}) catch {};
         return error.InvalidPath;
     };
-
-    const new_venv_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ parent_dir, new_name }) catch {
-        output.printError(allocator, "Failed to construct new environment path", .{}) catch {};
-        return error.OutOfMemory;
-    };
+    const new_venv_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ parent_dir, new_name });
     defer allocator.free(new_venv_path);
 
-    runtime.access(new_venv_path) catch |err| {
-        if (err != error.FileNotFound) {
-            output.printError(allocator, "New environment directory already exists: {s}", .{new_venv_path}) catch {};
-            return error.PathAlreadyExists;
-        }
-    };
+    if (runtime.access(new_venv_path)) |_| {
+        output.printError(allocator, "New environment directory already exists: {s}", .{new_venv_path}) catch {};
+        return error.PathAlreadyExists;
+    } else |err| if (err != error.FileNotFound) return err;
 
+    // The activation scripts are regenerated from zenv-env.json.
+    {
+        const spec = envspec.readSpec(allocator, old_venv_path) orelse {
+            output.printError(allocator, "{s} has no usable {s}; re-run 'zenv setup {s}' first.", .{ old_venv_path, envspec.FILE_NAME, old_name }) catch {};
+            return error.MissingEnvSpec;
+        };
+        spec.deinit();
+    }
+
+    // An env that is up to date now must not rebuild after the rename: the
+    // build record hashes the env's name.
+    const was_fresh = !(autosetup.isStale(allocator, registry.get(ref)) catch true);
     const has_jupyter_kernel = jupyter.hasKernel(allocator, old_name);
 
     output.print(allocator, "Renaming environment '{s}' to '{s}'...", .{ old_name, new_name }) catch {};
-
-    // === ATOMIC OPERATIONS START ===
 
     runtime.rename(old_venv_path, new_venv_path) catch |err| {
         output.printError(allocator, "Failed to rename environment directory: {s}", .{@errorName(err)}) catch {};
         return error.IoError;
     };
 
-    updateGeneratedScripts(allocator, old_name, new_name, old_venv_path, new_venv_path) catch |err| {
-        runtime.rename(new_venv_path, old_venv_path) catch {};
-
-        output.printError(allocator, "Failed to update generated scripts: {s}", .{@errorName(err)}) catch {};
+    updateGeneratedScripts(allocator, new_name, old_venv_path, new_venv_path) catch |err| {
+        undoMove(allocator, old_name, new_venv_path, old_venv_path);
         return err;
     };
 
     registry.rename(&ref, new_name) catch |err| {
-        _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-        runtime.rename(new_venv_path, old_venv_path) catch {};
-
+        undoMove(allocator, old_name, new_venv_path, old_venv_path);
         switch (err) {
-            error.EnvironmentAlreadyExists => {
-                output.printError(allocator, "Environment name '{s}' already exists", .{new_name}) catch {};
-            },
-            error.InvalidEnvironmentName => {
-                output.printError(allocator, "Invalid environment name '{s}'. Use only alphanumeric characters, hyphens, and underscores", .{new_name}) catch {};
-            },
-            else => {
-                output.printError(allocator, "Failed to update registry: {s}", .{@errorName(err)}) catch {};
-            },
+            error.EnvironmentAlreadyExists => output.printError(allocator, "'{s}' is already an environment name, alias or id.", .{new_name}) catch {},
+            else => output.printError(allocator, "Failed to update registry: {s}", .{@errorName(err)}) catch {},
         }
         return err;
     };
 
     if (has_jupyter_kernel) {
-        jupyter.renameKernel(allocator, old_name, new_name, new_venv_path) catch |err| {
+        jupyter.renameKernel(allocator, old_name, new_name) catch |err| {
             registry.rename(&ref, old_name) catch {}; // re-saves; ref is kept current
-            _ = updateGeneratedScripts(allocator, new_name, old_name, new_venv_path, old_venv_path) catch {};
-            runtime.rename(new_venv_path, old_venv_path) catch {};
-
+            undoMove(allocator, old_name, new_venv_path, old_venv_path);
             switch (err) {
-                error.KernelExists => {
-                    output.printError(allocator, "Jupyter kernel '{s}' already exists", .{new_name}) catch {};
-                },
-                else => {
-                    output.printError(allocator, "Failed to rename Jupyter kernel: {s}", .{@errorName(err)}) catch {};
-                },
+                error.KernelExists => output.printError(allocator, "Jupyter kernel '{s}' already exists", .{new_name}) catch {},
+                else => output.printError(allocator, "Failed to rename Jupyter kernel: {s}", .{@errorName(err)}) catch {},
             }
             return err;
         };
     }
 
-    // registry.rename above already persisted; no separate save step.
-    // === ATOMIC OPERATIONS END ===
-
     output.print(allocator, "Environment renamed successfully!", .{}) catch {};
     output.print(allocator, "  Name: {s} → {s}", .{ old_name, new_name }) catch {};
     output.print(allocator, "  Directory: {s} → {s}", .{ old_venv_path, new_venv_path }) catch {};
-
     if (has_jupyter_kernel) {
         output.print(allocator, "  Jupyter kernel: zenv-{s} → zenv-{s}", .{ old_name, new_name }) catch {};
     }
-
     output.print(allocator, "  Generated scripts updated", .{}) catch {};
 
-    updateLocalConfigs(allocator, old_name, new_name, registry.get(ref).project_dir) catch |err| {
+    updateLocalConfigs(allocator, old_name, new_name, project_dir) catch |err| {
         output.printError(allocator, "Environment renamed successfully, but failed to update local config files: {s}", .{@errorName(err)}) catch {};
+        return;
+    };
+    if (was_fresh) autosetup.restamp(allocator, project_dir, new_name, new_venv_path) catch {};
+}
+
+/// Rolls back a rename's directory move: moves the venv back to `old_venv_path`
+/// FIRST, then regenerates its scripts there (they are read from the venv's
+/// current location). Best effort; says what to do if it cannot.
+fn undoMove(allocator: Allocator, old_name: []const u8, new_venv_path: []const u8, old_venv_path: []const u8) void {
+    runtime.rename(new_venv_path, old_venv_path) catch |err| {
+        output.printError(allocator, "Could not move {s} back to {s}: {s}. Move it back by hand.", .{ new_venv_path, old_venv_path, @errorName(err) }) catch {};
+        return;
+    };
+    updateGeneratedScripts(allocator, old_name, new_venv_path, old_venv_path) catch {
+        output.printError(allocator, "Could not restore the scripts of '{s}'; re-run 'zenv setup {s}'.", .{ old_name, old_name }) catch {};
     };
 }
 
-/// Points a venv moved from `old_venv_path` to `new_venv_path` at its new
-/// location and name: the activation scripts are regenerated from the stored
+/// Points a venv moved from `from_path` to `to_path` (where it is now) at its
+/// location and `name`: the activation scripts are regenerated from the stored
 /// zenv-env.json, and paths are rewritten in the user's hook scripts and in
 /// bin/ (console-script shebangs). Also used, swapped, to roll a rename back.
-fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {
-    _ = old_name;
-    const parsed = envspec.readSpec(allocator, new_venv_path) orelse {
-        output.printError(allocator, "{s} has no usable {s}; re-run 'zenv setup' for this environment first.", .{ new_venv_path, envspec.FILE_NAME }) catch {};
+fn updateGeneratedScripts(allocator: Allocator, name: []const u8, from_path: []const u8, to_path: []const u8) !void {
+    const parsed = envspec.readSpec(allocator, to_path) orelse {
+        output.printError(allocator, "{s} has no usable {s}; re-run 'zenv setup' for this environment first.", .{ to_path, envspec.FILE_NAME }) catch {};
         return error.MissingEnvSpec;
     };
     defer parsed.deinit();
 
-    updateScriptsDirectory(allocator, new_venv_path, old_venv_path) catch |err| {
+    updateScriptsDirectory(allocator, to_path, from_path) catch |err| {
         output.printError(allocator, "Failed to update scripts directory: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-    updateVenvBin(allocator, new_venv_path, old_venv_path) catch |err| {
+    updateVenvBin(allocator, to_path, from_path) catch |err| {
         output.printError(allocator, "Failed to update venv bin/ scripts: {s}", .{@errorName(err)}) catch {};
         return err;
     };
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const moved = try envspec.relocate(arena.allocator(), &parsed.value, old_venv_path, new_venv_path, new_name);
+    const moved = try envspec.relocate(arena.allocator(), &parsed.value, from_path, to_path, name);
     activation.writeAll(arena.allocator(), &moved) catch |err| {
         output.printError(allocator, "Failed to regenerate activation scripts: {s}", .{@errorName(err)}) catch {};
         return err;
@@ -1989,8 +1923,9 @@ fn updateVenvBin(allocator: Allocator, venv_path: []const u8, old_venv_path: []c
     }
 }
 
+/// Rewrites the old venv path in `<venv>/scripts`, the copies of the user's
+/// hook scripts.
 fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_venv_path: []const u8) !void {
-    const new_venv_path = venv_path;
     const scripts_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "scripts" });
     defer allocator.free(scripts_dir);
 
@@ -2014,7 +1949,7 @@ fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_venv_
             // These are copies of USER hook scripts: rewrite only the exact venv
             // path. A bare occurrence of the env name in user content may mean
             // anything; rewriting it would corrupt their script.
-            updateScriptFile(allocator, script_path, old_venv_path, new_venv_path) catch |err| {
+            updateScriptFile(allocator, script_path, old_venv_path, venv_path) catch |err| {
                 output.printError(allocator, "Failed to update script {s}: {s}", .{ entry.name, @errorName(err) }) catch {};
                 return err;
             };
@@ -2073,14 +2008,7 @@ fn updateLocalConfigs(allocator: Allocator, old_name: []const u8, new_name: []co
         try new_root.put(allocator, key, kv.value_ptr.*);
     }
 
-    const updated_contents = try std.json.Stringify.valueAlloc(
-        allocator,
-        std.json.Value{ .object = new_root },
-        .{ .whitespace = .indent_2 },
-    );
-    defer allocator.free(updated_contents);
-
-    try runtime.writeFileAtomic(allocator, config_path, updated_contents);
+    try manifest.writeJson(allocator, config_path, .{ .object = new_root });
 
     output.print(allocator, "Successfully updated local config file", .{}) catch {};
 }

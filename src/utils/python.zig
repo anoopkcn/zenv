@@ -9,12 +9,12 @@ const runtime = @import("runtime.zig");
 pub const DEFAULT_PYTHON_VERSION = "3.10.8";
 
 // Default installation dir is in the zenv dir/python
-pub fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
+fn getDefaultInstallDir(allocator: Allocator) ![]const u8 {
     return paths.getPythonInstallDir(allocator);
 }
 
 // Get path to the Python version for "use" command
-pub fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const u8 {
+fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const u8 {
     const base_install_dir = try getDefaultInstallDir(allocator);
     defer allocator.free(base_install_dir);
 

@@ -307,7 +307,7 @@ pub fn main(app: std.process.Init) anyerror!void {
 
     // For setup command, check if we need to init first
     if (command == .setup) {
-        // Check for --init flag
+        commands.checkFlags(allocator, args, &commands.SETUP_FLAGS) catch |err| errors.report(allocator, err);
         const flags = flags_module.CommandFlags.fromArgs(args);
         const init_flag = flags.init_mode;
 

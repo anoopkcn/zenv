@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 const envspec = @import("envspec.zig");
+const paths = @import("paths.zig");
 
 /// Check if Jupyter is installed and available
 pub fn isJupyterAvailable(allocator: Allocator) bool {
@@ -79,84 +80,52 @@ pub fn generateKernelJson(allocator: Allocator, display_name: []const u8, env_na
 /// config.zig) — this module never touches the registry, so it cannot pick a
 /// different environment than every other command would.
 pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []const u8, custom_name: ?[]const u8, custom_display_name: ?[]const u8) !void {
-    // Determine kernel name and display name
     const kernel_name = custom_name orelse try allocator.print("zenv-{s}", .{env_name});
     defer if (custom_name == null) allocator.free(kernel_name);
+    // The name becomes a directory under kernels/, so it must not be a path.
+    if (!paths.isValidEnvName(kernel_name)) {
+        output.printError(allocator, "Invalid kernel name '{s}'. Use only letters, digits, '-', '_' and '.'.", .{kernel_name}) catch {};
+        return error.InvalidEnvironmentName;
+    }
 
     const display_name = custom_display_name orelse try allocator.print("Python ({s})", .{env_name});
     defer if (custom_display_name == null) allocator.free(display_name);
 
-    // Get Python path from environment
     const python_path = try allocator.print("{s}/bin/python", .{venv_path});
     defer allocator.free(python_path);
-
-    // Check if Python executable exists
     runtime.access(python_path) catch |err| {
-        try output.printError(allocator, "Python executable not found at {s}: {s}", .{ python_path, @errorName(err) });
-        return;
+        output.printError(allocator, "Python executable not found at {s}: {s}", .{ python_path, @errorName(err) }) catch {};
+        return error.NoPython;
     };
 
-    // Create kernel directory
     const kernel_dir = try getKernelDir(allocator, kernel_name);
     defer allocator.free(kernel_dir);
-
-    // Check if kernel already exists
     if (runtime.access(kernel_dir)) |_| {
-        // File exists, that's an error
-        try output.printError(allocator, "Kernel '{s}' already exists", .{kernel_name});
+        output.printError(allocator, "Kernel '{s}' already exists", .{kernel_name}) catch {};
         return error.KernelExists;
-    } else |err| switch (err) {
-        error.FileNotFound => {
-            // Good, kernel doesn't exist, continue
-        },
-        else => {
-            try output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)});
-            return;
-        },
+    } else |err| if (err != error.FileNotFound) {
+        output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)}) catch {};
+        return err;
     }
 
-    // Ensure jupyter data directory exists
-    const jupyter_data_dir = try getJupyterDataDir(allocator);
-    defer allocator.free(jupyter_data_dir);
-
-    runtime.makePath(jupyter_data_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {}, // Directory already exists, that's fine
-        else => {
-            try output.printError(allocator, "Failed to create jupyter data directory: {s}", .{@errorName(err)});
-            return;
-        },
-    };
-
-    // Ensure kernels directory exists
-    const kernels_dir = try allocator.print("{s}/kernels", .{jupyter_data_dir});
-    defer allocator.free(kernels_dir);
-
-    runtime.makePath(kernels_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {}, // Directory already exists, that's fine
-        else => {
-            try output.printError(allocator, "Failed to create kernels directory: {s}", .{@errorName(err)});
-            return;
-        },
-    };
-
-    // Create kernel directory
+    // Creates the Jupyter data and kernels directories too. A failure below
+    // must not leave an empty kernel directory that blocks the next attempt.
     runtime.makePath(kernel_dir) catch |err| {
-        try output.printError(allocator, "Failed to create kernel directory: {s}", .{@errorName(err)});
-        return;
+        output.printError(allocator, "Failed to create kernel directory: {s}", .{@errorName(err)}) catch {};
+        return err;
     };
+    errdefer runtime.deleteTree(kernel_dir) catch {};
 
     const zenv_exe = try zenvLauncher(allocator);
     defer allocator.free(zenv_exe);
     const kernel_json = try generateKernelJson(allocator, display_name, env_name, zenv_exe);
     defer allocator.free(kernel_json);
 
-    // Write kernel.json file
     const kernel_json_path = try allocator.print("{s}/kernel.json", .{kernel_dir});
     defer allocator.free(kernel_json_path);
-
     runtime.writeFile(kernel_json_path, kernel_json) catch |err| {
-        try output.printError(allocator, "Failed to write kernel.json: {s}", .{@errorName(err)});
-        return;
+        output.printError(allocator, "Failed to write kernel.json: {s}", .{@errorName(err)}) catch {};
+        return err;
     };
 
     try output.print(allocator, "Created Jupyter kernel '{s}' for environment '{s}'", .{ kernel_name, env_name });
@@ -180,14 +149,14 @@ pub fn removeKernel(allocator: Allocator, env_name: []const u8) !void {
         },
         else => {
             try output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)});
-            return;
+            return err;
         },
     };
 
     // Remove kernel directory recursively
     runtime.deleteTree(kernel_dir) catch |err| {
         try output.printError(allocator, "Failed to remove kernel directory: {s}", .{@errorName(err)});
-        return;
+        return err;
     };
 
     try output.print(allocator, "Removed Jupyter kernel '{s}' for environment '{s}'", .{ kernel_name, env_name });
@@ -266,7 +235,7 @@ pub fn checkJupyter(allocator: Allocator) !void {
 }
 
 /// Rename a Jupyter kernel from old environment name to new environment name
-pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name: []const u8, new_venv_path: []const u8) !void {
+pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name: []const u8) !void {
     const old_kernel_name = try allocator.print("zenv-{s}", .{old_env_name});
     defer allocator.free(old_kernel_name);
 
@@ -307,18 +276,17 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
         try output.printError(allocator, "Failed to rename kernel directory: {s}", .{@errorName(err)});
         return err;
     };
+    // A kernel.json still naming the old env must not stay under the new name.
+    errdefer runtime.rename(new_kernel_dir, old_kernel_dir) catch {};
 
-    // Update the kernel.json file with new display name and Python path
     const kernel_json_path = try allocator.print("{s}/kernel.json", .{new_kernel_dir});
     defer allocator.free(kernel_json_path);
 
-    // Regenerate kernel.json with the updated display name and Python path.
-    // zenv-managed kernels have a fixed shape, so regenerating is equivalent to
-    // editing display_name + argv[0] in place.
+    // Regenerate kernel.json with the new display name and env. zenv-managed
+    // kernels have a fixed shape, so regenerating is equivalent to editing it.
     const new_display_name = try allocator.print("Python ({s})", .{new_env_name});
     defer allocator.free(new_display_name);
 
-    _ = new_venv_path;
     const zenv_exe = try zenvLauncher(allocator);
     defer allocator.free(zenv_exe);
     const kernel_json = try generateKernelJson(allocator, new_display_name, new_env_name, zenv_exe);

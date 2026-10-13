@@ -244,7 +244,12 @@ fn runStep(a: Allocator, argv: []const []const u8, env: *const Map, cwd: ?[]cons
         }
     };
     var waiter = Waiter{ .child = &child };
-    const thread = try std.Thread.spawn(.{}, Waiter.wait, .{&waiter});
+    const thread = std.Thread.spawn(.{}, Waiter.wait, .{&waiter}) catch |err| {
+        // Killing (not waiting) also reaps it: a child blocked on the full
+        // pipe would never exit for a plain wait.
+        child.kill(runtime.io);
+        return err;
+    };
 
     var buf: [8192]u8 = undefined;
     var pfd = [_]std.posix.pollfd{.{ .fd = reader.handle, .events = std.posix.POLL.IN, .revents = 0 }};
@@ -646,9 +651,8 @@ fn modulePackages(a: Allocator, env: *const Map) ![]const Package {
 // ---------------------------------------------------------------------------
 
 /// The fallback interpreter: the zenv-pinned Python with --python (required),
-/// else `fallback_python` from zenv.json, else the pinned Python, else
-/// "python3" (meaning: no fallback).
-fn fallbackPython(a: Allocator, cfg: *const EnvironmentConfig, flags: CommandFlags) ![]const u8 {
+/// else `fallback_python` from zenv.json, else the pinned Python, else none.
+fn fallbackPython(a: Allocator, cfg: *const EnvironmentConfig, flags: CommandFlags) !?[]const u8 {
     const join = std.Io.Dir.path.join;
     if (flags.use_default_python) {
         const pinned = python_mod.getDefaultPythonPath(a) catch |err| {
@@ -666,27 +670,25 @@ fn fallbackPython(a: Allocator, cfg: *const EnvironmentConfig, flags: CommandFla
     if (cfg.fallback_python) |py| return py;
     const pinned = python_mod.getDefaultPythonPath(a) catch |err| {
         warn(a, "Failed to get default Python path: {s}", .{@errorName(err)});
-        return "python3";
+        return null;
     };
-    return if (pinned) |p| try join(a, &[_][]const u8{ p, "bin", "python3" }) else "python3";
+    return if (pinned) |p| try join(a, &[_][]const u8{ p, "bin", "python3" }) else null;
 }
 
 const Chosen = struct { path: []const u8, description: []const u8 };
 
 /// The interpreter for the venv, in zenv's documented priority: --python's
 /// pinned Python; the module Python; `fallback`; python3; python.
-fn selectPython(a: Allocator, env: *const Map, fallback: []const u8, use_default: bool, module_python: ?[]const u8) !Chosen {
+fn selectPython(a: Allocator, env: *const Map, fallback: ?[]const u8, use_default: bool, module_python: ?[]const u8) !Chosen {
     const path = env.get("PATH");
-    const has_fallback = !std.mem.eql(u8, fallback, "python3");
     if (use_default) {
-        if (has_fallback) {
-            if (try findExecutable(a, fallback, path)) |p| return .{ .path = p, .description = "default configured Python (from --python flag)" };
-        }
-        return fail(a, "Default Python ({s}) not found or invalid, but --python flag was specified.", .{fallback});
+        // fallbackPython always returns the pinned Python with --python.
+        if (try findExecutable(a, fallback.?, path)) |p| return .{ .path = p, .description = "default configured Python (from --python flag)" };
+        return fail(a, "Default Python ({s}) not found or invalid, but --python flag was specified.", .{fallback.?});
     }
     if (module_python) |p| return .{ .path = p, .description = "module-provided Python" };
-    if (has_fallback) {
-        if (try findExecutable(a, fallback, path)) |p| return .{ .path = p, .description = "fallback Python" };
+    if (fallback) |f| {
+        if (try findExecutable(a, f, path)) |p| return .{ .path = p, .description = "fallback Python" };
     }
     if (try findExecutable(a, "python3", path)) |p| return .{ .path = p, .description = "system python3" };
     if (try findExecutable(a, "python", path)) |p| return .{ .path = p, .description = "system python" };

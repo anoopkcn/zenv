@@ -2,8 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
-const errors = @import("errors.zig");
-const ZenvError = errors.ZenvError;
 const mem = std.mem;
 const json = std.json;
 const paths = @import("paths.zig");
@@ -154,13 +152,6 @@ pub const ZenvConfig = struct {
     pub fn getEnvironment(self: *const ZenvConfig, env_name: []const u8) ?*const EnvironmentConfig {
         return self.environments.getPtr(env_name);
     }
-
-    pub fn validateEnvironment(env_config: *const EnvironmentConfig, env_name: []const u8) ?ZenvError {
-        _ = env_name;
-        if (env_config.target_machines.items.len == 0) return ZenvError.ConfigInvalid;
-        // python_executable is now optional, no validation needed
-        return null;
-    }
 };
 
 // =======================
@@ -170,24 +161,6 @@ pub const ZenvConfig = struct {
 // Field-extraction primitives shared by the single parse-and-validate seam in
 // validation.zig. Generic (no schema knowledge); the schema lives in that walk.
 pub const Parse = struct {
-    pub fn getBool(value: json.Value, default: bool) bool {
-        return switch (value) {
-            .bool => |b| b,
-            else => default,
-        };
-    }
-
-    pub fn getString(allocator: Allocator, value: json.Value, default: ?[]const u8) !?[]const u8 {
-        return switch (value) {
-            .string => |str| try allocator.dupe(u8, str),
-            .null => default,
-            else => if (default) |def|
-                try allocator.dupe(u8, def)
-            else
-                error.ConfigInvalid,
-        };
-    }
-
     pub fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
         var result: std.ArrayList([]const u8) = .empty;
         errdefer {
@@ -997,21 +970,19 @@ pub const EnvironmentRegistry = struct {
         return self.renameAt(ref.*, new_name);
     }
 
+    /// Whether `name` already resolves to an entry (name, alias, exact id, or
+    /// unique prefix). Host-blind (null hostname): a rename target must be free
+    /// on every host. Only a clean not-found means the name is available; an
+    /// AmbiguousIdentifier (e.g. `name` equals an alias shared by several envs)
+    /// means it is taken, or an env_name could collide with an alias.
+    pub fn nameTaken(self: *const EnvironmentRegistry, name: []const u8) bool {
+        _ = self.resolveAgainstCwd(name, null, null) catch |e| return e == error.AmbiguousIdentifier;
+        return true;
+    }
+
     /// rename's work on an up-to-date registry: uniqueness, mutation, save.
     fn renameAt(self: *EnvironmentRegistry, ref: EnvRef, new_name: []const u8) !void {
-
-        // Uniqueness: new_name must not already resolve to an entry (name, alias,
-        // exact id, or unique prefix). Host-blind (null hostname) — a rename target
-        // must be free on every host. Only a clean not-found means the name is
-        // available; an AmbiguousIdentifier (e.g. new_name equals an alias shared by
-        // several envs) means the name is taken, so it must also be rejected rather
-        // than swallowed (which would let an env_name collide with an alias).
-        if (self.resolveAgainstCwd(new_name, null, null)) |_| {
-            return error.EnvironmentAlreadyExists;
-        } else |e| switch (e) {
-            error.AmbiguousIdentifier => return error.EnvironmentAlreadyExists,
-            error.EnvironmentNotRegistered => {},
-        }
+        if (self.nameTaken(new_name)) return error.EnvironmentAlreadyExists;
 
         const entry = &self.entries.items[ref.idx];
         const parent_dir = std.Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
@@ -1389,13 +1360,4 @@ test "parsePyvenvCfg: tolerates CRLF and irregular spacing around '='" {
     const f = parsePyvenvCfg(content);
     try testing.expectEqualStrings("3.12.1", f.version.?);
     try testing.expectEqualStrings("/x/py", f.path.?);
-}
-
-test "Parse.getBool reads booleans and falls back on non-bool" {
-    try testing.expectEqual(true, Parse.getBool(json.Value{ .bool = true }, false));
-    try testing.expectEqual(false, Parse.getBool(json.Value{ .bool = false }, true));
-    // Missing / null / wrong-typed values fall back to the default.
-    try testing.expectEqual(true, Parse.getBool(json.Value{ .null = {} }, true));
-    try testing.expectEqual(false, Parse.getBool(json.Value{ .null = {} }, false));
-    try testing.expectEqual(true, Parse.getBool(json.Value{ .string = "yes" }, true));
 }

@@ -310,21 +310,48 @@ const Drift = union(enum) {
     unstamped,
 };
 
-/// A removed/broken config, or an env it no longer defines, counts as no drift:
-/// it must not block a working venv.
-fn drift(allocator: Allocator, entry: *const config.RegistryEntry) !Drift {
-    const config_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" }) catch return .none;
+/// The zenv.json in `project_dir`, parsed and validated WITHOUT printing the
+/// validation errors: the gate runs before commands that must keep working
+/// while zenv.json is missing or mid-edit. Null when the file is absent;
+/// error.ConfigInvalid when it does not validate.
+fn loadConfigQuiet(allocator: Allocator, project_dir: []const u8) !?config.ZenvConfig {
+    const config_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, "zenv.json" });
     defer allocator.free(config_path);
+    const content = runtime.readFileAlloc(allocator, config_path, MAX_TRACKED_FILE) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
+    defer allocator.free(content);
+    switch (try validation.loadConfig(allocator, content)) {
+        .config => |c| return c,
+        .errors => |errs| {
+            var list = errs;
+            for (list.items) |*e| e.deinit(allocator);
+            list.deinit(allocator);
+            return error.ConfigInvalid;
+        },
+    }
+}
 
-    var cfg = validation.validateAndParse(allocator, config_path) catch return .none;
+/// A removed/broken config, or an env it no longer defines, counts as no drift:
+/// it must not block a working venv. A broken one gets a one-line notice.
+fn drift(allocator: Allocator, entry: *const config.RegistryEntry) !Drift {
+    var cfg = (loadConfigQuiet(allocator, entry.project_dir) catch |err| {
+        if (err == error.ConfigInvalid) {
+            output.rawErr(allocator, "zenv: {s}/zenv.json is invalid ('zenv validate' shows why); using '{s}' as last built.\n", .{ entry.project_dir, entry.env_name }) catch {};
+        }
+        return .none;
+    }) orelse return .none;
     defer cfg.deinit();
 
     const env_cfg = cfg.getEnvironment(entry.env_name) orelse return .none;
 
+    // Stamp first: without one, the hash would be computed for nothing.
+    const stamp = readStamp(allocator, entry.venv_path) orelse return .unstamped;
+    errdefer stamp.deinit(allocator);
     const current = try computeTrackedHash(allocator, entry.project_dir, entry.env_name, env_cfg);
     defer allocator.free(current);
 
-    const stamp = readStamp(allocator, entry.venv_path) orelse return .unstamped;
     if (std.mem.eql(u8, stamp.hash, current)) {
         stamp.deinit(allocator);
         return .none;
@@ -348,6 +375,23 @@ pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) 
         // Force a one-time re-setup with no replayed flags.
         .unstamped => try runSetup(allocator, entry, &[_][]const u8{}, "no build record found"),
     }
+}
+
+/// Re-records the build stamp after a command changed an up-to-date env's
+/// tracked files itself (`add` recording a package it already installed,
+/// `rename` renaming the env), so the next gated command does not rebuild what
+/// is already done. Keeps the stamp's replay flags. Does nothing when the env
+/// has no stamp, or zenv.json is missing, invalid or lacks the env.
+pub fn restamp(allocator: Allocator, project_dir: []const u8, env_name: []const u8, venv_path: []const u8) !void {
+    var cfg = (loadConfigQuiet(allocator, project_dir) catch return) orelse return;
+    defer cfg.deinit();
+    const env_cfg = cfg.getEnvironment(env_name) orelse return;
+    const stamp = readStamp(allocator, venv_path) orelse return;
+    defer stamp.deinit(allocator);
+
+    const hash = try computeTrackedHash(allocator, project_dir, env_name, env_cfg);
+    defer allocator.free(hash);
+    try writeStamp(allocator, venv_path, hash, stamp.flags);
 }
 
 /// True when the gate would rebuild the env. Never builds: for callers that

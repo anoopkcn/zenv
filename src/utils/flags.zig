@@ -44,6 +44,25 @@ pub const CommandFlags = struct {
     }
 };
 
+/// The first `-`/`--` argument after the command that is not in `allowed`, so
+/// a mistyped flag (`--no-cach`) is refused instead of silently ignored.
+pub fn unknownFlag(args: []const []const u8, allowed: []const []const u8) ?[]const u8 {
+    if (args.len <= 2) return null;
+    next: for (args[2..]) |arg| {
+        if (!std.mem.startsWith(u8, arg, "-")) continue;
+        for (allowed) |known| if (std.mem.eql(u8, arg, known)) continue :next;
+        return arg;
+    }
+    return null;
+}
+
+test "unknownFlag finds the first flag a command does not take" {
+    const allowed = [_][]const u8{ "--uv", "--dev" };
+    try std.testing.expect(unknownFlag(&.{ "zenv", "add", "e", "pkg", "--uv" }, &allowed) == null);
+    try std.testing.expectEqualStrings("--no-cach", unknownFlag(&.{ "zenv", "setup", "--uv", "e", "--no-cach" }, &allowed).?);
+    try std.testing.expect(unknownFlag(&.{"zenv"}, &allowed) == null);
+}
+
 /// Returns the `idx`-th positional argument after the command (i.e. within
 /// `args[2..]`), skipping `-`/`--` flags. Keeps `zenv setup --init myenv` and
 /// `zenv setup myenv --init` equivalent instead of silently treating the flag

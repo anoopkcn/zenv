@@ -43,10 +43,8 @@ pub fn ensureZenvDir(allocator: Allocator) ![]const u8 {
     errdefer allocator.free(zenv_dir_path);
 
     runtime.makePath(zenv_dir_path) catch |err| {
-        if (err != error.PathAlreadyExists) {
-            output.printError(allocator, "Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
-            return err;
-        }
+        output.printError(allocator, "Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
+        return err;
     };
 
     return zenv_dir_path;

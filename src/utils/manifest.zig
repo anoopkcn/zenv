@@ -51,6 +51,12 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
         if (is_entry and !replaced and parse_deps.samePackage(trimmed, spec)) {
             if (!first) try out.append(allocator, '\n');
             try out.appendSlice(allocator, spec);
+            // Keep an inline comment (`pkg==1.0  # why`); pip needs the
+            // whitespace before '#', so it is kept too.
+            if (std.mem.find(u8, line, " #") orelse std.mem.find(u8, line, "\t#")) |c| {
+                const start = std.mem.trimEnd(u8, line[0 .. c + 1], " \t").len;
+                try out.appendSlice(allocator, std.mem.trimEnd(u8, line[start..], "\r"));
+            }
             replaced = true;
         } else {
             if (!first) try out.append(allocator, '\n');
@@ -122,9 +128,17 @@ pub fn addToZenvJson(
     }
     if (!replaced) try arr_ptr.array.append(Value{ .string = owned_spec });
 
-    const out = try json.Stringify.valueAlloc(allocator, parsed.value, .{ .whitespace = .indent_2 });
-    defer allocator.free(out);
-    try runtime.writeFileAtomic(allocator, path, out);
+    try writeJson(allocator, path, parsed.value);
+}
+
+/// Writes `value` to `path` atomically as 2-space-indented JSON with a final
+/// newline, the layout `zenv init` writes.
+pub fn writeJson(allocator: Allocator, path: []const u8, value: Value) !void {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try json.Stringify.value(value, .{ .whitespace = .indent_2 }, &out.writer);
+    try out.writer.writeByte('\n');
+    try runtime.writeFileAtomic(allocator, path, out.written());
 }
 
 /// Adds environment `env_name` to the zenv.json at `path`, taking its object
@@ -147,11 +161,7 @@ pub fn addEnvToZenvJson(allocator: Allocator, path: []const u8, env_name: []cons
     const env_value = tmpl.object.get(env_name) orelse return error.InvalidFormat;
     try parsed.value.object.put(a, try a.dupe(u8, env_name), env_value);
 
-    const out = try json.Stringify.valueAlloc(allocator, parsed.value, .{ .whitespace = .indent_2 });
-    defer allocator.free(out);
-    const with_newline = try std.mem.concat(allocator, u8, &.{ out, "\n" });
-    defer allocator.free(with_newline);
-    try runtime.writeFileAtomic(allocator, path, with_newline);
+    try writeJson(allocator, path, parsed.value);
     return true;
 }
 
@@ -207,13 +217,62 @@ fn indentOf(line: []const u8) []const u8 {
     return line[0..end];
 }
 
-/// Extracts the string between the first pair of double quotes in `line`, or
-/// null. Used to read existing array entries (`    "flask>=2.0",`).
-fn quotedValue(line: []const u8) ?[]const u8 {
-    const lq = std.mem.findScalar(u8, line, '"') orelse return null;
-    const rest = line[lq + 1 ..];
-    const rq = std.mem.findScalar(u8, rest, '"') orelse return null;
-    return rest[0..rq];
+/// The first TOML string in `line` ("basic" with backslash escapes, or
+/// 'literal'): `start`/`end` bound its text, so the opening quote is at
+/// `start - 1` and the closing one at `end`. Null when there is none. Reads
+/// array entries such as `    "flask>=2.0",  # why`.
+const Quoted = struct { start: usize, end: usize };
+fn quotedSpan(line: []const u8) ?Quoted {
+    const open = std.mem.findAny(u8, line, "\"'") orelse return null;
+    const q = line[open];
+    var i = open + 1;
+    while (i < line.len) : (i += 1) {
+        if (q == '"' and line[i] == '\\') {
+            i += 1;
+        } else if (line[i] == q) {
+            return .{ .start = open + 1, .end = i };
+        }
+    }
+    return null;
+}
+
+/// Index of the first `target` in `s` at or after `from` that is outside TOML
+/// strings, or null (also when a `#` comment starts first). Finds the `]` that
+/// closes an array whose entries may hold brackets (`"uvicorn[standard]"`) and
+/// the commas between entries that may hold commas (`"numpy>=1.26, <2"`).
+fn findUnquoted(s: []const u8, from: usize, target: u8) ?usize {
+    var quote: ?u8 = null;
+    var i = from;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (quote) |q| {
+            if (q == '"' and c == '\\') {
+                i += 1;
+            } else if (c == q) {
+                quote = null;
+            }
+        } else if (c == '"' or c == '\'') {
+            quote = c;
+        } else if (c == target) {
+            return i;
+        } else if (c == '#') {
+            return null;
+        }
+    }
+    return null;
+}
+
+/// `spec` as a TOML basic string, quotes included: a marker such as
+/// `python_version < "3.12"` holds double quotes.
+fn tomlString(a: Allocator, spec: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '"');
+    for (spec) |c| {
+        if (c == '"' or c == '\\') try out.append(a, '\\');
+        try out.append(a, c);
+    }
+    try out.append(a, '"');
+    return out.items;
 }
 
 /// Core text edit. Returns the rewritten document (arena-owned) or null when the
@@ -277,11 +336,9 @@ fn editPyproject(
 
     // 3. Edit the existing array (inline or multi-line).
     const kl = key_line.?;
-    const lb = std.mem.findScalar(u8, lines.items[kl], '[') orelse return null;
-    const has_close_on_line = std.mem.findScalarPos(u8, lines.items[kl], lb + 1, ']') != null;
-
-    if (has_close_on_line) {
-        try editInlineArray(a, &lines, kl, lb, spec);
+    const lb = findUnquoted(lines.items[kl], 0, '[') orelse return null;
+    if (findUnquoted(lines.items[kl], lb + 1, ']')) |rb| {
+        try editInlineArray(a, &lines, kl, lb, rb, spec);
     } else {
         try editMultilineArray(a, &lines, kl, sec_end, spec);
     }
@@ -301,81 +358,106 @@ fn appendNewBlock(a: Allocator, lines: *LineList, section: []const u8, key: []co
     }
     try lines.append(a, try a.print("[{s}]", .{section}));
     try lines.append(a, try a.print("{s} = [", .{key}));
-    try lines.append(a, try a.print("    \"{s}\",", .{spec}));
+    try lines.append(a, try a.print("    {s},", .{try tomlString(a, spec)}));
     try lines.append(a, "]");
 }
 
 /// Inserts `key = [\n    "spec",\n]` at line index `at`.
 fn insertKeyBlock(a: Allocator, lines: *LineList, at: usize, key: []const u8, spec: []const u8) !void {
     try lines.insert(a, at, try a.print("{s} = [", .{key}));
-    try lines.insert(a, at + 1, try a.print("    \"{s}\",", .{spec}));
+    try lines.insert(a, at + 1, try a.print("    {s},", .{try tomlString(a, spec)}));
     try lines.insert(a, at + 2, "]");
 }
 
-/// Edits a single-line array `key = [ ... ]` on line `kl`, `lb` = index of '['.
-fn editInlineArray(a: Allocator, lines: *LineList, kl: usize, lb: usize, spec: []const u8) !void {
+/// Edits a single-line array `key = [ ... ]` on line `kl`; `lb`/`rb` are the
+/// indexes of its brackets. Entries other than a replaced one keep their text.
+fn editInlineArray(a: Allocator, lines: *LineList, kl: usize, lb: usize, rb: usize, spec: []const u8) !void {
     const line = lines.items[kl];
-    const rb = std.mem.findScalarPos(u8, line, lb + 1, ']').?;
-    const inner = std.mem.trim(u8, line[lb + 1 .. rb], " \t");
+    const inner = line[lb + 1 .. rb];
+    const new_entry = try tomlString(a, spec);
 
     var entries: std.ArrayList([]const u8) = .empty;
     var replaced = false;
-    if (inner.len > 0) {
-        var parts = std.mem.splitScalar(u8, inner, ',');
-        while (parts.next()) |part| {
-            const p = std.mem.trim(u8, part, " \t");
-            if (p.len == 0) continue;
-            const val = quotedValue(p) orelse p;
-            if (!replaced and parse_deps.samePackage(val, spec)) {
-                try entries.append(a, try a.print("\"{s}\"", .{spec}));
-                replaced = true;
-            } else {
-                try entries.append(a, p);
-            }
+    var start: usize = 0;
+    while (start <= inner.len) {
+        const end = findUnquoted(inner, start, ',') orelse inner.len;
+        const p = std.mem.trim(u8, inner[start..end], " \t");
+        start = end + 1;
+        if (p.len == 0) continue;
+        const val = if (quotedSpan(p)) |q| p[q.start..q.end] else p;
+        if (!replaced and parse_deps.samePackage(val, spec)) {
+            try entries.append(a, new_entry);
+            replaced = true;
+        } else {
+            try entries.append(a, p);
         }
     }
-    if (!replaced) try entries.append(a, try a.print("\"{s}\"", .{spec}));
+    if (!replaced) try entries.append(a, new_entry);
 
     const joined = try std.mem.join(a, ", ", entries.items);
     lines.items[kl] = try a.print("{s}{s}{s}", .{ line[0 .. lb + 1], joined, line[rb..] });
 }
 
-/// Edits a multi-line array opened on line `kl`, closed by a line whose trimmed
-/// text starts with ']' before `sec_end`.
+/// Edits a multi-line array opened on line `kl`: replaces the entry for the
+/// same package in place (keeping its comma and comment), else appends one
+/// before the `]`, which may share a line with the last entry.
 fn editMultilineArray(a: Allocator, lines: *LineList, kl: usize, sec_end: usize, spec: []const u8) !void {
-    // Find the closing-bracket line.
+    const new_entry = try tomlString(a, spec);
+
+    // The closing-bracket line and the bracket's column in it.
     var close: usize = kl + 1;
+    var close_col: usize = 0;
     while (close < sec_end) : (close += 1) {
-        const t = std.mem.trim(u8, lines.items[close], " \t\r");
-        if (t.len > 0 and t[0] == ']') break;
-    }
+        if (findUnquoted(lines.items[close], 0, ']')) |col| {
+            close_col = col;
+            break;
+        }
+    } else return error.UnterminatedArray; // leave the file alone
 
     // Try to replace an existing entry with the same package.
-    var i = kl + 1;
     var last_entry: ?usize = null;
-    while (i < close) : (i += 1) {
-        const val = quotedValue(lines.items[i]) orelse continue;
+    var i = kl + 1;
+    while (i <= close) : (i += 1) {
+        const line = lines.items[i];
+        const q = quotedSpan(line) orelse continue;
+        if (i == close and q.start > close_col) break;
         last_entry = i;
-        if (parse_deps.samePackage(val, spec)) {
-            lines.items[i] = try a.print("{s}\"{s}\",", .{ indentOf(lines.items[i]), spec });
+        if (parse_deps.samePackage(line[q.start..q.end], spec)) {
+            lines.items[i] = try a.print("{s}{s}{s}", .{ line[0 .. q.start - 1], new_entry, line[q.end + 1 ..] });
             return;
         }
     }
 
-    // No match: append a new entry just before the closing bracket. Use the
-    // indentation of an existing entry, or the key-line indent + 4 spaces.
-    const indent = if (last_entry) |le| indentOf(lines.items[le]) else try a.print("{s}    ", .{indentOf(lines.items[kl])});
+    // No match: append a new entry. Use the indentation of an existing entry,
+    // or the key-line indent + 4 spaces.
+    const indent = if (last_entry != null and last_entry.? != close)
+        indentOf(lines.items[last_entry.?])
+    else
+        try a.print("{s}    ", .{indentOf(lines.items[kl])});
 
-    // Ensure the previous last entry carries a trailing comma so the array stays
-    // valid once another element follows it.
+    const close_line = lines.items[close];
+    const head = std.mem.trimEnd(u8, close_line[0..close_col], " \t");
+    if (std.mem.trim(u8, head, " \t").len > 0) {
+        // The last entry shares its line with ']' (`    "b"]`): give the
+        // bracket a line of its own after the new entry.
+        lines.items[close] = if (std.mem.endsWith(u8, head, ",")) head else try a.print("{s},", .{head});
+        try lines.insert(a, close + 1, try a.print("{s}{s},", .{ indent, new_entry }));
+        try lines.insert(a, close + 2, try a.print("{s}{s}", .{ indentOf(lines.items[kl]), close_line[close_col..] }));
+        return;
+    }
+
+    // Ensure the previous last entry carries a trailing comma (before any
+    // comment) so the array stays valid once another element follows it.
     if (last_entry) |le| {
-        const t = std.mem.trimEnd(u8, lines.items[le], " \t\r");
-        if (!std.mem.endsWith(u8, t, ",")) {
-            lines.items[le] = try a.print("{s},", .{t});
+        const line = lines.items[le];
+        const q = quotedSpan(line).?;
+        const after = line[q.end + 1 ..];
+        if (!std.mem.startsWith(u8, std.mem.trimStart(u8, after, " \t"), ",")) {
+            lines.items[le] = try a.print("{s},{s}", .{ line[0 .. q.end + 1], after });
         }
     }
 
-    try lines.insert(a, close, try a.print("{s}\"{s}\",", .{ indent, spec }));
+    try lines.insert(a, close, try a.print("{s}{s},", .{ indent, new_entry }));
 }
 
 // ============================ Tests ============================
@@ -506,6 +588,70 @@ test "pyproject: appends a comma to a comma-less last entry before inserting" {
     try testing.expect(std.mem.find(u8, out, "\"flask\",") != null);
 }
 
+test "pyproject: inline array entries may hold brackets and commas" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "[project]\ndependencies = [\"uvicorn[standard]>=0.20\", 'numpy>=1.26, <2'] # pinned\n";
+
+    const replaced = (try editPyproject(a, src, "project", "dependencies", "numpy>=2", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\"uvicorn[standard]>=0.20\", \"numpy>=2\"] # pinned\n", replaced);
+
+    const extra = (try editPyproject(a, src, "project", "dependencies", "uvicorn>=0.30", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\"uvicorn>=0.30\", 'numpy>=1.26, <2'] # pinned\n", extra);
+
+    const appended = (try editPyproject(a, src, "project", "dependencies", "flask", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\"uvicorn[standard]>=0.20\", 'numpy>=1.26, <2', \"flask\"] # pinned\n", appended);
+}
+
+test "pyproject: replacing a multi-line entry keeps its comma and comment" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\[project]
+        \\dependencies = [
+        \\    "torch==2.1",  # cu121 on this node
+        \\    "numpy"  # last, no comma
+        \\]
+        \\
+    ;
+    const torch = (try editPyproject(a, src, "project", "dependencies", "torch==2.2", false)).?;
+    try testing.expect(std.mem.find(u8, torch, "    \"torch==2.2\",  # cu121 on this node\n") != null);
+
+    // Appending gives the comma-less last entry a comma before its comment.
+    const flask = (try editPyproject(a, src, "project", "dependencies", "flask", false)).?;
+    try testing.expect(std.mem.find(u8, flask, "    \"numpy\",  # last, no comma\n    \"flask\",\n]") != null);
+}
+
+test "pyproject: a ']' sharing the last entry's line gets its own line" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "[project]\ndependencies = [\n    \"requests\",\n    \"six\"]\n";
+    const out = (try editPyproject(a, src, "project", "dependencies", "flask", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\n    \"requests\",\n    \"six\",\n    \"flask\",\n]\n", out);
+
+    // An entry on the ']' line can still be replaced in place.
+    const six = (try editPyproject(a, src, "project", "dependencies", "six>=1.16", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\n    \"requests\",\n    \"six>=1.16\"]\n", six);
+}
+
+test "pyproject: specs with double quotes are escaped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = (try editPyproject(a, "[project]\ndependencies = []\n", "project", "dependencies", "tomli; python_version < \"3.11\"", false)).?;
+    try testing.expectEqualStrings("[project]\ndependencies = [\"tomli; python_version < \\\"3.11\\\"\"]\n", out);
+}
+
+test "pyproject: an unterminated array is left alone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const src = "[project]\ndependencies = [\n    \"requests\",\n";
+    try testing.expectError(error.UnterminatedArray, editPyproject(arena.allocator(), src, "project", "dependencies", "flask", false));
+}
+
 // --- requirements.txt (I/O via runtime) ---
 
 test "requirements: append then replace de-dups by package name" {
@@ -534,6 +680,20 @@ test "requirements: append then replace de-dups by package name" {
         // exactly one flask line
         try testing.expect(std.mem.find(u8, c, "flask") == std.mem.findLast(u8, c, "flask"));
     }
+}
+
+test "requirements: a replaced line keeps its comment; names match per PEP 503" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const path = ".zig-cache/tmp/zenv-manifest-req-comment.txt";
+    runtime.deleteFile(path) catch {};
+    defer runtime.deleteFile(path) catch {};
+
+    try runtime.writeFile(path, "Flask_Login==0.5  # auth\nrequests\n");
+    try addToRequirementsTxt(a, path, "flask-login>=0.6");
+    const c = try runtime.readFileAlloc(a, path, MAX_FILE);
+    defer a.free(c);
+    try testing.expectEqualStrings("flask-login>=0.6  # auth\nrequests\n", c);
 }
 
 test "requirements: creates the file when missing" {

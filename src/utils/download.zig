@@ -82,6 +82,8 @@ pub fn downloadToTemp(
     defer allocator.free(unique);
     const dl_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ runtime.tempDir(), unique });
     errdefer allocator.free(dl_path);
+    // A failed download must not leave its partial file in $TMPDIR.
+    errdefer runtime.deleteFile(dl_path) catch {};
 
     try downloadFile(allocator, url, dl_path, options);
 
