@@ -133,6 +133,8 @@ fn runWithoutPython(a: Allocator, opts: Options, setup_hook: ?[]const u8) !void 
 
     const bin = try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "bin" });
     runtime.makePath(bin) catch |err| return fail(a, "Could not create {s}: {s}", .{ bin, @errorName(err) });
+    // Keep the env out of git, as venv.create does for a Python env.
+    try runtime.writeFile(try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, ".gitignore" }), "# Created by zenv\n*\n");
     try envspec.applyOp(&env, .{ .op = .prepend, .name = "PATH", .value = bin });
     try env.put("ZENV_ENV_DIR", opts.venv_dir);
     try applyUserEnv(a, opts, &env);
@@ -1148,6 +1150,7 @@ test "runWithoutPython keeps bin/ and refuses a leftover Python venv" {
     // No module system in the test environment and no hooks: only bin/ is made.
     try runWithoutPython(a, opts, null);
     try runtime.access(root ++ "/bin/hello");
+    try runtime.access(root ++ "/.gitignore");
     try testing.expect(!try hasPythonVenv(a, root));
 
     // The env had Python before: refused, nothing removed.
