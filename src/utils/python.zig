@@ -307,12 +307,14 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
         return;
     }
 
-    // Create a temporary build directory
-    const build_dir = "/tmp/zenv_python_build";
+    // Per-process build directory under $TMPDIR (shared login nodes).
+    const build_dir = try allocator.print("{s}/zenv-python-build-{d}", .{ runtime.tempDir(), runtime.processId() });
+    defer allocator.free(build_dir);
     runtime.makePath(build_dir) catch |err| {
         output.printError(allocator, "Failed to create build directory: {s}", .{@errorName(err)}) catch {};
         return err;
     };
+    defer runtime.deleteTree(build_dir) catch {};
 
     // Download the Python source
     const tarball_path = try downloadPythonSource(allocator, python_version);

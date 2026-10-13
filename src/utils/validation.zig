@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const json = std.json;
+const paths = @import("paths.zig");
 const output = @import("output.zig");
 const config_module = @import("config.zig");
 const runtime = @import("runtime.zig");
@@ -142,6 +143,13 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
         const key = entry.key_ptr.*;
         if (std.mem.eql(u8, key, "base_dir")) continue;
         has_envs = true;
+        if (!paths.isValidEnvName(key)) {
+            try errors.append(allocator, ValidationError{
+                .message = try allocator.print("Invalid environment name '{s}': use letters, digits, '_', '-' and '.' (not '.' or '..')", .{key}),
+                .field_path = try allocator.dupe(u8, key),
+            });
+            continue;
+        }
 
         if (try validateAndBuildEnvironment(allocator, &errors, entry.value_ptr.*, key)) |env| {
             var env_mut = env;

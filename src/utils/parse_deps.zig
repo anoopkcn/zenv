@@ -191,35 +191,17 @@ pub fn validateDependencies(
             continue;
         }
 
-        // Skip deps that look like file paths
-        if (std.mem.find(u8, dep, "/") != null) {
-            output.print(allocator, "Warning: Skipping dependency that looks like a path: '{s}'", .{dep}) catch {};
-            continue;
-        }
-
-        // Skip deps without a valid package name (only allow common Python package name chars)
-        var valid = true;
-        var has_alpha = false;
-        for (dep) |c| {
-            // Allow alphanumeric, hyphen, underscore, dot, comparison operators/brackets,
-            // and comma (separates multiple version constraints, e.g. ">=1.26.0,<2.0").
-            if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')) {
-                has_alpha = true;
-            } else if (!((c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or
-                c == '>' or c == '<' or c == '=' or c == '~' or c == ' ' or c == '[' or c == ']' or c == ','))
-            {
-                valid = false;
-                break;
-            }
-        }
-
-        if (!valid or !has_alpha) {
-            output.print(allocator, "Warning: Skipping invalid dependency: '{s}'", .{dep}) catch {};
+        // Only the project name is checked here; the rest of the PEP 508 line
+        // (specifiers like `!=1.0` or `==1.0.*`, extras, markers, `name @ url`)
+        // is left for pip/uv, which validate it properly at install time.
+        const name = packageBaseName(dep);
+        if (name.len == 0 or !std.ascii.isAlphanumeric(name[0])) {
+            output.print(allocator, "Warning: Skipping invalid dependency (no project name): '{s}'", .{dep}) catch {};
             continue;
         }
 
         // Extract the package name to check for duplicates (case-insensitive check)
-        const package_name_raw = packageBaseName(dep);
+        const package_name_raw = name;
 
         // Convert package name to lowercase for case-insensitive duplicate check
         // Reuse the same buffer to avoid repeated allocations
@@ -344,6 +326,26 @@ test "isLikelyPythonPackageName filters TOML metadata fields" {
     try testing.expect(isLikelyPythonPackageName("numpy>=1.26.0, <2.0"));
     // Prose with spaces but no version operators is not a package.
     try testing.expect(!isLikelyPythonPackageName("Programming Language :: Python :: 3"));
+}
+
+test "validateDependencies keeps any PEP 508 line that starts with a name" {
+    test_support.setupRuntime();
+    const a = std.testing.allocator;
+    const raw = [_][]const u8{
+        "flask!=2.0",
+        "numpy==1.26.*",
+        "torch==2.1+cu121",
+        "requests ; python_version<'3.12'",
+        "pkg @ https://example.com/pkg-1.0-py3-none-any.whl",
+        "FLASK>=1", // duplicate of flask (case-insensitive)
+        "-e .", // not a requirement name
+        "",
+    };
+    var valid = try validateDependencies(a, &raw, "test");
+    defer valid.deinit(a);
+    try std.testing.expectEqual(@as(usize, 5), valid.items.len);
+    try std.testing.expectEqualStrings("flask!=2.0", valid.items[0]);
+    try std.testing.expectEqualStrings("pkg @ https://example.com/pkg-1.0-py3-none-any.whl", valid.items[4]);
 }
 
 test "validateDependencies keeps multi-constraint specifiers" {

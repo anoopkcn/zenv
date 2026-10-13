@@ -11,6 +11,10 @@ const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 const host = @import("host.zig");
 
+/// An environment's id: SHA-1 of (name, project dir, targets), NUL-separated so
+/// field boundaries cannot shift. Env names are unique in the registry, so ids
+/// are too, and they are reproducible: re-registering the same env gives the
+/// same id, so a remembered id prefix keeps working.
 fn generateSHA1ID(
     allocator: Allocator,
     env_name: []const u8,
@@ -18,16 +22,10 @@ fn generateSHA1ID(
     target_machines_str: []const u8,
 ) ![]const u8 {
     var sha1 = std.crypto.hash.Sha1.init(.{});
-    sha1.update(env_name);
-    sha1.update(project_dir);
-    sha1.update(target_machines_str);
-
-    // Use ArenaAllocator for temporary allocations
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const timestamp_str = try arena.allocator().print("{d}", .{runtime.nowMillis()});
-    sha1.update(timestamp_str);
+    for ([_][]const u8{ env_name, project_dir, target_machines_str }) |part| {
+        sha1.update(part);
+        sha1.update("\x00");
+    }
 
     var hash: [20]u8 = undefined;
     sha1.final(&hash);
@@ -462,6 +460,42 @@ pub const EnvironmentRegistry = struct {
         return registry;
     }
 
+    /// Starts a read-modify-write of registry.json. Takes an exclusive lock on
+    /// `<ZENV_DIR>/registry.lock` (shared filesystems: across nodes too) and
+    /// replaces the in-memory entries with the file's current contents, so the
+    /// caller's change applies to what is on disk now rather than to the copy
+    /// loaded when the command started (which may be minutes old after a
+    /// setup). Entries, refs and borrowed strings from before are invalid
+    /// afterwards. Finish with `endUpdate`.
+    fn beginUpdate(self: *EnvironmentRegistry) !std.Io.File {
+        const zenv_dir = try paths.ensureZenvDir(self.allocator);
+        defer self.allocator.free(zenv_dir);
+        const lock_path = try std.Io.Dir.path.join(self.allocator, &.{ zenv_dir, "registry.lock" });
+        defer self.allocator.free(lock_path);
+
+        var file = try runtime.createFile(lock_path, .{ .truncate = false });
+        errdefer file.close(runtime.io);
+        try file.lock(runtime.io, .exclusive);
+        errdefer file.unlock(runtime.io);
+
+        const fresh = try EnvironmentRegistry.load(self.allocator);
+        self.deinit();
+        self.* = fresh;
+        return file;
+    }
+
+    fn endUpdate(file: std.Io.File) void {
+        file.unlock(runtime.io);
+        file.close(runtime.io);
+    }
+
+    fn indexOfId(self: *const EnvironmentRegistry, id: []const u8) !usize {
+        for (self.entries.items, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.id, id)) return i;
+        }
+        return error.EnvironmentNotRegistered; // removed by another process meanwhile
+    }
+
     pub fn save(self: *const EnvironmentRegistry) !void {
         const zenv_dir_path = try paths.ensureZenvDir(self.allocator);
         defer self.allocator.free(zenv_dir_path);
@@ -513,6 +547,9 @@ pub const EnvironmentRegistry = struct {
         description: ?[]const u8,
         target_machines: []const []const u8,
     ) !void {
+        const lock = try self.beginUpdate();
+        defer endUpdate(lock);
+
         var registry_target_machines_str: []const u8 = undefined;
         if (target_machines.len == 0) {
             registry_target_machines_str = try self.allocator.dupe(u8, "any");
@@ -598,7 +635,12 @@ pub const EnvironmentRegistry = struct {
     /// with no dupe-before-mutate. Persists registry.json on success; on save
     /// failure the entry is freed and the error returned (no leak).
     pub fn deregister(self: *EnvironmentRegistry, ref: EnvRef) !RegistryEntry {
-        const removed = self.entries.orderedRemove(ref.idx);
+        const id = try self.allocator.dupe(u8, self.entries.items[ref.idx].id);
+        defer self.allocator.free(id);
+        const lock = try self.beginUpdate();
+        defer endUpdate(lock);
+
+        const removed = self.entries.orderedRemove(try self.indexOfId(id));
         self.save() catch |err| {
             var tmp = removed;
             tmp.deinit(self.allocator);
@@ -811,7 +853,26 @@ pub const EnvironmentRegistry = struct {
     }
 
     // Alias management methods
-    pub fn addAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !void {
+
+    /// Attaches `alias_name` to the env named `env_name` and persists, on the
+    /// registry as it is on disk now (see beginUpdate).
+    pub fn addAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name_in: []const u8) !void {
+        if (!paths.isValidEnvName(alias_name)) return error.InvalidEnvironmentName;
+        // env_name_in may be borrowed from an entry, which beginUpdate frees.
+        const env_name = try self.allocator.dupe(u8, env_name_in);
+        defer self.allocator.free(env_name);
+        const lock = try self.beginUpdate();
+        defer endUpdate(lock);
+
+        const entry = try self.attachAlias(alias_name, env_name);
+        self.save() catch |err| {
+            self.allocator.free(entry.aliases.pop().?);
+            return err;
+        };
+    }
+
+    /// In-memory part of addAlias; returns the entry that got the alias.
+    fn attachAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !*RegistryEntry {
         // Reject an alias that would shadow an existing environment name. Resolution
         // is name-first, so without this guard such an alias would be unreachable
         // and confusing; forbidding it keeps name and alias namespaces disjoint.
@@ -822,8 +883,7 @@ pub const EnvironmentRegistry = struct {
         // Find the target environment and attach the alias. A given alias MAY be
         // shared across several environments — host-aware resolution disambiguates
         // by the current machine (see resolveAgainstCwd) — so an alias already used
-        // by ANOTHER entry is no longer rejected; only re-adding it to the SAME
-        // entry is.
+        // by ANOTHER entry is not rejected; only re-adding it to the SAME entry is.
         for (self.entries.items) |*entry| {
             if (std.mem.eql(u8, entry.env_name, env_name)) {
                 for (entry.aliases.items) |alias| {
@@ -831,20 +891,26 @@ pub const EnvironmentRegistry = struct {
                 }
                 const alias_name_owned = try self.allocator.dupe(u8, alias_name);
                 errdefer self.allocator.free(alias_name_owned);
-
                 try entry.aliases.append(self.allocator, alias_name_owned);
-                return;
+                return entry;
             }
         }
-
-        // Environment not found
         return error.EnvironmentNotFound;
     }
 
     /// Removes the alias from EVERY environment that holds it (a shared alias spans
-    /// several per-machine envs, so removal is "drop this name everywhere"). Returns
-    /// true if at least one occurrence was removed.
-    pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) bool {
+    /// several per-machine envs, so removal is "drop this name everywhere") and
+    /// persists. Returns true if at least one occurrence was removed.
+    pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) !bool {
+        const lock = try self.beginUpdate();
+        defer endUpdate(lock);
+        const removed = self.detachAlias(alias_name);
+        if (removed) try self.save();
+        return removed;
+    }
+
+    /// In-memory part of removeAlias.
+    fn detachAlias(self: *EnvironmentRegistry, alias_name: []const u8) bool {
         var removed = false;
         for (self.entries.items) |*entry| {
             var i: usize = 0;
@@ -884,18 +950,24 @@ pub const EnvironmentRegistry = struct {
     }
 
     /// Field-mutates the entry at `ref` (env_name, venv_path, recomputed id) in
-    /// place and persists. The ref STAYS VALID (no structural change), so a
-    /// caller's rollback is `rename(ref, old_name)`. Transactional w.r.t. the
+    /// place and persists. `ref` is updated to the entry's index in the
+    /// re-read registry, so a caller's rollback is `rename(ref, old_name)`. Transactional w.r.t. the
     /// in-memory registry: if the save fails, the in-memory mutation is rolled
     /// back and the error returned. Does NOT move the venv directory or touch
     /// Jupyter kernels — that orchestration stays in the command.
-    pub fn rename(self: *EnvironmentRegistry, ref: EnvRef, new_name: []const u8) !void {
-        if (new_name.len == 0 or new_name.len > 255) return error.InvalidEnvironmentName;
-        for (new_name) |char| {
-            if (!std.ascii.isAlphanumeric(char) and char != '_' and char != '-' and char != '.') {
-                return error.InvalidEnvironmentName;
-            }
-        }
+    pub fn rename(self: *EnvironmentRegistry, ref: *EnvRef, new_name: []const u8) !void {
+        if (!paths.isValidEnvName(new_name)) return error.InvalidEnvironmentName;
+        const id = try self.allocator.dupe(u8, self.entries.items[ref.idx].id);
+        defer self.allocator.free(id);
+        const lock = try self.beginUpdate();
+        defer endUpdate(lock);
+        ref.* = .{ .idx = try self.indexOfId(id) };
+        return self.renameAt(ref.*, new_name);
+    }
+
+    /// rename's work on an up-to-date registry: uniqueness, mutation, save.
+    fn renameAt(self: *EnvironmentRegistry, ref: EnvRef, new_name: []const u8) !void {
+
         // Uniqueness: new_name must not already resolve to an entry (name, alias,
         // exact id, or unique prefix). Host-blind (null hostname) — a rename target
         // must be free on every host. Only a clean not-found means the name is
@@ -953,6 +1025,12 @@ test "generateSHA1ID returns 40-char lowercase hex" {
     const id = try generateSHA1ID(a, "env", "/proj", "*");
     defer a.free(id);
     try testing.expectEqual(@as(usize, 40), id.len);
+    const again = try generateSHA1ID(a, "env", "/proj", "*");
+    defer a.free(again);
+    try testing.expectEqualStrings(id, again); // reproducible
+    const shifted = try generateSHA1ID(a, "en", "v/proj", "*");
+    defer a.free(shifted);
+    try testing.expect(!std.mem.eql(u8, id, shifted)); // field boundaries count
     for (id) |c| {
         const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
         try testing.expect(ok);
@@ -978,10 +1056,10 @@ test "registry resolution by name, alias, and id prefix" {
     try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("nope", null, null));
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("0123456789abcdef", null, null)).idx); // id prefix
 
-    try reg.addAlias("me", "myenv");
+    _ = try reg.attachAlias("me", "myenv");
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("me", null, null)).idx);
     try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
-    try testing.expect(reg.removeAlias("me"));
+    try testing.expect(reg.detachAlias("me"));
     try testing.expect(reg.resolveAlias("me") == null);
 }
 
@@ -1010,7 +1088,7 @@ test "resolveAgainstCwd: name, alias, exact id, unique prefix, not-found" {
     defer reg.deinit();
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
-    try reg.addAlias("w", "web");
+    _ = try reg.attachAlias("w", "web");
 
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("web", null, null)).idx);
     try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("api", null, null)).idx);
@@ -1051,8 +1129,8 @@ test "resolveAgainstCwd: '.' matches by cwd, ambiguous when two share a project_
 fn tSharedAliasReg(reg: *EnvironmentRegistry) !void {
     try tAppendT(reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
-    try reg.addAlias("dev", "env_m1");
-    try reg.addAlias("dev", "env_m2");
+    _ = try reg.attachAlias("dev", "env_m1");
+    _ = try reg.attachAlias("dev", "env_m2");
 }
 
 test "resolveAgainstCwd: a shared alias is disambiguated by the current host" {
@@ -1089,8 +1167,8 @@ test "resolveAgainstCwd: a shared alias whose holders both target '*' is ambiguo
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_a", "/proj", "*");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_b", "/proj", "*");
-    try reg.addAlias("dev", "env_a");
-    try reg.addAlias("dev", "env_b");
+    _ = try reg.attachAlias("dev", "env_a");
+    _ = try reg.attachAlias("dev", "env_b");
     // Both holders match every host, so the host can never narrow to one.
     try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, "anyhost"));
 }
@@ -1100,7 +1178,7 @@ test "resolveAgainstCwd: a single-holder alias resolves regardless of host" {
     var reg = EnvironmentRegistry.init(a);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web", "machine1");
-    try reg.addAlias("w", "web");
+    _ = try reg.attachAlias("w", "web");
     // The host does not match the target, but a lone alias holder still resolves
     // (back-compat: host only breaks ties among >1 candidate).
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null, "other")).idx);
@@ -1128,12 +1206,12 @@ test "addAlias: shares an alias across entries, rejects same-entry dup and name-
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
 
-    try reg.addAlias("dev", "env_m1");
-    try reg.addAlias("dev", "env_m2"); // shared across entries: now allowed
+    _ = try reg.attachAlias("dev", "env_m1");
+    _ = try reg.attachAlias("dev", "env_m2"); // shared across entries: now allowed
     // Re-adding the same alias to the SAME entry is still rejected.
-    try testing.expectError(error.AliasAlreadyExists, reg.addAlias("dev", "env_m1"));
+    try testing.expectError(error.AliasAlreadyExists, reg.attachAlias("dev", "env_m1"));
     // An alias equal to an existing env name is still rejected (name-shadow guard).
-    try testing.expectError(error.AliasAlreadyExists, reg.addAlias("env_m2", "env_m1"));
+    try testing.expectError(error.AliasAlreadyExists, reg.attachAlias("env_m2", "env_m1"));
 }
 
 test "removeAlias: drops a shared alias from every holder" {
@@ -1141,10 +1219,10 @@ test "removeAlias: drops a shared alias from every holder" {
     var reg = EnvironmentRegistry.init(a);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
-    try testing.expect(reg.removeAlias("dev"));
+    try testing.expect(reg.detachAlias("dev"));
     // Gone from both holders: "dev" no longer resolves on any host.
     try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("dev", null, "machine1"));
-    try testing.expect(!reg.removeAlias("dev")); // nothing left to remove
+    try testing.expect(!reg.detachAlias("dev")); // nothing left to remove
 }
 
 test "rename: rejects a new name equal to a shared (ambiguous) alias" {
@@ -1155,7 +1233,7 @@ test "rename: rejects a new name equal to a shared (ambiguous) alias" {
     const ref = try reg.resolveAgainstCwd("env_m1", null, null);
     // "dev" resolves ambiguously (shared alias); rename must treat it as taken,
     // not swallow the ambiguity and let an env_name collide with an alias.
-    try testing.expectError(error.EnvironmentAlreadyExists, reg.rename(ref, "dev"));
+    try testing.expectError(error.EnvironmentAlreadyExists, reg.renameAt(ref, "dev"));
 }
 
 test "registry save/load round-trips a shared alias" {
@@ -1213,10 +1291,11 @@ test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {
     defer reg.deinit();
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
+    try reg.save(); // mutators re-read registry.json under the lock
 
-    // rename: in-place field mutation keeps the ref valid and frees the old strings once.
-    const ref_web = try reg.resolveAgainstCwd("web", null, null);
-    try reg.rename(ref_web, "web2");
+    // rename: the ref is kept current and the old strings are freed once.
+    var ref_web = try reg.resolveAgainstCwd("web", null, null);
+    try reg.rename(&ref_web, "web2");
     try testing.expectEqualStrings("web2", reg.get(ref_web).env_name);
     try testing.expectEqual(ref_web.idx, (try reg.resolveAgainstCwd("web2", null, null)).idx);
 

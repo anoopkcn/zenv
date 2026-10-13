@@ -60,7 +60,9 @@ pub fn writeFile(path: []const u8, data: []const u8) !void {
 /// state files (registry.json, zenv.json) where truncate-then-write would
 /// risk losing the whole file.
 pub fn writeFileAtomic(allocator: Allocator, path: []const u8, data: []const u8) !void {
-    const tmp_path = try allocator.print("{s}.zenv-tmp", .{path});
+    // Per-process temp name: concurrent writers (several zenv processes on a
+    // shared filesystem) must not interleave into one temp file.
+    const tmp_path = try allocator.print("{s}.{d}.zenv-tmp", .{ path, processId() });
     defer allocator.free(tmp_path);
     errdefer deleteFile(tmp_path) catch {};
 
@@ -71,6 +73,20 @@ pub fn writeFileAtomic(allocator: Allocator, path: []const u8, data: []const u8)
         try file.sync(io);
     }
     try rename(tmp_path, path);
+}
+
+/// This process's id; used to keep temp names apart between processes.
+pub fn processId() i64 {
+    return switch (@import("builtin").os.tag) {
+        .linux => std.os.linux.getpid(),
+        else => std.c.getpid(),
+    };
+}
+
+/// $TMPDIR, else /tmp.
+pub fn tempDir() []const u8 {
+    if (env("TMPDIR")) |t| if (t.len > 0) return t;
+    return "/tmp";
 }
 
 /// Recursively creates `path` (idempotent). Replaces `makePath` /

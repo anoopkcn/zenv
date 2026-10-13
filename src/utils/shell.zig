@@ -22,6 +22,27 @@ pub fn appendSqEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error
     try w.writeAll(rest);
 }
 
+/// Like `appendSqEscaped`, for csh/tcsh: also writes `!` as `\!`. tcsh applies
+/// history expansion inside single quotes, even in sourced files, so a bare
+/// `!` would abort the script with "Event not found".
+pub fn appendCshSqEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    for (value) |c| switch (c) {
+        '\'' => try w.writeAll("'\\''"),
+        '!' => try w.writeAll("\\!"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// Like `appendSqEscaped`, for fish: inside fish single quotes only `\` and
+/// `'` are special, and are escaped with a backslash. Newlines are allowed.
+pub fn appendFishSqEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    for (value) |c| switch (c) {
+        '\\' => try w.writeAll("\\\\"),
+        '\'' => try w.writeAll("\\'"),
+        else => try w.writeByte(c),
+    };
+}
+
 fn accessFile(path: []const u8) bool {
     runtime.access(path) catch return false;
     return true;

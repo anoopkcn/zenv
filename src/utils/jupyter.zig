@@ -1,14 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
-
-pub const KernelSpec = struct {
-    name: []const u8,
-    display_name: []const u8,
-    python_path: []const u8,
-    env_vars: ?std.StringHashMap([]const u8) = null,
-};
+const envspec = @import("envspec.zig");
 
 /// Check if Jupyter is installed and available
 pub fn isJupyterAvailable(allocator: Allocator) bool {
@@ -32,12 +27,16 @@ pub fn getJupyterDataDir(allocator: Allocator) ![]const u8 {
         return allocator.dupe(u8, data_dir);
     }
 
-    // Fall back to default locations
-    if (runtime.env("HOME")) |home| {
-        return try allocator.print("{s}/.local/share/jupyter", .{home});
+    // jupyter_core's user data dir: ~/Library/Jupyter on macOS, else
+    // $XDG_DATA_HOME/jupyter (default ~/.local/share/jupyter).
+    if (builtin.os.tag != .macos) {
+        if (runtime.env("XDG_DATA_HOME")) |xdg| {
+            if (xdg.len > 0) return allocator.print("{s}/jupyter", .{xdg});
+        }
     }
-
-    return error.InvalidPath;
+    const home = runtime.env("HOME") orelse return error.InvalidPath;
+    if (builtin.os.tag == .macos) return allocator.print("{s}/Library/Jupyter", .{home});
+    return allocator.print("{s}/.local/share/jupyter", .{home});
 }
 
 /// Get the kernel directory path for a given kernel name
@@ -48,24 +47,31 @@ pub fn getKernelDir(allocator: Allocator, kernel_name: []const u8) ![]const u8 {
     return try allocator.print("{s}/kernels/{s}", .{ jupyter_data_dir, kernel_name });
 }
 
-/// Generate kernel.json content
-pub fn generateKernelJson(allocator: Allocator, spec: KernelSpec) ![]const u8 {
-    const template =
-        \\{{
-        \\  "display_name": "{s}",
-        \\  "language": "python",
-        \\  "argv": [
-        \\    "{s}",
-        \\    "-m",
-        \\    "ipykernel_launcher",
-        \\    "-f",
-        \\    "{{connection_file}}"
-        \\  ],
-        \\  "env": {{}}
-        \\}}
-    ;
+/// The zenv command a kernel launches through: the `zenv` on PATH when there is
+/// one (a stable symlink such as Homebrew's survives upgrades), else this
+/// binary. Caller owns the result.
+fn zenvLauncher(allocator: Allocator) ![]const u8 {
+    if (try envspec.resolveCommand(allocator, "zenv", runtime.env("PATH"))) |p| return p;
+    const self = try runtime.selfExePath(allocator);
+    defer allocator.free(self);
+    return allocator.dupe(u8, self);
+}
 
-    return try allocator.print(template, .{ spec.display_name, spec.python_path });
+/// kernel.json for `env_name`. The kernel starts through `zenv run`, which
+/// applies the env's module environment and activation first: a venv built
+/// from a module's Python cannot even start without the module's
+/// LD_LIBRARY_PATH, and a Jupyter server usually runs with other modules.
+pub fn generateKernelJson(allocator: Allocator, display_name: []const u8, env_name: []const u8, zenv_exe: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
+    try s.write(.{
+        .display_name = display_name,
+        .language = "python",
+        .argv = [_][]const u8{ zenv_exe, "run", env_name, "python", "-m", "ipykernel_launcher", "-f", "{connection_file}" },
+    });
+    try out.writer.writeByte('\n');
+    return out.toOwnedSlice();
 }
 
 /// Create a Jupyter kernel for an environment. `env_name` and `venv_path`
@@ -73,12 +79,6 @@ pub fn generateKernelJson(allocator: Allocator, spec: KernelSpec) ![]const u8 {
 /// config.zig) — this module never touches the registry, so it cannot pick a
 /// different environment than every other command would.
 pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []const u8, custom_name: ?[]const u8, custom_display_name: ?[]const u8) !void {
-    // Check if Jupyter is available
-    if (!isJupyterAvailable(allocator)) {
-        try output.printError(allocator, "Jupyter is not installed or not available in PATH", .{});
-        return error.JupyterNotFound;
-    }
-
     // Determine kernel name and display name
     const kernel_name = custom_name orelse try allocator.print("zenv-{s}", .{env_name});
     defer if (custom_name == null) allocator.free(kernel_name);
@@ -145,15 +145,9 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
         return;
     };
 
-    // Create kernel spec
-    const spec = KernelSpec{
-        .name = kernel_name,
-        .display_name = display_name,
-        .python_path = python_path,
-    };
-
-    // Generate kernel.json content
-    const kernel_json = try generateKernelJson(allocator, spec);
+    const zenv_exe = try zenvLauncher(allocator);
+    defer allocator.free(zenv_exe);
+    const kernel_json = try generateKernelJson(allocator, display_name, env_name, zenv_exe);
     defer allocator.free(kernel_json);
 
     // Write kernel.json file
@@ -167,6 +161,7 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
 
     try output.print(allocator, "Created Jupyter kernel '{s}' for environment '{s}'", .{ kernel_name, env_name });
     try output.print(allocator, "Kernel location: {s}", .{kernel_dir});
+    try output.print(allocator, "The environment needs ipykernel (zenv add {s} ipykernel) for the kernel to start.", .{env_name});
 }
 
 /// Remove a Jupyter kernel for the given environment
@@ -323,14 +318,10 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
     const new_display_name = try allocator.print("Python ({s})", .{new_env_name});
     defer allocator.free(new_display_name);
 
-    const new_python_path = try allocator.print("{s}/bin/python", .{new_venv_path});
-    defer allocator.free(new_python_path);
-
-    const kernel_json = try generateKernelJson(allocator, .{
-        .name = new_kernel_name,
-        .display_name = new_display_name,
-        .python_path = new_python_path,
-    });
+    _ = new_venv_path;
+    const zenv_exe = try zenvLauncher(allocator);
+    defer allocator.free(zenv_exe);
+    const kernel_json = try generateKernelJson(allocator, new_display_name, new_env_name, zenv_exe);
     defer allocator.free(kernel_json);
 
     try runtime.writeFile(kernel_json_path, kernel_json);
@@ -353,6 +344,21 @@ pub fn hasKernel(allocator: Allocator, env_name: []const u8) bool {
 // ============================ Tests ============================
 const testing = std.testing;
 const test_support = @import("../test_support.zig");
+
+test "generateKernelJson launches through zenv run and escapes text" {
+    const a = testing.allocator;
+    const text = try generateKernelJson(a, "Python (\"x\")", "hpc", "/usr/local/bin/zenv");
+    defer a.free(text);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("Python (\"x\")", obj.get("display_name").?.string);
+    const argv = obj.get("argv").?.array.items;
+    try testing.expectEqualStrings("/usr/local/bin/zenv", argv[0].string);
+    try testing.expectEqualStrings("run", argv[1].string);
+    try testing.expectEqualStrings("hpc", argv[2].string);
+    try testing.expectEqualStrings("{connection_file}", argv[argv.len - 1].string);
+}
 
 test "isJupyterAvailable maps exit status to a bool" {
     test_support.setupRuntime();

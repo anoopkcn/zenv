@@ -76,8 +76,11 @@ pub fn downloadToTemp(
     filename: []const u8,
     options: DownloadOptions,
 ) ![]const u8 {
-    const temp_dir = "/tmp";
-    const dl_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ temp_dir, filename });
+    // Per-process name under $TMPDIR: on a shared login node several users
+    // may download the same tarball at once.
+    const unique = try allocator.print("zenv-{d}-{s}", .{ runtime.processId(), filename });
+    defer allocator.free(unique);
+    const dl_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ runtime.tempDir(), unique });
     errdefer allocator.free(dl_path);
 
     try downloadFile(allocator, url, dl_path, options);

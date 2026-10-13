@@ -146,13 +146,19 @@ source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 source $(zenv activate c3c4945)
 ```
 
-From csh or tcsh, ask for the csh script instead (activate hooks are sh code and are skipped there):
+From csh/tcsh or fish, ask for that shell's script instead (activate hooks are sh code and are skipped there):
 
 ```csh
 source `zenv activate test --shell=csh`
 ```
 
+```fish
+source (zenv activate test --shell=fish)
+```
+
 Either script defines `deactivate`, which restores the shell to its state before activation.
+
+Jupyter kernels created by zenv (`zenv jupyter create <env>` or `zenv setup <env> --jupyter`) start through `zenv run`, so they get the environment's modules even when the Jupyter server runs with a different module set. The environment needs `ipykernel` (`zenv add <env> ipykernel`).
 
 ### Direct run without activation
 
@@ -326,8 +332,10 @@ On HPC systems, `module load` (Lmod) can be slow, and the generated `activate.sh
 The cache is used only when it is trustworthy; otherwise activation transparently falls back to a real `module --force purge` + `module load`:
 
 - It is keyed to the **cluster** via `$SYSTEMNAME` (falling back to `hostname`), so it is reused across all nodes of a system but never replayed on a different one.
-- Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as *prepends*, so your live login environment is preserved.
-- If any module fails to load during setup, no cache is written.
+- Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as the entries the modules put before or after the previous value (prepends and appends), so your live login environment is preserved.
+- If any module fails to load, `zenv setup` fails and names the module, instead of building an environment without it.
+- Replaying the cache does not need a `module` command, so it also works in shells where Lmod is not initialised (e.g. a non-login `tcsh`). Only the `module load` fallback needs one; if `module` is missing but `$LMOD_CMD` is set, the activation script defines it the way Lmod does.
+- `deactivate` undoes everything the cache replay set, so deactivating and re-activating does not stack path entries.
 
 If your login shell is not bash (e.g. zsh), `module` is not visible to the bash that `zenv setup` uses to load modules. zenv then defines it from `$LMOD_CMD`, the way Lmod's own bash init does.
 

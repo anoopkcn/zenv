@@ -5,6 +5,23 @@ const runtime = @import("runtime.zig");
 
 // Gets the zenv directory path, respecting ZENV_DIR environment variable
 // if set, otherwise uses ~/.zenv
+/// Environment names and aliases become directory names and command-line
+/// identifiers: 1-255 of `[A-Za-z0-9_.-]`, and not `.` (the current-directory
+/// shortcut) or `..`.
+pub fn isValidEnvName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') return false;
+    }
+    return true;
+}
+
+test "isValidEnvName" {
+    try std.testing.expect(isValidEnvName("my-env_1.2"));
+    for ([_][]const u8{ "", ".", "..", "a b", "a/b", "../x", "x\n" }) |bad| try std.testing.expect(!isValidEnvName(bad));
+}
+
 pub fn getZenvDir(allocator: Allocator) ![]const u8 {
     // Try to get ZENV_DIR environment variable
     if (runtime.env("ZENV_DIR")) |zenv_dir| {

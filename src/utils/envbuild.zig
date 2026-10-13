@@ -47,9 +47,6 @@ pub fn run(allocator: Allocator, opts: Options) !void {
 
     banner(a, "started");
 
-    // The bash script older versions generated; nothing runs it any more.
-    runtime.deleteFile(try join(a, &[_][]const u8{ opts.venv_dir, "setup_env.sh" })) catch {};
-
     // Copy the setup hook first so a bad path fails before any work is done.
     const setup_hook = try copySetupHook(a, opts);
 
@@ -186,13 +183,43 @@ fn runStep(a: Allocator, argv: []const []const u8, env: *const Map, cwd: ?[]cons
     // The child holds its own copies; ours must close for EOF to arrive.
     writer.close(runtime.io);
 
+    // EOF alone cannot end the copy loop: a background process the child
+    // started (e.g. `daemon &` in setup.commands) inherits the pipe and keeps
+    // it open after the child exits. So wait for the child on another thread
+    // and, once it is gone, stop as soon as the pipe goes quiet.
+    const Waiter = struct {
+        child: *std.process.Child,
+        result: anyerror!runtime.Term = error.Unexpected,
+        done: std.atomic.Value(bool) = .init(false),
+        fn wait(self: *@This()) void {
+            self.result = self.child.wait(runtime.io);
+            self.done.store(true, .release);
+        }
+    };
+    var waiter = Waiter{ .child = &child };
+    const thread = try std.Thread.spawn(.{}, Waiter.wait, .{&waiter});
+
     var buf: [8192]u8 = undefined;
+    var pfd = [_]std.posix.pollfd{.{ .fd = reader.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    var drained_after_exit: usize = 0;
     while (true) {
-        // EndOfStream once the child (and its children) closed the pipe.
+        const exited = waiter.done.load(.acquire);
+        // Bounded drain after exit, so a chatty leftover process cannot keep us here.
+        if (exited) {
+            drained_after_exit += 1;
+            if (drained_after_exit > 1024) break;
+        }
+        const ready = std.posix.poll(&pfd, if (exited) 0 else 100) catch break;
+        if (ready == 0) {
+            if (exited) break;
+            continue;
+        }
+        // EndOfStream once every holder of the write end has closed it.
         const n = reader.readStreaming(runtime.io, &.{&buf}) catch break;
         output.passthrough(buf[0..n]) catch {};
     }
-    return child.wait(runtime.io);
+    thread.join();
+    return waiter.result;
 }
 
 /// Stdout of `argv` (absolute argv[0]) when it exits 0, else null.
@@ -306,8 +333,10 @@ fn isOneOf(name: []const u8, list: []const []const u8) bool {
 
 pub const Delta = struct { ops: []const envspec.Op, untrusted: bool };
 
-/// What `module load` changed, as replayable ops: path lists become prepends of
-/// the added part, everything else a set. Exported shell functions are skipped.
+/// What `module load` changed, as replayable ops: for path lists, what was put
+/// in front of the previous value becomes a prepend and what was put after it
+/// an append (a list that no longer contains the previous value is prepended
+/// whole); everything else a set. Exported shell functions are skipped.
 /// A changed variable whose name is not a shell identifier cannot be replayed
 /// by activate.sh, so it marks the capture untrusted. Variables that the load
 /// removed are not recorded (as before).
@@ -327,18 +356,33 @@ pub fn moduleDelta(a: Allocator, base: []const Entry, loaded: []const Entry) !De
             continue;
         }
         if (isOneOf(e.name, &PATH_VARS)) {
-            const b = prev orelse "";
-            var added = e.value;
-            if (b.len > 0 and e.value.len > b.len + 1 and e.value[e.value.len - b.len - 1] == ':' and std.mem.endsWith(u8, e.value, b)) {
-                added = e.value[0 .. e.value.len - b.len - 1];
-            }
-            if (added.len == 0) continue;
-            try ops.append(a, .{ .op = .prepend, .name = e.name, .value = added });
+            const split = splitAround(e.value, prev orelse "");
+            if (split.before.len > 0) try ops.append(a, .{ .op = .prepend, .name = e.name, .value = split.before });
+            if (split.after.len > 0) try ops.append(a, .{ .op = .append, .name = e.name, .value = split.after });
         } else {
             try ops.append(a, .{ .op = .set, .name = e.name, .value = e.value });
         }
     }
     return .{ .ops = ops.items, .untrusted = untrusted };
+}
+
+/// Splits a path list around an earlier value of it: `X:base:Y` gives
+/// before = X, after = Y. `base` must appear as whole components; when it does
+/// not (or is empty), the whole value counts as `before`.
+fn splitAround(value: []const u8, base: []const u8) struct { before: []const u8, after: []const u8 } {
+    if (base.len == 0) return .{ .before = value, .after = "" };
+    var from: usize = 0;
+    while (std.mem.findPos(u8, value, from, base)) |i| : (from = i + 1) {
+        const end = i + base.len;
+        const starts_ok = i == 0 or value[i - 1] == ':';
+        const ends_ok = end == value.len or value[end] == ':';
+        if (!starts_ok or !ends_ok) continue;
+        return .{
+            .before = if (i == 0) "" else value[0 .. i - 1],
+            .after = if (end == value.len) "" else value[end + 1 ..],
+        };
+    }
+    return .{ .before = value, .after = "" };
 }
 
 fn moduleSystemAvailable(env: *const Map) bool {
@@ -401,12 +445,18 @@ fn loadModules(a: Allocator, opts: Options, env: *Map) !bool {
     for (VOLATILE) |name| if (env.get(name)) |v| try next.put(name, v);
     env.* = next;
 
-    if (!cache_active) return true;
     if (snap.failed.len > 0) {
-        warn(a, "One or more modules failed to load; not writing module cache.", .{});
+        // A missing module would otherwise give a "working" env without it, and
+        // every activation would retry (and re-report) the failed load.
         envspec.deleteModuleCache(a, opts.venv_dir);
-        return true;
+        var names: std.Io.Writer.Allocating = .init(a);
+        for (snap.failed, 0..) |m, i| {
+            if (i > 0) try names.writer.writeAll(", ");
+            try names.writer.writeAll(m);
+        }
+        return fail(a, "Failed to load module(s): {s}. Check the names in zenv.json ('module spider <name>') and re-run setup.", .{names.written()});
     }
+    if (!cache_active) return true;
     const delta = try moduleDelta(a, snap.base, snap.loaded);
     const cache = envspec.ModuleCache{
         .version = envspec.MODULE_CACHE_VERSION,
@@ -446,8 +496,9 @@ fn workingPython(a: Allocator, env: *const Map) !?[]const u8 {
 pub const Package = struct { name: []const u8, version: []const u8 };
 
 /// Name and Version from core metadata (a dist-info METADATA or egg-info
-/// PKG-INFO): RFC 822 style headers up to the first blank line. Null when
-/// either is missing.
+/// PKG-INFO): RFC 822 style headers up to the first blank line. Lines that
+/// start with whitespace continue the previous header (folding) and are never
+/// read as headers themselves. Null when either field is missing.
 pub fn parseMetadata(text: []const u8) ?Package {
     var name: ?[]const u8 = null;
     var version: ?[]const u8 = null;
@@ -455,6 +506,7 @@ pub fn parseMetadata(text: []const u8) ?Package {
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len == 0) break; // end of headers; the body is the description
+        if (line[0] == ' ' or line[0] == '\t') continue; // folded continuation
         const colon = std.mem.findScalar(u8, line, ':') orelse continue;
         const key = line[0..colon];
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
@@ -500,8 +552,8 @@ pub fn scanPythonPath(a: Allocator, python_path: []const u8) ![]const Package {
                 } else if (std.mem.endsWith(u8, e.name, ".egg-info")) {
                     // A directory holds PKG-INFO; a plain file is the metadata itself.
                     const inner = try join(a, &[_][]const u8{ entry, e.name, "PKG-INFO" });
-                    const path = if (e.kind == .file) try join(a, &[_][]const u8{ entry, e.name }) else inner;
-                    try candidates.append(a, path);
+                    const path = try join(a, &[_][]const u8{ entry, e.name });
+                    try candidates.append(a, if (isFile(path)) path else inner);
                 }
             }
             // Directory order is arbitrary; keep the result deterministic.
@@ -623,7 +675,11 @@ fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Ma
         info(a, "Existing venv {s} seems corrupted/incomplete. Clearing it and recreating.", .{venv_dir});
         for (parts) |p| {
             const path = try join(a, &[_][]const u8{ venv_dir, p });
-            runtime.deleteFile(path) catch runtime.deleteTree(path) catch {}; // a link or file, else a dir
+            if (!lexists(path)) continue;
+            // A file or link (lib64), else a directory. A part that cannot be
+            // removed would leave stale links behind, so fail instead.
+            runtime.deleteFile(path) catch runtime.deleteTree(path) catch |err|
+                return fail(a, "Could not remove {s}: {s}", .{ path, @errorName(err) });
         }
     }
 
@@ -708,15 +764,17 @@ fn requirementName(line: []const u8) []const u8 {
 pub fn planInstall(a: Allocator, deps: []const []const u8, module_pkgs: []const Package, force: bool) !Plan {
     var to_install: std.ArrayList([]const u8) = .empty;
     var overrides: std.ArrayList(Override) = .empty;
-    outer: for (deps) |raw| {
+    var provided = std.StringHashMap([]const u8).init(a); // canonical name -> version
+    for (module_pkgs) |p| try provided.put(try canonicalName(a, p.name), p.version);
+    for (deps) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         if (!force) {
             const name = try canonicalName(a, requirementName(line));
-            for (module_pkgs) |p| {
-                if (name.len > 0 and std.mem.eql(u8, name, try canonicalName(a, p.name))) {
-                    try overrides.append(a, .{ .name = name, .requirement = line, .module_version = p.version });
-                    continue :outer;
+            if (name.len > 0) {
+                if (provided.get(name)) |version| {
+                    try overrides.append(a, .{ .name = name, .requirement = line, .module_version = version });
+                    continue;
                 }
             }
         }
@@ -777,11 +835,10 @@ fn copySetupHook(a: Allocator, opts: Options) !?[]const u8 {
     const setup = opts.env_config.setup orelse return null;
     const src = setup.script orelse return null;
     const scripts_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "scripts" });
-    runtime.makePath(scripts_dir) catch {};
-    return shell.copyHookScript(a, src, scripts_dir, "setup_hook.sh", opts.project_dir) catch |err| {
-        output.printError(a, "Failed to copy setup script '{s}': {s}", .{ src, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
+    runtime.makePath(scripts_dir) catch |err|
+        return fail(a, "Could not create {s}: {s}", .{ scripts_dir, @errorName(err) });
+    return shell.copyHookScript(a, src, scripts_dir, "setup_hook.sh", opts.project_dir) catch |err|
+        return fail(a, "Failed to copy setup script '{s}': {s}", .{ src, @errorName(err) });
 }
 
 /// Runs setup.commands (under `set -e`) and then setup.script in one bash, in
@@ -887,24 +944,35 @@ test "moduleDelta: prepends added path parts, sets changed vars, skips noise" {
         .{ .name = "SHLVL", .value = "1" },
         .{ .name = "KEEP", .value = "same" },
         .{ .name = "MANPATH", .value = "/m" },
+        .{ .name = "CPATH", .value = "/base" },
     };
     const loaded = [_]Entry{
         .{ .name = "PATH", .value = "/gcc/bin:/usr/bin" },
         .{ .name = "LD_LIBRARY_PATH", .value = "/gcc/lib" },
         .{ .name = "SHLVL", .value = "2" },
         .{ .name = "KEEP", .value = "same" },
-        .{ .name = "MANPATH", .value = "/other" }, // not a suffix: whole value prepended
+        .{ .name = "MANPATH", .value = "/other" }, // base gone: whole value prepended
+        .{ .name = "CPATH", .value = "/inc:/base:/tail" }, // put on both sides
         .{ .name = "BANNER", .value = "line1\nline2" },
         .{ .name = "BASH_FUNC_module%%", .value = "() { :; }" },
     };
     const d = try moduleDelta(a, &base, &loaded);
     try testing.expect(!d.untrusted);
-    try testing.expectEqual(@as(usize, 4), d.ops.len);
+    try testing.expectEqual(@as(usize, 6), d.ops.len);
     try testing.expectEqualStrings("/gcc/bin", d.ops[0].value);
     try testing.expectEqual(envspec.OpKind.prepend, d.ops[1].op);
     try testing.expectEqualStrings("/gcc/lib", d.ops[1].value);
     try testing.expectEqualStrings("/other", d.ops[2].value);
-    try testing.expectEqualStrings("line1\nline2", d.ops[3].value);
+    try testing.expectEqual(envspec.OpKind.prepend, d.ops[3].op);
+    try testing.expectEqualStrings("/inc", d.ops[3].value);
+    try testing.expectEqual(envspec.OpKind.append, d.ops[4].op);
+    try testing.expectEqualStrings("/tail", d.ops[4].value);
+    try testing.expectEqualStrings("line1\nline2", d.ops[5].value);
+
+    // A component match only: "/us" is not the start of "/usr/bin".
+    const s = splitAround("/usr/bin:/us", "/us");
+    try testing.expectEqualStrings("/usr/bin", s.before);
+    try testing.expectEqualStrings("", s.after);
 
     const odd = [_]Entry{.{ .name = "has-dash", .value = "x" }};
     try testing.expect((try moduleDelta(a, &.{}, &odd)).untrusted);
@@ -935,6 +1003,10 @@ test "parseMetadata reads Name and Version from the headers only" {
     try testing.expectEqualStrings("Zope.Interface", pkg.name);
     try testing.expectEqualStrings("6.0", pkg.version);
     try testing.expect(parseMetadata("Metadata-Version: 2.1\nName: x\n\nVersion: 1\n") == null);
+    // A folded header line is part of the previous header, not a header.
+    const folded = parseMetadata("Name: real\nSummary: a summary that\n  Name: wraps onto a second line\nVersion: 2\n").?;
+    try testing.expectEqualStrings("real", folded.name);
+    try testing.expectEqualStrings("2", folded.version);
 }
 
 test "canonicalName normalises case and separator runs" {

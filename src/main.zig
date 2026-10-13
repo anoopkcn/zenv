@@ -73,6 +73,7 @@ fn printUsage() void {
         \\  activate <name|id|.>       Outputs the activation script path for an environment.
         \\                             To use: source $(zenv activate <name|id|.>)
         \\                             csh/tcsh: source `zenv activate <name|id|.> --shell=csh`
+        \\                             fish:     source (zenv activate <name|id|.> --shell=fish)
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.
@@ -101,10 +102,10 @@ fn printUsage() void {
         \\                             updates generated scripts, and updates any associated Jupyter kernels.
         \\                             Preserves all configuration and metadata.
         \\
-        \\  rm <name|id>               De-registers the environment AND permanently deletes its
+        \\  rm <name|id|.>             De-registers the environment AND permanently deletes its
         \\                             virtual environment directory from the filesystem.
         \\
-        \\  validate [config]          Validates the configuration file. If no arguent provided it
+        \\  validate [config]          Validates the configuration file. If no argument is provided it
         \\                             will validate the 'zenv.json' file in the current directory.
         \\                             Reports errors with line numbers and field names if found.
         \\
@@ -112,17 +113,19 @@ fn printUsage() void {
         \\
         \\  alias <subcommand>         Manages environment aliases for easier access:
         \\    create <alias> <env>     Creates an alias for an environment.
-        \\    remove <alias>           Removes an existing alias.
+        \\    remove <alias>           Removes the alias (from every environment sharing it).
         \\    list                     Lists all defined aliases.
         \\    show <alias>             Shows what environment an alias points to.
         \\
         \\  jupyter <subcommand>       Manages Jupyter kernels for environments:
-        \\    create <env_name>        Creates a Jupyter kernel for the specified environment.
+        \\    create <env_name>        Creates a Jupyter kernel for the environment. The kernel starts
+        \\                             through 'zenv run', so it gets the env's modules; the env
+        \\                             needs ipykernel ('zenv add <env> ipykernel').
         \\    remove <env_name>        Removes the Jupyter kernel for the specified environment.
         \\    list                     Lists all zenv-managed Jupyter kernels.
         \\    check                    Checks if Jupyter is installed and available.
         \\
-        \\  python <subcommand>        (Experimantal feature) Manages Python installations:
+        \\  python <subcommand>        (Experimental feature) Manages Python installations:
         \\    install <version>        Downloads and installs a specific Python version for zenv.
         \\    pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
         \\    list                     Shows Python versions installed and managed by zenv.
@@ -148,8 +151,8 @@ fn printUsage() void {
         \\  --python                   Use the zenv-pinned Python for creating environment.
         \\                             Ignores the default Python priority[b] list.
         \\
-        \\  --force                    Forces reinstallation of all dependencies.
-        \\                             Useful if dependencies from loaded modules cause conflicts.
+        \\  --force                    Installs every dependency, including those the loaded modules
+        \\                             already provide, and re-captures the module cache.
         \\
         \\  --no-cache                 Disables the package cache when installing dependencies.
         \\                             Ensures fresh package downloads for each installation.
@@ -184,7 +187,7 @@ fn printUsage() void {
         \\  zenv attempts to find a Python interpreter in the following order:
         \\  1. HPC module-provided Python (if HPC environment modules are loaded).
         \\  2. Path explicitly specified by the 'fallback_python' key in zenv.json.
-        \\  3. zenv-pinned Python (set via 'zenv python use <version>').
+        \\  3. zenv-pinned Python (set via 'zenv python pin <version>').
         \\  4. System Python.
         \\  Use 'zenv setup <name> --python' to use only the pinned version.
         \\

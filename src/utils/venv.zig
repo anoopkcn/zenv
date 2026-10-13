@@ -174,6 +174,11 @@ pub fn create(allocator: Allocator, python: []const u8, venv_dir: []const u8, en
         \\source '{s}/activate.csh'
         \\
     , .{venv_dir}));
+    try runtime.writeFile(try join(a, &[_][]const u8{ info.scripts, "activate.fish" }), try a.print(
+        \\# Created by zenv. Sourcing bin/activate.fish runs zenv's activation.
+        \\source '{s}/activate.fish'
+        \\
+    , .{venv_dir}));
 
     output.print(allocator, "Created virtual environment {s} (Python {s}, from {s})", .{ venv_dir, info.version, info.base_executable }) catch {};
 }

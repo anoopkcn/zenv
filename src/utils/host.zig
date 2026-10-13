@@ -83,79 +83,49 @@ fn patternMatches(pattern: []const u8, str: []const u8) bool {
         }
     }
 
-    // Use dynamic programming for more complex patterns
-    // This is more efficient than recursion for non-trivial patterns
-    return wildcardMatch(pattern, str);
+    return globMatch(pattern, str);
 }
 
-// Helper function that implements an efficient dynamic programming algorithm
-// for wildcard matching - this avoids recursion stack overhead and
-// redundant calculations
-fn wildcardMatch(pattern: []const u8, str: []const u8) bool {
-    const m = str.len;
-    const n = pattern.len;
-
-    // Allocate boolean arrays on the stack for the DP table
-    // We only need two rows: previous and current
-    var prev_row: [512]bool = undefined;
-    var curr_row: [512]bool = undefined;
-
-    // Handle potential buffer size issues
-    if (m >= prev_row.len) return fallbackWildcardMatch(pattern, str);
-
-    // Base case: empty pattern matches empty string
-    prev_row[0] = true;
-
-    // Base case: a pattern with only '*' can match empty string
-    for (1..n + 1) |j| {
-        prev_row[j] = prev_row[j - 1] and pattern[j - 1] == '*';
-    }
-
-    // Fill the dp table
-    for (1..m + 1) |i| {
-        // Reset current row
-        curr_row[0] = false;
-
-        for (1..n + 1) |j| {
-            if (pattern[j - 1] == '*') {
-                // '*' can match zero or multiple characters
-                curr_row[j] = curr_row[j - 1] or prev_row[j];
-            } else if (pattern[j - 1] == '?' or pattern[j - 1] == str[i - 1]) {
-                // Current characters match or '?' matches any single character
-                curr_row[j] = prev_row[j - 1];
-            } else {
-                // Characters don't match
-                curr_row[j] = false;
-            }
-        }
-
-        // Swap rows for next iteration
-        for (0..n + 1) |j| {
-            prev_row[j] = curr_row[j];
+/// `*` (any run, including empty) and `?` (one character) glob match, by the
+/// classic two-pointer scan with backtracking to the last `*`: no allocation,
+/// no length limit, O(pattern * str) worst case.
+fn globMatch(pattern: []const u8, str: []const u8) bool {
+    var p: usize = 0;
+    var s_i: usize = 0;
+    var star: ?usize = null; // index in pattern of the last '*'
+    var star_s: usize = 0; // str index that '*' currently stretches to
+    while (s_i < str.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == str[s_i])) {
+            p += 1;
+            s_i += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            star_s = s_i;
+            p += 1;
+        } else if (star) |st| {
+            p = st + 1;
+            star_s += 1;
+            s_i = star_s;
+        } else {
+            return false;
         }
     }
-
-    return prev_row[n];
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
 }
 
-// Fallback implementation for extreme cases
-fn fallbackWildcardMatch(pattern: []const u8, str: []const u8) bool {
-    if (pattern.len == 0) return str.len == 0;
-
-    // Handle first character
-    const first_match = str.len > 0 and
-        (pattern[0] == str[0] or pattern[0] == '?');
-
-    // If we see a '*', we can:
-    // 1. Skip it entirely (match zero characters)
-    // 2. Match the current character and keep the '*' (match multiple characters)
-    if (pattern.len > 0 and pattern[0] == '*') {
-        return fallbackWildcardMatch(pattern[1..], str) or
-            (str.len > 0 and fallbackWildcardMatch(pattern, str[1..]));
-    }
-
-    // If first character matches, proceed with the rest
-    return first_match and fallbackWildcardMatch(pattern[1..], str[1..]);
+test "globMatch handles long patterns and many stars" {
+    try std.testing.expect(globMatch("jr?ogin*.jureca", "jrlogin01.jureca"));
+    try std.testing.expect(!globMatch("jr?ogin*.juwels", "jrlogin01.jureca"));
+    try std.testing.expect(globMatch("*a*b*c*", "xxaxxbxxcxx"));
+    var long_pat: [600]u8 = undefined;
+    @memset(&long_pat, 'a');
+    long_pat[0] = '*'; // a wildcard pattern longer than the old 512-entry buffer
+    try std.testing.expect(globMatch(&long_pat, long_pat[1..]));
+    const many_stars = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b";
+    var as: [200]u8 = undefined;
+    @memset(&as, 'a');
+    try std.testing.expect(!globMatch(many_stars, &as)); // no exponential blow-up
 }
 
 // Splits a hostname into domain components and checks if any match the target

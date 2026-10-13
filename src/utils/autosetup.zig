@@ -8,13 +8,11 @@
 //! bracketed by a short notice on STDERR so the user knows a rebuild happened
 //! without polluting the stdout that `activate`/`cd` feed to the shell.
 //!
-//! Why a subprocess instead of calling setup in-process: the venv build runs a
-//! shell script with INHERITED stdio (auxiliary.zig `executeShellScript`), so
-//! pip/uv output reaches the terminal and is NOT suppressed by `output.silent`.
-//! Re-invoking `zenv setup` and CAPTURING its output (`runtime.run`) is the only
-//! way to stay silent, reuses all of setup's logic verbatim, and — by setting
-//! the child's cwd to the project dir — reproduces the original resolution of a
-//! relative `base_dir`/`dependency_file` exactly. `registry.register()` updates
+//! Why a subprocess instead of calling setup in-process: re-invoking
+//! `zenv setup` and CAPTURING its output (`runtime.run`) keeps the rebuild
+//! silent, reuses all of setup's logic verbatim with fresh config/registry
+//! state, and — by setting the child's cwd to the project dir — reproduces the
+//! original resolution of a relative `base_dir`/`dependency_file` exactly. `registry.register()` updates
 //! in place by env_name, so re-setup never duplicates the registry entry.
 
 const std = @import("std");
@@ -57,20 +55,51 @@ fn foldFile(allocator: Allocator, sha: *std.crypto.hash.Sha1, key: []const u8, p
         return;
     };
     defer allocator.free(content);
+    foldBytes(sha, content);
+}
+
+fn foldBytes(sha: *std.crypto.hash.Sha1, bytes: []const u8) void {
     sha.update("P\x00");
-    sha.update(std.mem.asBytes(&content.len));
-    sha.update(content);
+    sha.update(std.mem.asBytes(&bytes.len));
+    sha.update(bytes);
     sha.update("\x00");
 }
 
-/// Lowercase-hex SHA-1 over the env's tracked files, hashed in a fixed order:
-/// zenv.json (always), then dependency_file, modules_file and setup.script when
-/// configured. `anchor_dir` is the setup cwd when recording the stamp and the
+/// Folds the part of zenv.json that concerns `env_name`: `base_dir` and the
+/// env's own object, re-serialized. Editing another env in the same file then
+/// leaves this env's hash alone. A file that does not parse is folded whole.
+fn foldEnvConfig(allocator: Allocator, sha: *std.crypto.hash.Sha1, path: []const u8, env_name: []const u8) void {
+    sha.update("config\x00");
+    const content = runtime.readFileAlloc(allocator, path, MAX_TRACKED_FILE) catch |err| {
+        sha.update(if (err == error.FileNotFound) "A\x00" else "E\x00");
+        return;
+    };
+    defer allocator.free(content);
+    const parsed = json.parseFromSlice(json.Value, allocator, content, .{}) catch return foldBytes(sha, content);
+    defer parsed.deinit();
+    if (parsed.value != .object) return foldBytes(sha, content);
+    for ([_][]const u8{ "base_dir", env_name }) |key| {
+        sha.update(key);
+        sha.update("\x00");
+        const value = parsed.value.object.get(key) orelse {
+            sha.update("A\x00");
+            continue;
+        };
+        const text = json.Stringify.valueAlloc(allocator, value, .{}) catch return foldBytes(sha, content);
+        defer allocator.free(text);
+        foldBytes(sha, text);
+    }
+}
+
+/// Lowercase-hex SHA-1 over what `env_name` is built from, in a fixed order:
+/// its part of zenv.json (always), then dependency_file, modules_file and
+/// setup.script when configured. `anchor_dir` is the setup cwd when recording the stamp and the
 /// entry's project_dir when checking — these are the same directory, which is
 /// what makes the two call sites agree. Caller owns the returned slice.
 pub fn computeTrackedHash(
     allocator: Allocator,
     anchor_dir: []const u8,
+    env_name: []const u8,
     env_config: *const config.EnvironmentConfig,
 ) ![]u8 {
     var sha = std.crypto.hash.Sha1.init(.{});
@@ -78,7 +107,7 @@ pub fn computeTrackedHash(
     {
         const p = try std.Io.Dir.path.join(allocator, &[_][]const u8{ anchor_dir, "zenv.json" });
         defer allocator.free(p);
-        foldFile(allocator, &sha, "config", p);
+        foldEnvConfig(allocator, &sha, p, env_name);
     }
     if (env_config.dependency_file) |df| {
         const p = try resolvePath(allocator, anchor_dir, df);
@@ -281,7 +310,7 @@ pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) 
 
     const env_cfg = cfg.getEnvironment(entry.env_name) orelse return;
 
-    const current = try computeTrackedHash(allocator, entry.project_dir, env_cfg);
+    const current = try computeTrackedHash(allocator, entry.project_dir, entry.env_name, env_cfg);
     defer allocator.free(current);
 
     if (readStamp(allocator, entry.venv_path)) |stamp| {
@@ -378,17 +407,29 @@ test "computeTrackedHash is deterministic and content-sensitive" {
     var env_cfg = config.EnvironmentConfig.init(a);
     defer env_cfg.deinit();
 
-    const h1 = try computeTrackedHash(a, dir, &env_cfg);
+    const h1 = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
     defer a.free(h1);
-    const h2 = try computeTrackedHash(a, dir, &env_cfg);
+    const h2 = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
     defer a.free(h2);
     try testing.expectEqualStrings(h1, h2); // deterministic (no timestamp)
     try testing.expectEqual(@as(usize, 40), h1.len);
 
     try writeAt(a, dir, "zenv.json", test_config_b);
-    const h3 = try computeTrackedHash(a, dir, &env_cfg);
+    const h3 = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
     defer a.free(h3);
     try testing.expect(!std.mem.eql(u8, h1, h3)); // content change flips the hash
+
+    // Adding or editing a different env in the same file leaves it alone.
+    try writeAt(a, dir, "zenv.json",
+        \\{
+        \\  "base_dir": ".zenv",
+        \\  "zenv-test": { "target_machines": ["*"], "dependencies": ["numpy"] },
+        \\  "other": { "target_machines": ["*"], "modules": ["gcc"] }
+        \\}
+    );
+    const h4 = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
+    defer a.free(h4);
+    try testing.expectEqualStrings(h3, h4);
 }
 
 test "computeTrackedHash tracks dependency_file presence" {
@@ -402,11 +443,11 @@ test "computeTrackedHash tracks dependency_file presence" {
     defer env_cfg.deinit();
     env_cfg.dependency_file = try a.dupe(u8, "requirements.txt");
 
-    const h_absent = try computeTrackedHash(a, dir, &env_cfg);
+    const h_absent = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
     defer a.free(h_absent);
 
     try writeAt(a, dir, "requirements.txt", "numpy\n");
-    const h_present = try computeTrackedHash(a, dir, &env_cfg);
+    const h_present = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
     defer a.free(h_present);
 
     try testing.expect(!std.mem.eql(u8, h_absent, h_present));
@@ -479,7 +520,7 @@ test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
         var cfg = try validation.validateAndParse(a, cfg_path);
         defer cfg.deinit();
         const env_cfg = cfg.getEnvironment("zenv-test").?;
-        const h = try computeTrackedHash(a, proj, env_cfg);
+        const h = try computeTrackedHash(a, proj, "zenv-test", env_cfg);
         defer a.free(h);
         try writeStamp(a, venv, h, &[_][]const u8{});
     }

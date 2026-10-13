@@ -27,11 +27,12 @@ pub const FILE_NAME = "zenv-env.json";
 /// fall back to activate.sh until the next `zenv setup` rewrites it).
 pub const FORMAT_VERSION: u32 = 1;
 
-pub const OpKind = enum { set, prepend, unset };
+pub const OpKind = enum { set, prepend, append, unset };
 
 /// One environment change. `prepend` follows the activate.sh rule
 /// `NAME=value"${NAME:+:$NAME}"`: the value goes in front of a non-empty
-/// current value, or replaces an empty/unset one. `unset` ignores `value`.
+/// current value, or replaces an empty/unset one; `append` is the mirror
+/// image. `unset` ignores `value`.
 pub const Op = struct {
     op: OpKind,
     name: []const u8,
@@ -47,10 +48,6 @@ pub const MODULE_CACHE_FILE = ".zenv_module_cache.json";
 /// is never replayed (activation falls back to `module load`). 2: captured
 /// from `env -0` snapshots by zenv itself, stored as JSON.
 pub const MODULE_CACHE_VERSION: u32 = 2;
-
-/// Cache files written by zenv versions before the JSON cache. Deleted when a
-/// new cache is captured and on rename.
-pub const LEGACY_MODULE_CACHE_FILES = [_][]const u8{ ".zenv_module_cache.sh", ".zenv_module_cache.stamp", ".zenv_module_env" };
 
 /// Contents of MODULE_CACHE_FILE. `system` is the cluster it was captured on
 /// (`${SYSTEMNAME:-$(hostname)}`); `modules_sig` identifies the module list so
@@ -133,24 +130,13 @@ pub fn writeModuleCache(allocator: Allocator, venv_path: []const u8, cache: *con
     const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE });
     defer allocator.free(path);
     try runtime.writeFileAtomic(allocator, path, text);
-    deleteLegacyModuleCache(allocator, venv_path);
 }
 
-/// Removes the module cache (current and legacy files); missing files are fine.
+/// Removes the module cache; a missing file is fine.
 pub fn deleteModuleCache(allocator: Allocator, venv_path: []const u8) void {
-    if (std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE })) |path| {
-        defer allocator.free(path);
-        runtime.deleteFile(path) catch {};
-    } else |_| {}
-    deleteLegacyModuleCache(allocator, venv_path);
-}
-
-fn deleteLegacyModuleCache(allocator: Allocator, venv_path: []const u8) void {
-    for (LEGACY_MODULE_CACHE_FILES) |name| {
-        const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, name }) catch continue;
-        defer allocator.free(path);
-        runtime.deleteFile(path) catch {};
-    }
+    const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE }) catch return;
+    defer allocator.free(path);
+    runtime.deleteFile(path) catch {};
 }
 
 /// Lowercase-hex SHA-1 of the module list, in load order: the key under which
@@ -201,6 +187,32 @@ pub fn build(
         .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
         .activate_script = activate_script,
     };
+}
+
+/// `value` moved from under `old_dir` to `new_dir` when it is that directory or
+/// a path inside it; otherwise `value` itself.
+fn movePath(a: Allocator, value: []const u8, old_dir: []const u8, new_dir: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, value, old_dir)) return new_dir;
+    if (value.len > old_dir.len and std.mem.startsWith(u8, value, old_dir) and value[old_dir.len] == '/') {
+        return std.mem.concat(a, u8, &.{ new_dir, value[old_dir.len..] });
+    }
+    return value;
+}
+
+/// `spec` for a venv moved from `old_venv` to `new_venv` and renamed to
+/// `new_name` (zenv rename): paths into the venv move with it and the prompt
+/// takes the new name. Allocated with `a` (use an arena).
+pub fn relocate(a: Allocator, spec: *const Spec, old_venv: []const u8, new_venv: []const u8, new_name: []const u8) !Spec {
+    var out = spec.*;
+    out.name = new_name;
+    out.venv = new_venv;
+    const ops = try a.dupe(Op, spec.ops);
+    for (ops) |*op| {
+        op.value = if (std.mem.eql(u8, op.name, "VIRTUAL_ENV_PROMPT")) new_name else try movePath(a, op.value, old_venv, new_venv);
+    }
+    out.ops = ops;
+    if (spec.activate_script) |p| out.activate_script = try movePath(a, p, old_venv, new_venv);
+    return out;
 }
 
 /// Writes `spec` to `<spec.venv>/zenv-env.json` atomically.
@@ -269,10 +281,11 @@ pub fn applyOp(map: *std.process.Environ.Map, op: Op) !void {
     switch (op.op) {
         .set => try map.put(op.name, op.value),
         .unset => _ = map.orderedRemove(op.name),
-        .prepend => {
+        .prepend, .append => {
             const current = map.get(op.name) orelse "";
             if (current.len == 0) return map.put(op.name, op.value);
-            const joined = try std.mem.concat(map.allocator, u8, &[_][]const u8{ op.value, ":", current });
+            const parts: []const []const u8 = if (op.op == .prepend) &.{ op.value, ":", current } else &.{ current, ":", op.value };
+            const joined = try std.mem.concat(map.allocator, u8, parts);
             defer map.allocator.free(joined);
             try map.put(op.name, joined); // put copies `joined` before freeing the old value
         },
@@ -292,13 +305,14 @@ pub fn apply(map: *std.process.Environ.Map, spec: *const Spec) !void {
 
 /// Resolves `command` the way `exec` in a shell would: a name containing '/'
 /// is used as-is, otherwise the first executable regular file named `command`
-/// in `path_value` (an empty entry means the current directory). Returns null
-/// when nothing matches. Caller owns the result.
+/// in `path_value` (an empty entry means the current directory; an unset PATH
+/// means `/usr/bin:/bin`, as execvp uses). Returns null when nothing matches.
+/// Caller owns the result.
 pub fn resolveCommand(allocator: Allocator, command: []const u8, path_value: ?[]const u8) !?[]u8 {
     if (command.len == 0) return null;
     if (std.mem.findScalar(u8, command, '/') != null) return try allocator.dupe(u8, command);
 
-    var dirs = std.mem.splitScalar(u8, path_value orelse return null, ':');
+    var dirs = std.mem.splitScalar(u8, path_value orelse "/usr/bin:/bin", ':');
     while (dirs.next()) |entry| {
         const dir = if (entry.len == 0) "." else entry;
         const candidate = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, command });
@@ -335,6 +349,23 @@ test "venvOps mirrors bin/activate + activate.sh exports, in order" {
 
     const no_prompt = try venvOps(arena.allocator(), "/p/.zenv/demo", null);
     try testing.expectEqual(@as(usize, 5), no_prompt.len);
+}
+
+test "relocate moves venv paths and the name, nothing else" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var spec = Spec{ .name = "old", .venv = "/p/.zenv/old", .ops = try venvOps(a, "/p/.zenv/old", "old"), .activate_script = "/p/.zenv/old/scripts/activate_hook.sh" };
+    spec.ops = try std.mem.concat(a, Op, &.{ spec.ops, &.{.{ .op = .set, .name = "OTHER", .value = "/p/.zenv/older" }} });
+    const moved = try relocate(a, &spec, "/p/.zenv/old", "/p/.zenv/new", "new");
+    try testing.expectEqualStrings("new", moved.name);
+    try testing.expectEqualStrings("/p/.zenv/new", moved.venv);
+    try testing.expectEqualStrings("/p/.zenv/new", moved.ops[0].value); // VIRTUAL_ENV
+    try testing.expectEqualStrings("/p/.zenv/new/bin", moved.ops[1].value); // PATH
+    try testing.expectEqualStrings("new", moved.ops[3].value); // VIRTUAL_ENV_PROMPT
+    try testing.expectEqualStrings("/p/.zenv/older", moved.ops[6].value); // a sibling path is not "inside"
+    try testing.expectEqualStrings("/p/.zenv/new/scripts/activate_hook.sh", moved.activate_script.?);
+    try testing.expectEqualStrings("/p/.zenv/old", spec.ops[0].value); // the input is untouched
 }
 
 test "modulesSignature is deterministic, order- and content-sensitive" {
@@ -478,7 +509,9 @@ test "resolveCommand searches PATH and passes paths through" {
     try testing.expectEqualStrings("./local/tool", given);
 
     try testing.expect((try resolveCommand(a, "zenv-no-such-command", "/bin")) == null);
-    try testing.expect((try resolveCommand(a, "sh", null)) == null);
+    const default_path = (try resolveCommand(a, "sh", null)).?; // unset PATH: /usr/bin:/bin
+    defer a.free(default_path);
+    try testing.expect(std.mem.endsWith(u8, default_path, "/sh"));
     // A directory on PATH named like the command is skipped.
     try testing.expect((try resolveCommand(a, "bin", "/")) == null);
 }
