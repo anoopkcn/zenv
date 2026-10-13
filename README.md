@@ -150,7 +150,12 @@ source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 
 # Activate by partial ID (first 7+ characters)
 source $(zenv activate c3c4945)
+
+# Activate the project you are in, from any subdirectory of it
+source $(zenv activate --auto .)
 ```
+
+`zenv activate .` needs the `zenv.json` in the current directory itself. `--auto .` searches upward from the current directory for the nearest `zenv.json` instead, and prints nothing if that project has no registered environment (it is what the [cd hook](#activating-on-cd-zsh) runs). Unlike a plain `activate`, it never rebuilds an out-of-date environment: it prints a notice and activates it as built.
 
 From csh/tcsh or fish, ask for that shell's script instead (activate hooks are sh code and are skipped there):
 
@@ -181,7 +186,7 @@ Like direnv, this is a shell hook with no background process. On each directory 
 - The nearest `zenv.json` wins: a nested project without a registered environment shadows the project around it, so entering it deactivates the outer environment.
 - The hook deactivates only an environment it activated itself. If you run `deactivate` or activate another environment by hand inside a project, it leaves that alone until you enter another project.
 
-`zenv activate --auto [dir]` also works on its own: `source $(zenv activate --auto)` activates the environment of the project you are in, from any subdirectory.
+The hook runs `zenv activate --auto`, which you can also use by hand: `source $(zenv activate --auto .)` activates the environment of the project you are in, from any subdirectory.
 
 ### Direct run without activation
 
@@ -460,9 +465,10 @@ Commands:
                              fish:     source (zenv activate <name|id|.> --shell=fish)
                              'deactivate' then restores what activation set; activating
                              another environment deactivates this one first.
-                             --auto [dir]: the env registered for the nearest zenv.json at
-                             or above dir (default: .); prints nothing if none. Never
-                             rebuilds. Used by 'zenv hook'.
+                             --auto [dir]: the project you are in, from any subdirectory:
+                             source $(zenv activate --auto .)
+                             Uses the nearest zenv.json at or above dir (default: .);
+                             prints nothing if it has no registered env. Never rebuilds.
 
   hook <shell>               Outputs a shell hook that activates a project's environment
                              when you cd into it and deactivates it when you leave.
@@ -592,6 +598,7 @@ Options for 'zenv add <name> <package>':
   Use '.' as the environment identifier to automatically select an environment
   from the current directory. This works when you're in a directory containing
   a zenv.json file and have registered environments for that directory.
+  From a subdirectory of the project, use 'zenv activate --auto .' instead.
 ```
 
 ## Issues

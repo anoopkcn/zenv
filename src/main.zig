@@ -82,9 +82,10 @@ fn printUsage() void {
         \\                             fish:     source (zenv activate <name|id|.> --shell=fish)
         \\                             'deactivate' then restores what activation set; activating
         \\                             another environment deactivates this one first.
-        \\                             --auto [dir]: the env registered for the nearest zenv.json at
-        \\                             or above dir (default: .); prints nothing if none. Never
-        \\                             rebuilds. Used by 'zenv hook'.
+        \\                             --auto [dir]: the project you are in, from any subdirectory:
+        \\                             source $(zenv activate --auto .)
+        \\                             Uses the nearest zenv.json at or above dir (default: .);
+        \\                             prints nothing if it has no registered env. Never rebuilds.
         \\
         \\  hook <shell>               Outputs a shell hook that activates a project's environment
         \\                             when you cd into it and deactivates it when you leave.
@@ -214,6 +215,7 @@ fn printUsage() void {
         \\  Use '.' as the environment identifier to automatically select an environment
         \\  from the current directory. This works when you're in a directory containing
         \\  a zenv.json file and have registered environments for that directory.
+        \\  From a subdirectory of the project, use 'zenv activate --auto .' instead.
         \\
     ;
     stdoutWrite(usage);
