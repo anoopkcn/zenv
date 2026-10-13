@@ -231,7 +231,8 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
 
 /// Canonical tokens for the build-affecting flags of a setup invocation, to be
 /// replayed on a future auto-setup. Excludes `--no-host` (the gate always
-/// re-adds it), `--init` (one-time bootstrap) and `--jupyter` (the kernel
+/// re-adds it), `--init` and `--no-python` (one-time bootstrap: zenv.json
+/// then records the choice) and `--jupyter` (the kernel
 /// already targets the unchanged venv). Items are static literals — the caller
 /// frees only the returned slice.
 pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const u8 {
@@ -494,6 +495,7 @@ test "flagTokens emits only build-affecting flags" {
         .skip_hostname_check = true, // --no-host: excluded
         .create_jupyter_kernel = true, // --jupyter: excluded
         .init_mode = true, // --init: excluded
+        .no_python = true, // --no-python: excluded
     };
     const toks = try flagTokens(a, f);
     defer a.free(toks);

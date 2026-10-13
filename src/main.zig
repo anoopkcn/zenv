@@ -60,21 +60,27 @@ fn printUsage() void {
     const usage = comptime
         \\Usage: zenv <command> [name|id] [options]
         \\
-        \\Manages Python virtual environments based on zenv.json configuration.
+        \\Manages project environments based on zenv.json configuration: a Python venv
+        \\and its packages, HPC modules, environment variables and settings.
         \\
         \\Commands:
         \\  init [name] [desc]         Creates 'zenv.json' with environment 'name', or adds it to an
         \\                             existing one. 'name' defaults to the directory's name.
+        \\                             --no-python: an environment without Python, for modules,
+        \\                             environment variables and settings only.
         \\                             Use to start defining your environments[z].
         \\
-        \\  setup <name>               Creates and configures the virtual environment for '<name>'.
-        \\                             Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
+        \\  setup <name>               Creates and configures the environment '<name>' as per
+        \\                             'zenv.json' in '<base_dir>/<name>': modules, the Python venv and
+        \\                             its packages (none with "python": false), hooks and activation.
         \\                             This is the primary command to build an environment.
         \\
         \\  activate <name|id|.>       Outputs the activation script path for an environment.
         \\                             To use: source $(zenv activate <name|id|.>)
         \\                             csh/tcsh: source `zenv activate <name|id|.> --shell=csh`
         \\                             fish:     source (zenv activate <name|id|.> --shell=fish)
+        \\                             'deactivate' then restores what activation set; activating
+        \\                             another environment deactivates this one first.
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.
@@ -84,6 +90,7 @@ fn printUsage() void {
         \\                             <package> may include a version (e.g. 'flask>=2.0').
         \\                             Options: --dev (dev dependency), --zenv (record only in
         \\                             zenv.json), --uv (use uv instead of pip).
+        \\                             Refused for environments with "python": false.
         \\
         \\  cd <name|id|.>             Outputs the project directory path for an environment.
         \\                             To use: cd $(zenv cd <name|id|.>)
@@ -138,6 +145,7 @@ fn printUsage() void {
         \\Options for 'zenv setup <name>':
         \\  --init                     Creates and populates 'zenv.json' file before 'zenv setup'.
         \\                             Convenient for creating and setting up in one step.
+        \\  --no-python                With --init (or 'zenv init'): write the env as "python": false.
         \\
         \\  --dev                      Installs the current directory's project in editable mode.
         \\                             Equivalent to 'pip install --editable .' command.
@@ -177,6 +185,8 @@ fn printUsage() void {
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
         \\  top-level key specifying the storage location for virtual environments.
         \\  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
+        \\  In an environment, "python": false builds it without a Python venv, and "env" sets
+        \\  environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
         \\
         \\[a] Registry (ZENV_DIR/registry.json):
         \\  A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
@@ -287,6 +297,13 @@ pub fn main(app: std.process.Init) anyerror!void {
         const flags = flags_module.CommandFlags.fromArgs(args);
         const init_flag = flags.init_mode;
 
+        // --no-python only shapes a new env's config; after that, zenv.json
+        // decides (and auto-setup rebuilds from it without replaying flags).
+        if (flags.no_python and !init_flag) {
+            output.printError(allocator, "--no-python only applies with --init. For an existing environment, set \"python\": false for it in zenv.json.", .{}) catch {};
+            process.exit(1);
+        }
+
         if (init_flag) {
             // The name is the first POSITIONAL argument, skipping flags:
             // `zenv setup --init myenv` must not create an env named "--init".
@@ -300,14 +317,22 @@ pub fn main(app: std.process.Init) anyerror!void {
             }
             // Writes zenv.json, or adds the env to an existing one; an env the
             // file already defines is simply set up.
-            const outcome = commands.initConfig(allocator, env_name, flags_module.positional(args, 1)) catch |err| {
+            const outcome = commands.initConfig(allocator, env_name, flags_module.positional(args, 1), !flags.no_python) catch |err| {
                 output.printError(allocator, "Could not add '{s}' to zenv.json: {s}", .{ env_name, @errorName(err) }) catch {};
                 process.exit(1);
             };
             switch (outcome) {
                 .created => output.print(allocator, "--init: created zenv.json with environment '{s}'", .{env_name}) catch {},
                 .added => output.print(allocator, "--init: added environment '{s}' to zenv.json", .{env_name}) catch {},
-                .exists => output.print(allocator, "--init: zenv.json already defines '{s}'; using it", .{env_name}) catch {},
+                .exists => {
+                    // An existing env keeps its config; refuse rather than
+                    // set up something other than what --no-python asked for.
+                    if (flags.no_python and !(commands.pythonDisabled(allocator, config_path, env_name) catch false)) {
+                        output.printError(allocator, "zenv.json already defines '{s}' with Python. Set \"python\": false for it in zenv.json, or pick a new name.", .{env_name}) catch {};
+                        process.exit(1);
+                    }
+                    output.print(allocator, "--init: zenv.json already defines '{s}'; using it", .{env_name}) catch {};
+                },
             }
         }
 

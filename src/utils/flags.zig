@@ -10,6 +10,7 @@ pub const CommandFlags = struct {
     no_cache: bool = false, // Whether to disable package cache when installing dependencies
     create_jupyter_kernel: bool = false, // Whether to create a Jupyter kernel after setup
     zenv_only: bool = false, // (zenv add) Record the package only in zenv.json, not requirements.txt/pyproject.toml
+    no_python: bool = false, // (zenv init, setup --init) Write the new env with "python": false
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
@@ -34,6 +35,8 @@ pub const CommandFlags = struct {
                 flags.create_jupyter_kernel = true;
             } else if (std.mem.eql(u8, arg, "--zenv")) {
                 flags.zenv_only = true;
+            } else if (std.mem.eql(u8, arg, "--no-python")) {
+                flags.no_python = true;
             }
         }
 

@@ -2,7 +2,7 @@
 
 Python Environment Manager for HPC and Development Systems
 
-`zenv` is a command-line tool written in Zig that manages Python virtual environments, primarily designed for High-Performance Computing (HPC) environments and development systems.
+`zenv` is a command-line tool written in Zig that manages Python virtual environments, primarily designed for High-Performance Computing (HPC) environments and development systems. It also manages environments for projects that are not Python projects: the modules, environment variables and settings a project needs, without a venv.
 
 ## Features
 
@@ -16,6 +16,8 @@ The tool provides several key features:
 4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules (dependencies that the loaded modules put on `PYTHONPATH` are not reinstalled; `zenv setup --force` installs them anyway)
 5. **Add packages on the fly**: `zenv add` installs a package into an environment and records it in the project's manifest (`requirements.txt` / `pyproject.toml` / `zenv.json`)
 6. **Module Integration**: Load HPC modules required for environment setup
+7. **Environment variables**: Set variables per environment in `zenv.json`; `deactivate` restores them
+8. **Environments without Python**: Use zenv for a project's modules, variables and settings alone (`"python": false`)
 
 ## Installation
 
@@ -92,6 +94,8 @@ zenv setup <name>
 
 `name` defaults to the project directory's name (characters an environment name cannot contain become `-`), and `description` to `[project].description` from `pyproject.toml` when there is one. If `zenv.json` already exists, `zenv init` adds the new environment to it (the file is rewritten with 2-space indentation) and refuses only when that name is already defined. `zenv setup <name> --init` does the same and then sets the environment up; if `zenv.json` already defines `<name>`, it just sets it up.
 
+For a project that is not a Python project, add `--no-python` (`zenv init <name> --no-python`, or `zenv setup <name> --init --no-python`) to get an environment without Python; see [Environments without Python](#environments-without-python).
+
 **A minimal example of a `zenv.json` file**:
 
 ```json
@@ -158,7 +162,7 @@ source `zenv activate test --shell=csh`
 source (zenv activate test --shell=fish)
 ```
 
-Either script defines `deactivate`, which restores the shell to its state before activation.
+Either script defines `deactivate`, which restores what activation set: `PATH`, the venv variables, the module-cache variables and the variables from `env` go back to their previous values (or are unset if they had none). Activating another environment runs the current one's `deactivate` first, so switching leaves nothing behind. Changes made by `activate.commands` / `activate.script` are arbitrary shell code and are not undone; put plain variables in [`env`](#environment-variables) instead. Environments set up with an older zenv get this behaviour after `zenv setup <name>`.
 
 Jupyter kernels created by zenv (`zenv jupyter create <env>` or `zenv setup <env> --jupyter`) start through `zenv run`, so they get the environment's modules even when the Jupyter server runs with a different module set. The environment needs `ipykernel` (`zenv add <env> ipykernel`).
 
@@ -237,7 +241,7 @@ Flags:
 > Note: `--dev` is interpreted per-command — it means *editable install of the current
 > project* for `zenv setup`, but *development dependency* for `zenv add`.
 
-The environment must already be built (`zenv setup <name>`); `zenv add` does not create it.
+The environment must already be built (`zenv setup <name>`); `zenv add` does not create it. An environment with `"python": false` has nothing to install into, so `zenv add` refuses it and says how to turn Python on.
 
 ### Registering and Deregistering Environments
 
@@ -268,6 +272,8 @@ The default priority of the Python is as follows:
 4. System python3
 5. System python
 
+Environments with `"python": false` skip this entirely: no interpreter is looked up.
+
 If you would like to use zenv-managed default Python for the environment, run:
 
 ```bash
@@ -293,7 +299,7 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "fallback_python": "<path to python executable OR null>",
     "description": "<optional description OR null>",
     "modules": ["<module1>", "<module2>"],
-    "modules_file": "<path to modules file OR null>"
+    "modules_file": "<path to modules file OR null>",
     "module_cache": true,
     "python": true,
     "dependency_file": "<optional path to requirements_txt OR pyproject_toml OR null>",
@@ -321,6 +327,8 @@ One can have multiple environment configurations in the same `zenv.json` file an
 One can run `zenv validate` to validate the config file. If there are errors in the JSON it will try to inform the context of the error.
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to mantch any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
+
+`python` (default `true`) says whether the environment has a Python venv; set it to `false` for a project that only needs modules, environment variables and settings (see [Environments without Python](#environments-without-python)). `env` sets environment variables (see [Environment variables](#environment-variables)).
 
 The `dependencies` and `dev_dependencies` arrays list packages that `zenv setup` installs into the environment in addition to anything from `dependency_file`. Both are usually populated for you by `zenv add` (see [Adding packages to an environment](#adding-packages-to-an-environment)) rather than edited by hand, but you can also add entries directly.
 
@@ -352,7 +360,7 @@ Unlike `export` lines in `activate.commands`, these are recorded as data in `zen
 
 Variables zenv's activation manages (`VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `ZENV_ENV_DIR`, `PYTHONHOME`, `PS1`, and names starting with `_ZENV_` or `_OLD_VIRTUAL_`) cannot be set, and `PATH` can only be prepended or appended to. Use `activate.commands` / `activate.script` for anything that needs shell logic.
 
-For custom scripts, you can use `activate_hook` and `setup_hook` to specify paths to shell scripts that will be copied to the environment's directory and executed during activation or setup. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
+For custom scripts, you can use `setup.script` and `activate.script` to specify paths to shell scripts that will be copied to the environment's directory and executed during setup or activation. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
 The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file can contain module names separated by spaces, tabs, commas, or newlines. When specified, any modules listed in the "modules" array are ignored.
 
@@ -380,6 +388,8 @@ The cache is **not** auto-invalidated when the system's modules change underneat
 
 For a project that is not a Python project, set `"python": false` to use a zenv environment only for its modules, environment variables and settings. `zenv setup` then loads the modules (and captures the module cache), creates the environment directory with an empty `bin/` that activation puts on `PATH`, runs the `setup` hooks and writes the activation scripts. It does not look for a Python interpreter, create a venv or install anything, so `uv` is not needed either.
 
+`zenv init <name> --no-python` (or `zenv setup <name> --init --no-python`) writes such an environment for you: `"python": false`, an empty `env`, and none of the Python-only keys, even when the project has a `requirements.txt` or `pyproject.toml`. On `zenv setup` without `--init`, `--no-python` is refused: for an existing environment, change `"python"` in `zenv.json`, which is what the automatic rebuild reads.
+
 ```json
 {
   "base_dir": ".zenv",
@@ -393,7 +403,7 @@ For a project that is not a Python project, set `"python": false` to use a zenv 
 }
 ```
 
-Activation and `zenv run` set `ZENV_ENV_DIR` and put `<env>/bin` on `PATH`, but do not export `VIRTUAL_ENV` (tools like uv and pip would otherwise target a directory that has no Python in it). The `setup` hooks also see `ZENV_ENV_DIR`.
+Activation and `zenv run` set `ZENV_ENV_DIR`, put `<env>/bin` on `PATH` and apply `env`, but do not export `VIRTUAL_ENV` (tools like uv and pip would otherwise target a directory that has no Python in it). The `setup` hooks also see `ZENV_ENV_DIR` and `env`. `zenv activate`, `zenv run`, `zenv cd`, `zenv rename` and the other commands that do not install packages work the same as for a Python environment.
 
 A Python-free environment cannot have `dependencies`, `dev_dependencies` or a `dependency_file` (`zenv validate` reports them), and `zenv add`, `zenv setup --dev`, `--jupyter` and `zenv jupyter create` refuse it with a message saying what to change.
 
@@ -412,19 +422,27 @@ Output:
 ```
 Usage: zenv <command> [name|id] [options]
 
-Manages Python virtual environments based on zenv.json configuration.
+Manages project environments based on zenv.json configuration: a Python venv
+and its packages, HPC modules, environment variables and settings.
 
 Commands:
   init [name] [desc]         Creates 'zenv.json' with environment 'name', or adds it to an
                              existing one. 'name' defaults to the directory's name.
+                             --no-python: an environment without Python, for modules,
+                             environment variables and settings only.
                              Use to start defining your environments[z].
 
-  setup <name>               Creates and configures the virtual environment for '<name>'.
-                             Builds the environment in '<base_dir>/<name>' as per 'zenv.json'.
+  setup <name>               Creates and configures the environment '<name>' as per
+                             'zenv.json' in '<base_dir>/<name>': modules, the Python venv and
+                             its packages (none with "python": false), hooks and activation.
                              This is the primary command to build an environment.
 
   activate <name|id|.>       Outputs the activation script path for an environment.
                              To use: source $(zenv activate <name|id|.>)
+                             csh/tcsh: source `zenv activate <name|id|.> --shell=csh`
+                             fish:     source (zenv activate <name|id|.> --shell=fish)
+                             'deactivate' then restores what activation set; activating
+                             another environment deactivates this one first.
 
   run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
                              Does NOT require manual activation of the environment.
@@ -434,6 +452,7 @@ Commands:
                              <package> may include a version (e.g. 'flask>=2.0').
                              Options: --dev (dev dependency), --zenv (record only in
                              zenv.json), --uv (use uv instead of pip).
+                             Refused for environments with "python": false.
 
   cd <name|id|.>             Outputs the project directory path for an environment.
                              To use: cd $(zenv cd <name|id|.>)
@@ -453,31 +472,30 @@ Commands:
                              updates generated scripts, and updates any associated Jupyter kernels.
                              Preserves all configuration and metadata.
 
-  rm <name|id>               De-registers the environment AND permanently deletes its
+  rm <name|id|.>             De-registers the environment AND permanently deletes its
                              virtual environment directory from the filesystem.
 
-  validate [config]          Validates the configuration file. If no arguent provided it
+  validate [config]          Validates the configuration file. If no argument is provided it
                              will validate the 'zenv.json' file in the current directory.
                              Reports errors with line numbers and field names if found.
 
   log <name|id|.>            Displays the setup log file for the specified environment.
 
   alias <subcommand>         Manages environment aliases for easier access:
-    create <alias> <env>     Creates an alias for an environment. The same alias may
-                             be given to several environments that target different
-                             machines (see "host-aware selection" below).
-    remove <alias>           Removes an existing alias.
+    create <alias> <env>     Creates an alias for an environment.
+    remove <alias>           Removes the alias (from every environment sharing it).
     list                     Lists all defined aliases.
-    show <alias>             Shows the environment(s) the alias resolves to, with
-                             each one's target machines.
+    show <alias>             Shows what environment an alias points to.
 
   jupyter <subcommand>       Manages Jupyter kernels for environments:
-    create <env_name>        Creates a Jupyter kernel for the specified environment.
+    create <env_name>        Creates a Jupyter kernel for the environment. The kernel starts
+                             through 'zenv run', so it gets the env's modules; the env
+                             needs ipykernel ('zenv add <env> ipykernel').
     remove <env_name>        Removes the Jupyter kernel for the specified environment.
     list                     Lists all zenv-managed Jupyter kernels.
     check                    Checks if Jupyter is installed and available.
 
-  python <subcommand>        (Experimantal feature) Manages Python installations:
+  python <subcommand>        (Experimental feature) Manages Python installations:
     install <version>        Downloads and installs a specific Python version for zenv.
     pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
     list                     Shows Python versions installed and managed by zenv.
@@ -489,6 +507,7 @@ Commands:
 Options for 'zenv setup <name>':
   --init                     Creates and populates 'zenv.json' file before 'zenv setup'.
                              Convenient for creating and setting up in one step.
+  --no-python                With --init (or 'zenv init'): write the env as "python": false.
 
   --dev                      Installs the current directory's project in editable mode.
                              Equivalent to 'pip install --editable .' command.
@@ -503,8 +522,8 @@ Options for 'zenv setup <name>':
   --python                   Use the zenv-pinned Python for creating environment.
                              Ignores the default Python priority[b] list.
 
-  --force                    Forces reinstallation of all dependencies.
-                             Useful if dependencies from loaded modules cause conflicts.
+  --force                    Installs every dependency, including those the loaded modules
+                             already provide, and re-captures the module cache.
 
   --no-cache                 Disables the package cache when installing dependencies.
                              Ensures fresh package downloads for each installation.
@@ -528,6 +547,8 @@ Options for 'zenv add <name> <package>':
   Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
   top-level key specifying the storage location for virtual environments.
   Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
+  In an environment, "python": false builds it without a Python venv, and "env" sets
+  environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
 
 [a] Registry (ZENV_DIR/registry.json):
   A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
@@ -539,7 +560,7 @@ Options for 'zenv add <name> <package>':
   zenv attempts to find a Python interpreter in the following order:
   1. HPC module-provided Python (if HPC environment modules are loaded).
   2. Path explicitly specified by the 'fallback_python' key in zenv.json.
-  3. zenv-pinned Python (set via 'zenv python use <version>').
+  3. zenv-pinned Python (set via 'zenv python pin <version>').
   4. System Python.
   Use 'zenv setup <name> --python' to use only the pinned version.
 

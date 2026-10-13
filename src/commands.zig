@@ -26,7 +26,7 @@ const EnvironmentRegistry = configurations.EnvironmentRegistry;
 /// with every key present so users can see what is configurable. Written with
 /// the JSON writer, so a name or description containing `"` or `\` stays
 /// valid JSON. Caller owns the result.
-fn initConfigJson(allocator: Allocator, env_name: []const u8, description: []const u8, dependency_file: ?[]const u8) ![]u8 {
+fn initConfigJson(allocator: Allocator, env_name: []const u8, description: []const u8, dependency_file: ?[]const u8, with_python: bool) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
@@ -41,18 +41,31 @@ fn initConfigJson(allocator: Allocator, env_name: []const u8, description: []con
     try s.write([_][]const u8{"*"});
     try s.objectField("description");
     try s.write(description);
-    try s.objectField("fallback_python");
-    try s.write(null);
+    // A Python-free env gets "python": false and none of the Python-only keys
+    // (which validation would reject), plus an empty "env" to fill in.
+    if (with_python) {
+        try s.objectField("fallback_python");
+        try s.write(null);
+    } else {
+        try s.objectField("python");
+        try s.write(false);
+    }
     try s.objectField("modules");
     try s.write(none);
     try s.objectField("modules_file");
     try s.write(null);
     try s.objectField("module_cache");
     try s.write(true);
-    try s.objectField("dependencies");
-    try s.write(none);
-    try s.objectField("dependency_file");
-    try s.write(dependency_file);
+    if (with_python) {
+        try s.objectField("dependencies");
+        try s.write(none);
+        try s.objectField("dependency_file");
+        try s.write(dependency_file);
+    } else {
+        try s.objectField("env");
+        try s.beginObject();
+        try s.endObject();
+    }
     for ([_][]const u8{ "setup", "activate" }) |hook| {
         try s.objectField(hook);
         try s.beginObject();
@@ -70,7 +83,7 @@ fn initConfigJson(allocator: Allocator, env_name: []const u8, description: []con
 
 test "initConfigJson writes every key in order and escapes user text" {
     const a = std.testing.allocator;
-    const text = try initConfigJson(a, "my\"env", "a \\ \"quoted\" desc", "requirements.txt");
+    const text = try initConfigJson(a, "my\"env", "a \\ \"quoted\" desc", "requirements.txt", true);
     defer a.free(text);
 
     // base_dir first, then the env, as the old template had it.
@@ -88,16 +101,17 @@ test "initConfigJson writes every key in order and escapes user text" {
     try std.testing.expectEqual(keys.len, env_obj.count());
     for (keys, env_obj.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
 
-    const no_deps = try initConfigJson(a, "e", "d", null);
+    const no_deps = try initConfigJson(a, "e", "d", null, true);
     defer a.free(no_deps);
     try std.testing.expect(std.mem.find(u8, no_deps, "\"dependency_file\": null") != null);
 }
 
 const INIT_USAGE =
-    \\Usage: zenv init [name] [description]
+    \\Usage: zenv init [name] [description] [--no-python]
     \\Creates zenv.json with environment <name>, or adds <name> to an existing zenv.json.
     \\  name         defaults to the current directory's name
     \\  description  defaults to [project].description from pyproject.toml, if any
+    \\  --no-python  an environment without Python, for modules, env variables and settings
 ;
 
 pub const InitOutcome = enum { created, added, exists };
@@ -105,7 +119,8 @@ pub const InitOutcome = enum { created, added, exists };
 /// Defines environment `env_name` in ./zenv.json: writes a new file, or adds
 /// the env to an existing one. `exists` (nothing written) when the file
 /// already defines it. A null `description` is taken from pyproject.toml.
-pub fn initConfig(allocator: Allocator, env_name: []const u8, description: ?[]const u8) !InitOutcome {
+/// Without `with_python`, the env is written Python-free (`"python": false`).
+pub fn initConfig(allocator: Allocator, env_name: []const u8, description: ?[]const u8, with_python: bool) !InitOutcome {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -113,19 +128,19 @@ pub fn initConfig(allocator: Allocator, env_name: []const u8, description: ?[]co
 
     // Point dependency_file at an existing requirements.txt, else pyproject.toml.
     var dependency_file: ?[]const u8 = null;
-    for ([_][]const u8{ "requirements.txt", "pyproject.toml" }) |candidate| {
+    if (with_python) for ([_][]const u8{ "requirements.txt", "pyproject.toml" }) |candidate| {
         if (runtime.access(candidate)) |_| {
             dependency_file = candidate;
             break;
         } else |err| if (err != error.FileNotFound) return err;
-    }
+    };
 
     const desc = description orelse pyproject: {
         const content = runtime.readFileAlloc(a, "pyproject.toml", 10 * 1024 * 1024) catch break :pyproject null;
         break :pyproject try deps.pyprojectDescription(a, content);
     } orelse "Env config created by zenv";
 
-    const template = try initConfigJson(a, env_name, desc, dependency_file);
+    const template = try initConfigJson(a, env_name, desc, dependency_file, with_python);
 
     runtime.access(config_path) catch |err| {
         if (err != error.FileNotFound) return err;
@@ -146,6 +161,22 @@ pub fn defaultEnvName(allocator: Allocator, dir: []const u8) ![]u8 {
     if (paths.isValidEnvName(name)) return name;
     allocator.free(name);
     return allocator.dupe(u8, "test");
+}
+
+test "initConfigJson without Python: python false, no Python-only keys, valid" {
+    const a = std.testing.allocator;
+    const text = try initConfigJson(a, "tools", "d", "requirements.txt", false);
+    defer a.free(text);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+    defer parsed.deinit();
+    const env_obj = parsed.value.object.get("tools").?.object;
+    const keys = [_][]const u8{ "target_machines", "description", "python", "modules", "modules_file", "module_cache", "env", "setup", "activate" };
+    try std.testing.expectEqual(keys.len, env_obj.count());
+    for (keys, env_obj.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+    try std.testing.expect(!env_obj.get("python").?.bool);
+    try std.testing.expectEqual(@as(usize, 0), env_obj.get("env").?.object.count());
+    // What init writes must pass validation as is.
+    try std.testing.expect((try validation.validateJsonContent(a, text)) == null);
 }
 
 test "defaultEnvName uses the directory name, made valid" {
@@ -172,7 +203,7 @@ pub fn handleInitCommand(
             output.rawOut(allocator, INIT_USAGE ++ "\n", .{}) catch {};
             return;
         }
-        if (std.mem.startsWith(u8, arg, "-")) {
+        if (std.mem.startsWith(u8, arg, "-") and !std.mem.eql(u8, arg, "--no-python")) {
             output.printError(allocator, "Unknown option '{s}' for 'zenv init'.\n" ++ INIT_USAGE, .{arg}) catch {};
             std.process.exit(1);
         }
@@ -197,7 +228,8 @@ pub fn handleInitCommand(
         std.process.exit(1);
     }
 
-    const outcome = initConfig(allocator, env_name, positional(args, 1)) catch |err| {
+    const python_env = !CommandFlags.fromArgs(args).no_python;
+    const outcome = initConfig(allocator, env_name, positional(args, 1), python_env) catch |err| {
         if (err == error.InvalidFormat) {
             output.printError(allocator, "zenv.json exists but is not a JSON object; fix it or remove it first.", .{}) catch {};
         } else {
@@ -206,8 +238,11 @@ pub fn handleInitCommand(
         std.process.exit(1);
     };
     switch (outcome) {
-        .created => output.print(allocator, "Created zenv.json with environment '{s}'. Run 'zenv setup {s}'", .{ env_name, env_name }) catch {},
-        .added => output.print(allocator, "Added environment '{s}' to zenv.json. Run 'zenv setup {s}'", .{ env_name, env_name }) catch {},
+        .created, .added => {
+            const what = if (outcome == .created) "Created zenv.json with" else "Added to zenv.json:";
+            const kind = if (python_env) "environment" else "Python-free environment";
+            output.print(allocator, "{s} {s} '{s}'. Run 'zenv setup {s}'", .{ what, kind, env_name, env_name }) catch {};
+        },
         .exists => {
             output.printError(allocator, "zenv.json already defines environment '{s}'. Pick another name: zenv init <name>", .{env_name}) catch {};
             std.process.exit(1);
@@ -1073,7 +1108,7 @@ fn readDependencyFile(allocator: Allocator, path: []const u8, env_name: []const 
 
 /// Whether zenv.json at `path` sets `"python": false` for `env_name`. False
 /// when the file/env/field is absent or unparsable, like readDependencyFile.
-fn pythonDisabled(allocator: Allocator, path: []const u8, env_name: []const u8) !bool {
+pub fn pythonDisabled(allocator: Allocator, path: []const u8, env_name: []const u8) !bool {
     const content = runtime.readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) return false;
         return err;
