@@ -51,7 +51,7 @@ pub const MODULE_CACHE_VERSION: u32 = 2;
 
 /// Contents of MODULE_CACHE_FILE. `system` is the cluster it was captured on
 /// (`${SYSTEMNAME:-$(hostname)}`); `modules_sig` identifies the module list so
-/// setup can reuse the cache when only dependencies changed.
+/// an auto-setup rebuild can reuse the cache when only dependencies changed.
 pub const ModuleCache = struct {
     version: u32,
     system: []const u8,
@@ -173,7 +173,7 @@ pub fn deleteModuleCache(allocator: Allocator, venv_path: []const u8) void {
 }
 
 /// Lowercase-hex SHA-1 of the module list, in load order: the key under which
-/// setup may reuse a cache instead of re-running Lmod. Caller owns the result.
+/// auto-setup may reuse a cache instead of re-running Lmod. Caller owns the result.
 pub fn modulesSignature(allocator: Allocator, modules: []const []const u8) ![]u8 {
     var sha = std.crypto.hash.Sha1.init(.{});
     for (modules) |m| {

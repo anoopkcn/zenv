@@ -174,8 +174,8 @@ pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?json.Parsed(Stamp)
 // ===========================================================================
 
 /// Canonical tokens for the build-affecting flags of a setup invocation, to be
-/// replayed on a future auto-setup. Excludes `--no-host` (the gate always
-/// re-adds it), `--init` and `--no-python` (one-time bootstrap: zenv.json
+/// replayed on a future auto-setup. Excludes `--no-host` and
+/// `--reuse-module-cache` (the gate always re-adds them), `--init` and `--no-python` (one-time bootstrap: zenv.json
 /// then records the choice) and `--jupyter` (the kernel
 /// already targets the unchanged venv). Items are static literals — the caller
 /// frees only the returned slice.
@@ -194,11 +194,12 @@ pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const 
 // The gate
 // ===========================================================================
 
-/// Re-invokes `zenv setup <env> --no-host [replay_flags...]` as a captured
-/// subprocess with cwd set to the project dir. The child's stdout/stderr are
-/// captured (not inherited), so the rebuild itself is silent; we bracket it with
-/// a one-line `reason` notice and a completion notice on STDERR so the user knows
-/// a rebuild happened. stderr is used deliberately: `activate`/`cd` emit their
+/// Re-invokes `zenv setup <env> --no-host --reuse-module-cache [replay_flags...]`
+/// as a captured subprocess with cwd set to the project dir. A rebuild keeps the
+/// module cache when the module set is unchanged; only an explicit `zenv setup`
+/// re-captures it. The child's stdout/stderr are captured (not inherited), so
+/// the rebuild itself is silent; we bracket it with a one-line `reason` notice
+/// and a completion notice on STDERR so the user knows a rebuild happened. stderr is used deliberately: `activate`/`cd` emit their
 /// shell-eval payload on stdout (which the shell captures), so a stderr notice is
 /// visible without corrupting `source $(zenv activate ...)`. Returns
 /// `error.AutoSetupFailed` if the child cannot start or exits non-zero. A
@@ -213,7 +214,7 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &[_][]const u8{ self_exe, "setup", entry.env_name, "--no-host" });
+    try argv.appendSlice(allocator, &[_][]const u8{ self_exe, "setup", entry.env_name, "--no-host", "--reuse-module-cache" });
     try argv.appendSlice(allocator, replay_flags);
 
     // Announce on STDERR before the (silent, possibly slow) rebuild. stderr is
@@ -370,15 +371,16 @@ const test_config_b =
     \\}
 ;
 
-// Recording fake backend for gate tests: notes whether a subprocess was spawned
-// and what exit code to report.
+// Recording fake backend for gate tests: notes whether a subprocess was spawned,
+// whether it asked setup to reuse the module cache, and what exit code to report.
 var test_spawned: bool = false;
+var test_reuse_module_cache: bool = false;
 var test_run_exit: u8 = 0;
 
 fn recordingRun(allocator: Allocator, argv: []const []const u8, opts: runtime.RunOptions) anyerror!runtime.RunResult {
-    _ = argv;
     _ = opts;
     test_spawned = true;
+    test_reuse_module_cache = flags.CommandFlags.fromArgs(argv).reuse_module_cache;
     return .{
         .term = .{ .exited = test_run_exit },
         .stdout = try allocator.dupe(u8, ""),
@@ -541,6 +543,7 @@ test "flagTokens emits only build-affecting flags" {
         .create_jupyter_kernel = true, // --jupyter: excluded
         .init_mode = true, // --init: excluded
         .no_python = true, // --no-python: excluded
+        .reuse_module_cache = true, // --reuse-module-cache: excluded
     };
     const toks = try flagTokens(a, f);
     defer a.free(toks);
@@ -588,6 +591,7 @@ test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
     test_run_exit = 0;
     try ensureUpToDate(a, &entry);
     try testing.expect(test_spawned); // drift -> spawned setup
+    try testing.expect(test_reuse_module_cache); // a rebuild keeps an unchanged module cache
 
     // Child setup fails -> AutoSetupFailed (stamp still stale).
     test_spawned = false;

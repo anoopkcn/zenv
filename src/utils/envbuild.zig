@@ -458,9 +458,10 @@ fn moduleSystemAvailable(env: *const Map) bool {
     return false;
 }
 
-/// Makes `env` the module environment: reuses the cache when the module set and
-/// system are unchanged, else purges and loads in bash and captures a new
-/// cache. Returns false when there is no module system.
+/// Makes `env` the module environment: with --reuse-module-cache (what
+/// auto-setup passes), reuses the cache when the module set and system are
+/// unchanged; otherwise purges and loads in bash and captures a new cache, so
+/// an explicit `zenv setup` picks up modules changed by site maintenance. Returns false when there is no module system.
 fn loadModules(a: Allocator, opts: Options, env: *Map) !bool {
     if (!moduleSystemAvailable(env)) {
         info(a, "Module command not found, skipping module operations", .{});
@@ -474,7 +475,7 @@ fn loadModules(a: Allocator, opts: Options, env: *Map) !bool {
 
     // Reuse: same module set on the same system. Like activation, this does
     // not purge first.
-    if (cache_active and !opts.flags.force_deps) reuse: {
+    if (cache_active and opts.flags.reuse_module_cache and !opts.flags.force_deps) reuse: {
         const cache = envspec.readModuleCache(a, opts.venv_dir) orelse break :reuse;
         const sys = system orelse break :reuse;
         if (cache.version != envspec.MODULE_CACHE_VERSION or cache.untrusted) break :reuse;

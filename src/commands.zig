@@ -25,7 +25,7 @@ const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentRegistry = configurations.EnvironmentRegistry;
 
 /// The flags each command takes (see printUsage in main.zig).
-pub const SETUP_FLAGS = [_][]const u8{ "--init", "--no-python", "--dev", "--uv", "--no-host", "--python", "--force", "--no-cache", "--jupyter" };
+pub const SETUP_FLAGS = [_][]const u8{ "--init", "--no-python", "--dev", "--uv", "--no-host", "--python", "--force", "--no-cache", "--jupyter", "--reuse-module-cache" };
 const REGISTER_FLAGS = [_][]const u8{"--no-host"};
 const ADD_FLAGS = [_][]const u8{ "--dev", "--zenv", "--uv" };
 

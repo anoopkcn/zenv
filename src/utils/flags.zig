@@ -11,6 +11,7 @@ pub const CommandFlags = struct {
     create_jupyter_kernel: bool = false, // Whether to create a Jupyter kernel after setup
     zenv_only: bool = false, // (zenv add) Record the package only in zenv.json, not requirements.txt/pyproject.toml
     no_python: bool = false, // (zenv init, setup --init) Write the new env with "python": false
+    reuse_module_cache: bool = false, // (setup) Replay the module cache instead of re-capturing it when the module set is unchanged
 
     /// Each flag's spelling and the field it sets.
     const spellings = .{
@@ -18,7 +19,8 @@ pub const CommandFlags = struct {
         .{ "--python", "use_default_python" }, .{ "--dev", "dev_mode" },
         .{ "--uv", "use_uv" },                 .{ "--init", "init_mode" },
         .{ "--no-cache", "no_cache" },         .{ "--jupyter", "create_jupyter_kernel" },
-        .{ "--zenv", "zenv_only" },            .{ "--no-python", "no_python" },
+        .{ "--zenv", "zenv_only" },            .{ "--reuse-module-cache", "reuse_module_cache" },
+        .{ "--no-python", "no_python" },
     };
 
     /// Parse command-line args to extract flags

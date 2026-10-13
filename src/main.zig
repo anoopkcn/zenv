@@ -162,6 +162,10 @@ fn printUsage() void {
         \\  --force                    Installs every dependency, including those the loaded modules
         \\                             already provide, and re-captures the module cache.
         \\
+        \\  --reuse-module-cache       Replays the existing module cache instead of re-running
+        \\                             'module load' when the module list is unchanged.
+        \\                             Automatic rebuilds use it; plain 'zenv setup' re-captures.
+        \\
         \\  --no-cache                 Disables the package cache when installing dependencies.
         \\                             Ensures fresh package downloads for each installation.
         \\

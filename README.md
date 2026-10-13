@@ -436,9 +436,9 @@ The cache is used only when it is trustworthy; otherwise activation transparentl
 
 If your login shell is not bash (e.g. zsh), `module` is not visible to the bash that `zenv setup` uses to load modules. zenv then defines it from `$LMOD_CMD`, the way Lmod's own bash init does.
 
-**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed (see [Automatic rebuilds](#automatic-rebuilds)). To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`). When a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. `zenv setup --force` always re-captures.
+**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed (see [Automatic rebuilds](#automatic-rebuilds)). To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`), and automatic rebuilds pass `--reuse-module-cache`. When such a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. A `zenv setup` you run yourself always re-captures; pass `--reuse-module-cache` to skip that when you know the modules have not changed.
 
-The cache is **not** auto-invalidated when the system's modules change underneath you. If a `module load` is updated by site maintenance, re-run `zenv setup` (or `zenv setup --force`) to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
+The cache is **not** auto-invalidated when the system's modules change underneath you, and automatic rebuilds keep replaying it. If a `module load` is updated by site maintenance, re-run `zenv setup` to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
 
 ### Environments without Python
 
@@ -595,6 +595,10 @@ Options for 'zenv setup <name>':
 
   --force                    Installs every dependency, including those the loaded modules
                              already provide, and re-captures the module cache.
+
+  --reuse-module-cache       Replays the existing module cache instead of re-running
+                             'module load' when the module list is unchanged.
+                             Automatic rebuilds use it; plain 'zenv setup' re-captures.
 
   --no-cache                 Disables the package cache when installing dependencies.
                              Ensures fresh package downloads for each installation.
