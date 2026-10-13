@@ -3,9 +3,8 @@ const Allocator = std.mem.Allocator;
 const File = std.Io.File;
 const runtime = @import("runtime.zig");
 
-// Global state for logging
+/// The setup log, when logging is on (see startLogging).
 var log_file: ?File = null;
-var log_enabled: bool = false;
 
 /// When true, all stdout/stderr writes are skipped. Tests set this so logging
 /// does not corrupt the `zig build test` runner's stdout protocol. Off (and
@@ -15,15 +14,12 @@ pub var silent: bool = false;
 /// Starts logging to the specified file path
 /// If the file exists, it will be appended to
 pub fn startLogging(allocator: Allocator, path: []const u8) !void {
-    if (log_enabled) {
-        stopLogging();
-    }
+    stopLogging();
 
     const dir_path = std.Io.Dir.path.dirname(path) orelse ".";
     try runtime.makePath(dir_path);
 
     log_file = try runtime.createFile(path, .{ .truncate = false, .read = true });
-    log_enabled = true;
 
     try print(allocator, "Logging started: output will be saved to {s}", .{path});
 }
@@ -33,7 +29,6 @@ pub fn stopLogging() void {
     if (log_file) |*file| {
         file.close(runtime.io);
         log_file = null;
-        log_enabled = false;
     }
 }
 
@@ -42,63 +37,47 @@ pub fn stopLogging() void {
 /// appends to the same log (`>>`) while zenv holds it open, and a re-run must
 /// add to the previous log, so any cached offset would overwrite real output.
 fn logMessage(message: []const u8) !void {
-    if (log_enabled and log_file != null) {
-        const file = log_file.?;
-        const end = try file.length(runtime.io);
-        try file.writePositionalAll(runtime.io, message, end);
-    }
+    const file = log_file orelse return;
+    try file.writePositionalAll(runtime.io, message, try file.length(runtime.io));
 }
 
-/// Writes `message` to the given standard stream and flushes it.
+/// Writes `message` to the given standard stream.
 fn writeStd(file: File, message: []const u8) !void {
     if (silent) return;
-    var buf: [512]u8 = undefined;
-    var fw = file.writerStreaming(runtime.io, &buf);
-    const w = &fw.interface;
-    try w.writeAll(message);
-    try w.flush();
+    try file.writeStreamingAll(runtime.io, message);
+}
+
+/// Formats into a stack buffer, falling back to the heap when the *formatted*
+/// output doesn't fit (a long argument such as a venv path), then writes it to
+/// `file` and, when `log`, to the setup log.
+fn emit(allocator: Allocator, file: File, comptime fmt: []const u8, args: anytype, log: bool) !void {
+    var buf: [1024]u8 = undefined;
+    const message = std.mem.print(&buf, fmt, args) catch try allocator.print(fmt, args);
+    defer if (message.ptr != &buf) allocator.free(message);
+    try writeStd(file, message);
+    if (log) try logMessage(message);
 }
 
 /// Writes formatted text to stdout verbatim (no "Info:" prefix, no newline,
 /// no logging). For data output meant to be captured by a shell, e.g.
 /// `source $(zenv activate ...)`.
 pub fn rawOut(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    const msg = std.mem.print(&buf, fmt, args) catch try allocator.print(fmt, args);
-    defer if (msg.ptr != &buf) allocator.free(msg);
-    try writeStd(File.stdout(), msg);
+    return emit(allocator, File.stdout(), fmt, args, false);
 }
 
 /// Like `rawOut` but writes to stderr.
 pub fn rawErr(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    const msg = std.mem.print(&buf, fmt, args) catch try allocator.print(fmt, args);
-    defer if (msg.ptr != &buf) allocator.free(msg);
-    try writeStd(File.stderr(), msg);
+    return emit(allocator, File.stderr(), fmt, args, false);
 }
 
+/// Prints a formatted "INFO:" line to stdout (and the log).
 pub fn print(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    // Prefer the stack buffer, but fall back to the heap when the *formatted*
-    // output doesn't fit. The previous guard measured only the format string
-    // length, so a long argument (e.g. a venv path) overflowed bufPrint.
-    const message = std.mem.print(&buf, "INFO: " ++ fmt ++ "\n", args) catch
-        try allocator.print("INFO: " ++ fmt ++ "\n", args);
-    defer if (message.ptr != &buf) allocator.free(message);
-
-    try writeStd(File.stdout(), message);
-    try logMessage(message);
+    return emit(allocator, File.stdout(), "INFO: " ++ fmt ++ "\n", args, true);
 }
 
 /// Prints a formatted warning to stderr (and the log) with a newline appended.
 pub fn printWarning(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    const message = std.mem.print(&buf, "WARNING: " ++ fmt ++ "\n", args) catch
-        try allocator.print("WARNING: " ++ fmt ++ "\n", args);
-    defer if (message.ptr != &buf) allocator.free(message);
-
-    try writeStd(File.stderr(), message);
-    try logMessage(message);
+    return emit(allocator, File.stderr(), "WARNING: " ++ fmt ++ "\n", args, true);
 }
 
 /// Copies a child process's output verbatim to stdout and the log. Used by
@@ -108,17 +87,9 @@ pub fn passthrough(bytes: []const u8) !void {
     try logMessage(bytes);
 }
 
-/// Prints a formatted error message to stderr with a newline appended
+/// Prints a formatted error message to stderr (and the log) with a newline appended
 pub fn printError(allocator: Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [1024]u8 = undefined;
-    // Fall back to the heap when the formatted output exceeds the stack buffer
-    // (see `print` above for why the old format-string-length guard was wrong).
-    const message = std.mem.print(&buf, "ERROR: " ++ fmt ++ "\n", args) catch
-        try allocator.print("ERROR: " ++ fmt ++ "\n", args);
-    defer if (message.ptr != &buf) allocator.free(message);
-
-    try writeStd(File.stderr(), message);
-    try logMessage(message);
+    return emit(allocator, File.stderr(), "ERROR: " ++ fmt ++ "\n", args, true);
 }
 
 // ============================ Tests ============================

@@ -100,6 +100,12 @@ pub fn access(path: []const u8) !void {
     return Dir.cwd().access(io, path, .{});
 }
 
+/// Whether `path` itself exists; a dangling symlink counts.
+pub fn lexists(path: []const u8) bool {
+    Dir.cwd().access(io, path, .{ .follow_symlinks = false }) catch return false;
+    return true;
+}
+
 /// Deletes a file. Replaces `std.fs.cwd().deleteFile` / `deleteFileAbsolute`.
 pub fn deleteFile(path: []const u8) !void {
     return Dir.cwd().deleteFile(io, path);
@@ -164,6 +170,11 @@ pub fn selfExePath(allocator: Allocator) ![:0]u8 {
 // the test fake — make this a genuine seam rather than mere indirection.
 
 pub const Term = std.process.Child.Term;
+
+/// True for a clean (status 0) exit.
+pub fn exitedOk(term: Term) bool {
+    return term == .exited and term.exited == 0;
+}
 
 /// Result of a captured run. Caller owns `stdout` and `stderr`.
 pub const RunResult = struct {

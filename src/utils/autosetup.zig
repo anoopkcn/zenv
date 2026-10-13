@@ -20,27 +20,19 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 
 const runtime = @import("runtime.zig");
+const paths = @import("paths.zig");
 const config = @import("config.zig");
 const validation = @import("validation.zig");
 const output = @import("output.zig");
 const flags = @import("flags.zig");
 
 const STAMP_NAME = ".zenv.stamp";
-// Untyped so it coerces to the JSON field (u32) and to i64 when comparing
-// against a parsed json integer.
 const STAMP_VERSION = 1;
 const MAX_TRACKED_FILE = 10 * 1024 * 1024;
 
 // ===========================================================================
 // Tracked-file checksum
 // ===========================================================================
-
-/// Resolves a config-relative path against `anchor_dir`; absolute paths are
-/// left untouched. Caller owns the result.
-fn resolvePath(allocator: Allocator, anchor_dir: []const u8, rel: []const u8) ![]u8 {
-    if (std.Io.Dir.path.isAbsolute(rel)) return allocator.dupe(u8, rel);
-    return std.Io.Dir.path.join(allocator, &[_][]const u8{ anchor_dir, rel });
-}
 
 /// Folds one tracked file into `sha`. The logical `key` and a content-length
 /// separator are mixed in so that adding/removing/renaming a tracked file, or a
@@ -109,22 +101,17 @@ pub fn computeTrackedHash(
         defer allocator.free(p);
         foldEnvConfig(allocator, &sha, p, env_name);
     }
-    if (env_config.dependency_file) |df| {
-        const p = try resolvePath(allocator, anchor_dir, df);
+    const setup_script = if (env_config.setup) |s| s.script else null;
+    const tracked = [_]struct { []const u8, ?[]const u8 }{
+        .{ "deps", env_config.dependency_file },
+        .{ "modules", env_config.modules_file },
+        .{ "setup_script", setup_script },
+    };
+    for (tracked) |t| {
+        const rel = t[1] orelse continue;
+        const p = try paths.resolvePath(allocator, anchor_dir, rel);
         defer allocator.free(p);
-        foldFile(allocator, &sha, "deps", p);
-    }
-    if (env_config.modules_file) |mf| {
-        const p = try resolvePath(allocator, anchor_dir, mf);
-        defer allocator.free(p);
-        foldFile(allocator, &sha, "modules", p);
-    }
-    if (env_config.setup) |s| {
-        if (s.script) |script| {
-            const p = try resolvePath(allocator, anchor_dir, script);
-            defer allocator.free(p);
-            foldFile(allocator, &sha, "setup_script", p);
-        }
+        foldFile(allocator, &sha, t[0], p);
     }
 
     var digest: [20]u8 = undefined;
@@ -137,23 +124,11 @@ pub fn computeTrackedHash(
 // Stamp file
 // ===========================================================================
 
-// Serialization view (fields are borrowed for writing).
-const StampJSON = struct {
+/// The stamp file's contents. `readStamp` returns it parsed.
+pub const Stamp = struct {
     version: u32,
     hash: []const u8,
-    flags: []const []const u8,
-};
-
-/// An owned, parsed stamp. Caller must `deinit`.
-pub const Stamp = struct {
-    hash: []const u8,
-    flags: []const []const u8,
-
-    pub fn deinit(self: *const Stamp, allocator: Allocator) void {
-        allocator.free(self.hash);
-        for (self.flags) |f| allocator.free(f);
-        allocator.free(self.flags);
-    }
+    flags: []const []const u8 = &.{},
 };
 
 fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
@@ -166,8 +141,8 @@ pub fn writeStamp(allocator: Allocator, venv_dir: []const u8, hash: []const u8, 
     const path = try stampPath(allocator, venv_dir);
     defer allocator.free(path);
 
-    const view = StampJSON{ .version = STAMP_VERSION, .hash = hash, .flags = build_flags };
-    const text = try std.json.Stringify.valueAlloc(allocator, view, .{ .whitespace = .indent_2 });
+    const stamp = Stamp{ .version = STAMP_VERSION, .hash = hash, .flags = build_flags };
+    const text = try std.json.Stringify.valueAlloc(allocator, stamp, .{ .whitespace = .indent_2 });
     defer allocator.free(text);
 
     try runtime.writeFileAtomic(allocator, path, text);
@@ -175,54 +150,23 @@ pub fn writeStamp(allocator: Allocator, venv_dir: []const u8, hash: []const u8, 
 
 /// Reads `<venv_dir>/.zenv.stamp`. Returns null (never errors) when the stamp is
 /// absent, unreadable, malformed, or a different format version — every such
-/// case means "treat as changed" and force a re-setup.
-pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?Stamp {
+/// case means "treat as changed" and force a re-setup. Caller must `deinit`.
+pub fn readStamp(allocator: Allocator, venv_dir: []const u8) ?json.Parsed(Stamp) {
     const path = stampPath(allocator, venv_dir) catch return null;
     defer allocator.free(path);
 
     const content = runtime.readFileAlloc(allocator, path, 1024 * 1024) catch return null;
     defer allocator.free(content);
 
-    // Strings may borrow from `content`; the fields kept below are duped.
-    const parsed = json.parseFromSlice(json.Value, allocator, content, .{ .allocate = .alloc_if_needed }) catch return null;
-    defer parsed.deinit();
-
-    const root = parsed.value;
-    if (root != .object) return null;
-
-    const ver = root.object.get("version") orelse return null;
-    if (ver != .integer or ver.integer != STAMP_VERSION) return null;
-
-    const hash_v = root.object.get("hash") orelse return null;
-    if (hash_v != .string) return null;
-
-    const hash_owned = allocator.dupe(u8, hash_v.string) catch return null;
-    var ok = false;
-    defer if (!ok) allocator.free(hash_owned);
-
-    var flag_list: std.ArrayList([]const u8) = .empty;
-    defer if (!ok) {
-        for (flag_list.items) |f| allocator.free(f);
-        flag_list.deinit(allocator);
-    };
-
-    if (root.object.get("flags")) |flags_v| {
-        if (flags_v == .array) {
-            for (flags_v.array.items) |fv| {
-                if (fv == .string) {
-                    const f = allocator.dupe(u8, fv.string) catch return null;
-                    flag_list.append(allocator, f) catch {
-                        allocator.free(f);
-                        return null;
-                    };
-                }
-            }
-        }
+    const parsed = json.parseFromSlice(Stamp, allocator, content, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch return null;
+    if (parsed.value.version != STAMP_VERSION) {
+        parsed.deinit();
+        return null;
     }
-
-    const flags_owned = flag_list.toOwnedSlice(allocator) catch return null;
-    ok = true;
-    return Stamp{ .hash = hash_owned, .flags = flags_owned };
+    return parsed;
 }
 
 // ===========================================================================
@@ -287,7 +231,7 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
     defer allocator.free(res.stdout);
     defer allocator.free(res.stderr);
 
-    if (res.term != .exited or res.term.exited != 0) {
+    if (!runtime.exitedOk(res.term)) {
         // The rebuild ran silently; surface its errors (e.g. what to change in
         // zenv.json) so the user need not open the log for them.
         var lines = std.mem.splitScalar(u8, res.stderr, '\n');
@@ -305,7 +249,7 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
 const Drift = union(enum) {
     none,
     /// Changed since the stamped build; carries the stamp for its replay flags.
-    changed: Stamp,
+    changed: json.Parsed(Stamp),
     /// No (valid) stamp: built by an older zenv, or the stamp is unreadable.
     unstamped,
 };
@@ -326,8 +270,7 @@ fn loadConfigQuiet(allocator: Allocator, project_dir: []const u8) !?config.ZenvC
         .config => |c| return c,
         .errors => |errs| {
             var list = errs;
-            for (list.items) |*e| e.deinit(allocator);
-            list.deinit(allocator);
+            validation.freeErrors(allocator, &list);
             return error.ConfigInvalid;
         },
     }
@@ -348,12 +291,12 @@ fn drift(allocator: Allocator, entry: *const config.RegistryEntry) !Drift {
 
     // Stamp first: without one, the hash would be computed for nothing.
     const stamp = readStamp(allocator, entry.venv_path) orelse return .unstamped;
-    errdefer stamp.deinit(allocator);
+    errdefer stamp.deinit();
     const current = try computeTrackedHash(allocator, entry.project_dir, entry.env_name, env_cfg);
     defer allocator.free(current);
 
-    if (std.mem.eql(u8, stamp.hash, current)) {
-        stamp.deinit(allocator);
+    if (std.mem.eql(u8, stamp.value.hash, current)) {
+        stamp.deinit();
         return .none;
     }
     return .{ .changed = stamp };
@@ -369,8 +312,8 @@ pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) 
     switch (try drift(allocator, entry)) {
         .none => {},
         .changed => |stamp| {
-            defer stamp.deinit(allocator);
-            try runSetup(allocator, entry, stamp.flags, "configuration or dependency files changed");
+            defer stamp.deinit();
+            try runSetup(allocator, entry, stamp.value.flags, "configuration or dependency files changed");
         },
         // Force a one-time re-setup with no replayed flags.
         .unstamped => try runSetup(allocator, entry, &[_][]const u8{}, "no build record found"),
@@ -387,11 +330,11 @@ pub fn restamp(allocator: Allocator, project_dir: []const u8, env_name: []const 
     defer cfg.deinit();
     const env_cfg = cfg.getEnvironment(env_name) orelse return;
     const stamp = readStamp(allocator, venv_path) orelse return;
-    defer stamp.deinit(allocator);
+    defer stamp.deinit();
 
     const hash = try computeTrackedHash(allocator, project_dir, env_name, env_cfg);
     defer allocator.free(hash);
-    try writeStamp(allocator, venv_path, hash, stamp.flags);
+    try writeStamp(allocator, venv_path, hash, stamp.value.flags);
 }
 
 /// True when the gate would rebuild the env. Never builds: for callers that
@@ -400,7 +343,7 @@ pub fn isStale(allocator: Allocator, entry: *const config.RegistryEntry) !bool {
     switch (try drift(allocator, entry)) {
         .none => return false,
         .changed => |stamp| {
-            stamp.deinit(allocator);
+            stamp.deinit();
             return true;
         },
         .unstamped => return true,
@@ -536,6 +479,27 @@ test "computeTrackedHash tracks dependency_file presence" {
     try testing.expect(!std.mem.eql(u8, h_absent, h_present));
 }
 
+test "computeTrackedHash format is stable" {
+    // Pins the digest: a format change rebuilds every existing env once.
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const dir = try testDir(a, "ch3");
+    defer cleanup(a, dir);
+    try writeAt(a, dir, "zenv.json", test_config_b);
+    try writeAt(a, dir, "requirements.txt", "numpy\n");
+    try writeAt(a, dir, "setup.sh", "echo hi\n");
+
+    var env_cfg = config.EnvironmentConfig.init(a);
+    defer env_cfg.deinit();
+    env_cfg.dependency_file = try a.dupe(u8, "requirements.txt");
+    env_cfg.modules_file = try a.dupe(u8, "modules.txt"); // absent
+    env_cfg.setup = .{ .script = try std.Io.Dir.path.join(a, &[_][]const u8{ dir, "setup.sh" }) }; // absolute
+
+    const h = try computeTrackedHash(a, dir, "zenv-test", &env_cfg);
+    defer a.free(h);
+    try testing.expectEqualStrings("ad1f98e6f973b6566a7791da680347e8d7a499d0", h);
+}
+
 test "stamp round-trips and tolerates bad input" {
     test_support.setupRuntime();
     const a = testing.allocator;
@@ -546,11 +510,11 @@ test "stamp round-trips and tolerates bad input" {
     try writeStamp(a, dir, "deadbeef", &in_flags);
 
     const got = readStamp(a, dir).?;
-    defer got.deinit(a);
-    try testing.expectEqualStrings("deadbeef", got.hash);
-    try testing.expectEqual(@as(usize, 2), got.flags.len);
-    try testing.expectEqualStrings("--uv", got.flags[0]);
-    try testing.expectEqualStrings("--no-cache", got.flags[1]);
+    defer got.deinit();
+    try testing.expectEqualStrings("deadbeef", got.value.hash);
+    try testing.expectEqual(@as(usize, 2), got.value.flags.len);
+    try testing.expectEqualStrings("--uv", got.value.flags[0]);
+    try testing.expectEqualStrings("--no-cache", got.value.flags[1]);
 
     const empty = try testDir(a, "stamp_empty");
     defer cleanup(a, empty);
@@ -561,6 +525,11 @@ test "stamp round-trips and tolerates bad input" {
 
     try writeAt(a, empty, STAMP_NAME, "{\"version\":999,\"hash\":\"x\",\"flags\":[]}");
     try testing.expect(readStamp(a, empty) == null); // wrong version
+
+    try writeAt(a, empty, STAMP_NAME, "{\"version\":1,\"hash\":\"x\"}");
+    const no_flags = readStamp(a, empty).?; // flags are optional
+    defer no_flags.deinit();
+    try testing.expectEqual(@as(usize, 0), no_flags.value.flags.len);
 }
 
 test "flagTokens emits only build-affecting flags" {

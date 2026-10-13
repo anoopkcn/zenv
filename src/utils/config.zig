@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
-const mem = std.mem;
 const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
@@ -41,13 +40,6 @@ pub const ScriptConfig = struct {
     commands: ?ArrayList([]const u8) = null,
     script: ?[]const u8 = null,
 
-    pub fn init() ScriptConfig {
-        return .{
-            .commands = null,
-            .script = null,
-        };
-    }
-
     pub fn deinit(self: *ScriptConfig, allocator: Allocator) void {
         if (self.commands) |*cmds| {
             for (cmds.items) |item| allocator.free(item);
@@ -71,16 +63,16 @@ pub const EnvVar = struct {
 pub const EnvironmentConfig = struct {
     /// Every owned string and list in this config is allocated with `allocator`.
     allocator: Allocator,
-    target_machines: ArrayList([]const u8),
+    target_machines: ArrayList([]const u8) = .empty,
     description: ?[]const u8 = null,
-    modules: ArrayList([]const u8),
+    modules: ArrayList([]const u8) = .empty,
     modules_file: ?[]const u8 = null,
     dependency_file: ?[]const u8 = null,
-    dependencies: ArrayList([]const u8),
+    dependencies: ArrayList([]const u8) = .empty,
     // Development-only dependencies recorded in zenv.json. Installed alongside
     // `dependencies` during setup, but kept separate so `zenv add --dev` can
     // track them apart from runtime deps (and from any dependency_file).
-    dev_dependencies: ArrayList([]const u8),
+    dev_dependencies: ArrayList([]const u8) = .empty,
     fallback_python: ?[]const u8 = null,
     setup: ?ScriptConfig = null,
     activate: ?ScriptConfig = null,
@@ -97,13 +89,7 @@ pub const EnvironmentConfig = struct {
     env: ArrayList(EnvVar) = .empty,
 
     pub fn init(allocator: Allocator) EnvironmentConfig {
-        return .{
-            .allocator = allocator,
-            .target_machines = .empty,
-            .modules = .empty,
-            .dependencies = .empty,
-            .dev_dependencies = .empty,
-        };
+        return .{ .allocator = allocator };
     }
 
     fn freeList(allocator: Allocator, list: *ArrayList([]const u8)) void {
@@ -155,55 +141,19 @@ pub const ZenvConfig = struct {
 };
 
 // =======================
-// Parsing Helpers
-// =======================
-
-// Field-extraction primitives shared by the single parse-and-validate seam in
-// validation.zig. Generic (no schema knowledge); the schema lives in that walk.
-pub const Parse = struct {
-    pub fn getStringArray(allocator: Allocator, value: json.Value) !ArrayList([]const u8) {
-        var result: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (result.items) |item| allocator.free(item);
-            result.deinit(allocator);
-        }
-
-        switch (value) {
-            .array => |array| {
-                try result.ensureTotalCapacityPrecise(allocator, array.items.len);
-                for (array.items) |item| {
-                    if (item == .string) {
-                        try result.append(allocator, try allocator.dupe(u8, item.string));
-                    }
-                }
-            },
-            .string => |str| {
-                try result.append(allocator, try allocator.dupe(u8, str));
-            },
-            else => {},
-        }
-
-        return result;
-    }
-};
-
-// =======================
 // RegistryEntry & Registry
 // =======================
 
-pub const AliasEntry = struct {
-    alias: []const u8,
-    env_name: []const u8,
-};
-
+/// One registered environment; every string is owned. The empty defaults let a
+/// partly built entry be deinit'd safely.
 pub const RegistryEntry = struct {
-    id: []const u8, // SHA-1 unique identifier
-    env_name: []const u8,
-    project_dir: []const u8,
+    id: []const u8 = "", // SHA-1 unique identifier
+    env_name: []const u8 = "",
+    project_dir: []const u8 = "",
     description: ?[]const u8 = null,
-    target_machines_str: []const u8,
-    venv_path: []const u8,
-    aliases: ArrayList([]const u8),
+    target_machines_str: []const u8 = "",
+    venv_path: []const u8 = "",
+    aliases: ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *RegistryEntry, allocator: Allocator) void {
         allocator.free(self.id);
@@ -216,17 +166,6 @@ pub const RegistryEntry = struct {
             allocator.free(alias);
         }
         self.aliases.deinit(allocator);
-    }
-};
-
-// Python interpreter that built a venv, read from <venv>/pyvenv.cfg.
-pub const VenvPythonInfo = struct {
-    version: []const u8,
-    path: ?[]const u8, // best-available interpreter path; may be null
-
-    pub fn deinit(self: *VenvPythonInfo, allocator: Allocator) void {
-        allocator.free(self.version);
-        if (self.path) |p| allocator.free(p);
     }
 };
 
@@ -271,10 +210,11 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
     return .{ .version = version, .path = path };
 }
 
-// Reads <venv_path>/pyvenv.cfg and returns the Python version + interpreter path
-// used to build the venv. Returns null if the file is absent/unreadable (env not
-// built) or has no `version`. Caller owns the returned strings (call deinit).
-pub fn readVenvPythonInfo(allocator: Allocator, venv_path: []const u8) !?VenvPythonInfo {
+// Reads <venv_path>/pyvenv.cfg and returns the Python that built the venv: its
+// interpreter path, or its version when no path is recorded. Returns null if
+// the file is absent/unreadable (env not built) or has no `version`. Caller
+// owns the result.
+pub fn readVenvPython(allocator: Allocator, venv_path: []const u8) !?[]u8 {
     const cfg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "pyvenv.cfg" });
     defer allocator.free(cfg_path);
 
@@ -286,25 +226,22 @@ pub fn readVenvPythonInfo(allocator: Allocator, venv_path: []const u8) !?VenvPyt
 
     const fields = parsePyvenvCfg(content);
     const version = fields.version orelse return null;
-
-    return VenvPythonInfo{
-        .version = try allocator.dupe(u8, version),
-        .path = if (fields.path) |p| try allocator.dupe(u8, p) else null,
-    };
+    return try allocator.dupe(u8, fields.path orelse version);
 }
 
-// Helper struct for JSON serialization
+// registry.json as written by save and read back by load. On read, a missing
+// id or venv_path is rebuilt (registries from older zenv versions).
 const RegistryJSON = struct {
     environments: []const RegistryEntryJSON,
 
     const RegistryEntryJSON = struct {
-        id: []const u8,
+        id: ?[]const u8 = null,
         name: []const u8,
         project_dir: []const u8,
         target_machine: []const u8,
-        venv_path: []const u8,
+        venv_path: ?[]const u8 = null,
         description: ?[]const u8 = null,
-        aliases: []const []const u8,
+        aliases: []const []const u8 = &.{},
     };
 };
 
@@ -331,7 +268,7 @@ pub const EnvironmentRegistry = struct {
         // Read first and only create ZENV_DIR when the registry is missing:
         // every command loads the registry, so the common path stays a single
         // file read instead of a mkdir round-trip per invocation.
-        const registry_path = try paths.getRegistryPath(allocator);
+        const registry_path = try paths.zenvPath(allocator, "registry.json");
         defer allocator.free(registry_path);
 
         // Read the registry file (creating an empty one if it does not exist yet)
@@ -345,115 +282,36 @@ pub const EnvironmentRegistry = struct {
         };
         defer allocator.free(file_content);
 
-        // Strings may borrow from `file_content` (it outlives `parsed`); every
-        // field kept below is duped into `allocator` anyway.
-        const parsed = try json.parseFromSlice(json.Value, allocator, file_content, .{
-            .allocate = .alloc_if_needed,
-        });
-        defer parsed.deinit();
-
-        // Process the parsed data
-        const root = parsed.value;
+        // Parsed into a scratch arena; every field kept below is duped into
+        // `allocator`.
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const root = try json.parseFromSliceLeaky(json.Value, arena.allocator(), file_content, .{});
         if (root != .object) return error.InvalidRegistryFormat;
-        if (root.object.get("environments")) |environments| {
-            if (environments != .array) return error.InvalidRegistryFormat;
+        const environments = root.object.get("environments") orelse return registry;
+        if (environments != .array) return error.InvalidRegistryFormat;
 
-            try registry.entries.ensureTotalCapacityPrecise(allocator, environments.array.items.len);
+        try registry.entries.ensureTotalCapacityPrecise(allocator, environments.array.items.len);
+        for (environments.array.items) |value| {
+            const e = json.parseFromValueLeaky(RegistryJSON.RegistryEntryJSON, arena.allocator(), value, .{
+                .ignore_unknown_fields = true,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue, // not an entry zenv wrote; skip it
+            };
 
-            for (environments.array.items) |entry_value| {
-                if (entry_value != .object) continue;
-
-                const entry_obj = entry_value.object;
-
-                // Extract required fields
-                const env_name_val = entry_obj.get("name") orelse continue;
-                if (env_name_val != .string) continue;
-                const env_name = env_name_val.string;
-
-                const project_dir_val = entry_obj.get("project_dir") orelse continue;
-                if (project_dir_val != .string) continue;
-                const project_dir = project_dir_val.string;
-
-                const target_machines_val = entry_obj.get("target_machine") orelse continue;
-                if (target_machines_val != .string) continue;
-                const target_machines = target_machines_val.string;
-
-                // Make duplicates for the registry
-                const env_name_owned = try allocator.dupe(u8, env_name);
-                errdefer allocator.free(env_name_owned);
-
-                const project_dir_owned = try allocator.dupe(u8, project_dir);
-                errdefer allocator.free(project_dir_owned);
-
-                const target_machines_str = try allocator.dupe(u8, target_machines);
-                errdefer allocator.free(target_machines_str);
-
-                // Handle optional description
-                var description: ?[]const u8 = null;
-                if (entry_obj.get("description")) |desc_value| {
-                    if (desc_value == .string) {
-                        description = try allocator.dupe(u8, desc_value.string);
-                    }
-                }
-                errdefer if (description) |desc| allocator.free(desc);
-
-                // Get or generate ID
-                var id_owned: []const u8 = undefined;
-                if (entry_obj.get("id")) |id_value| {
-                    if (id_value == .string) {
-                        id_owned = try allocator.dupe(u8, id_value.string);
-                    } else {
-                        id_owned = try generateSHA1ID(allocator, env_name_owned, project_dir_owned, target_machines_str);
-                    }
-                } else {
-                    id_owned = try generateSHA1ID(allocator, env_name_owned, project_dir_owned, target_machines_str);
-                }
-                errdefer allocator.free(id_owned);
-
-                // Get venv_path
-                const venv_path_owned: []const u8 = blk: {
-                    if (entry_obj.get("venv_path")) |venv_path_val| {
-                        if (venv_path_val == .string) {
-                            break :blk try allocator.dupe(u8, venv_path_val.string);
-                        }
-                    }
-
-                    // Default reconstruction
-                    break :blk try std.Io.Dir.path.join(allocator, &[_][]const u8{
-                        project_dir_owned, "zenv", env_name_owned,
-                    });
-                };
-                errdefer allocator.free(venv_path_owned);
-
-                // Initialize aliases list for this entry
-                var aliases: std.ArrayList([]const u8) = .empty;
-
-                // Load aliases if they exist for this entry
-                if (entry_obj.get("aliases")) |aliases_value| {
-                    if (aliases_value == .array) {
-                        for (aliases_value.array.items) |alias_value| {
-                            if (alias_value == .string) {
-                                const alias_owned = try allocator.dupe(u8, alias_value.string);
-                                errdefer allocator.free(alias_owned);
-                                try aliases.append(allocator, alias_owned);
-                            }
-                        }
-                    }
-                }
-
-                // Add entry to registry
-                try registry.entries.append(allocator, .{
-                    .id = id_owned,
-                    .env_name = env_name_owned,
-                    .project_dir = project_dir_owned,
-                    .description = description,
-                    .target_machines_str = target_machines_str,
-                    .venv_path = venv_path_owned,
-                    .aliases = aliases,
-                });
-            }
+            var entry: RegistryEntry = .{};
+            errdefer entry.deinit(allocator);
+            entry.env_name = try allocator.dupe(u8, e.name);
+            entry.project_dir = try allocator.dupe(u8, e.project_dir);
+            entry.target_machines_str = try allocator.dupe(u8, e.target_machine);
+            if (e.description) |desc| entry.description = try allocator.dupe(u8, desc);
+            entry.id = if (e.id) |id| try allocator.dupe(u8, id) else try generateSHA1ID(allocator, e.name, e.project_dir, e.target_machine);
+            entry.venv_path = if (e.venv_path) |p| try allocator.dupe(u8, p) else try std.Io.Dir.path.join(allocator, &[_][]const u8{ e.project_dir, "zenv", e.name });
+            try entry.aliases.ensureTotalCapacityPrecise(allocator, e.aliases.len);
+            for (e.aliases) |alias| entry.aliases.appendAssumeCapacity(try allocator.dupe(u8, alias));
+            registry.entries.appendAssumeCapacity(entry);
         }
-
         return registry;
     }
 
@@ -465,9 +323,7 @@ pub const EnvironmentRegistry = struct {
     /// setup). Entries, refs and borrowed strings from before are invalid
     /// afterwards. Finish with `endUpdate`.
     fn beginUpdate(self: *EnvironmentRegistry) !std.Io.File {
-        const zenv_dir = try paths.ensureZenvDir(self.allocator);
-        defer self.allocator.free(zenv_dir);
-        const lock_path = try std.Io.Dir.path.join(self.allocator, &.{ zenv_dir, "registry.lock" });
+        const lock_path = try paths.ensureZenvPath(self.allocator, "registry.lock");
         defer self.allocator.free(lock_path);
 
         var file = try runtime.createFile(lock_path, .{ .truncate = false });
@@ -494,10 +350,7 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn save(self: *const EnvironmentRegistry) !void {
-        const zenv_dir_path = try paths.ensureZenvDir(self.allocator);
-        defer self.allocator.free(zenv_dir_path);
-
-        const registry_path = try std.Io.Dir.path.join(self.allocator, &.{ zenv_dir_path, "registry.json" });
+        const registry_path = try paths.ensureZenvPath(self.allocator, "registry.json");
         defer self.allocator.free(registry_path);
 
         // Build a plain serializable view of the registry and let std.json
@@ -534,8 +387,8 @@ pub const EnvironmentRegistry = struct {
 
     /// Adds (or updates) the entry for `env_name` and persists registry.json,
     /// matching deregister/rename: every mutator saves, so callers cannot
-    /// forget. Transactional like rename: if the save fails, the in-memory
-    /// registry is rolled back and the error returned.
+    /// forget. If the save fails the error is returned and the in-memory
+    /// registry keeps the (consistently owned) change; callers then stop.
     pub fn register(
         self: *EnvironmentRegistry,
         env_name: []const u8,
@@ -546,85 +399,42 @@ pub const EnvironmentRegistry = struct {
     ) !void {
         const lock = try self.beginUpdate();
         defer endUpdate(lock);
+        try self.upsert(env_name, project_dir, base_dir, description, target_machines);
+        try self.save();
+    }
 
-        var registry_target_machines_str: []const u8 = undefined;
-        if (target_machines.len == 0) {
-            registry_target_machines_str = try self.allocator.dupe(u8, "any");
-        } else if (target_machines.len == 1) {
-            registry_target_machines_str = try self.allocator.dupe(u8, target_machines[0]);
-        } else {
-            // Use efficient string joining
-            registry_target_machines_str = try std.mem.join(self.allocator, ", ", target_machines);
-        }
-        errdefer self.allocator.free(registry_target_machines_str);
+    /// In-memory part of register: an existing entry keeps its name, id and
+    /// aliases and takes the new location, description and targets; otherwise
+    /// a new entry is appended.
+    fn upsert(
+        self: *EnvironmentRegistry,
+        env_name: []const u8,
+        project_dir: []const u8,
+        base_dir: []const u8,
+        description: ?[]const u8,
+        target_machines: []const []const u8,
+    ) !void {
+        const a = self.allocator;
+        var new: RegistryEntry = .{};
+        errdefer new.deinit(a);
+        new.project_dir = try a.dupe(u8, project_dir);
+        if (description) |desc| new.description = try a.dupe(u8, desc);
+        new.target_machines_str = if (target_machines.len == 0) try a.dupe(u8, "any") else try std.mem.join(a, ", ", target_machines);
+        new.venv_path = try paths.venvPath(a, project_dir, base_dir, env_name);
 
-        const venv_path = try paths.venvPath(self.allocator, project_dir, base_dir, env_name);
-        errdefer self.allocator.free(venv_path);
-
-        // Check for existing entry
         for (self.entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.env_name, env_name)) {
-                // Update in place. Allocate every replacement BEFORE freeing or
-                // swapping anything, and keep the old pointers for rollback, so
-                // neither an allocation failure mid-update nor a failed save can
-                // leave the entry pointing at freed memory.
-                const new_project_dir = try self.allocator.dupe(u8, project_dir);
-                errdefer self.allocator.free(new_project_dir);
-                const new_description: ?[]const u8 = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
-                errdefer if (new_description) |desc| self.allocator.free(desc);
-
-                const old_project_dir = entry.project_dir;
-                const old_description = entry.description;
-                const old_target_machines = entry.target_machines_str;
-                const old_venv_path = entry.venv_path;
-
-                entry.project_dir = new_project_dir;
-                entry.description = new_description;
-                entry.target_machines_str = registry_target_machines_str;
-                entry.venv_path = venv_path;
-
-                self.save() catch |err| {
-                    entry.project_dir = old_project_dir;
-                    entry.description = old_description;
-                    entry.target_machines_str = old_target_machines;
-                    entry.venv_path = old_venv_path;
-                    return err; // errdefers free the orphaned new strings
-                };
-
-                self.allocator.free(old_project_dir);
-                if (old_description) |desc| self.allocator.free(desc);
-                self.allocator.free(old_target_machines);
-                self.allocator.free(old_venv_path);
-                return;
-            }
+            if (!matches(entry.*, .name, env_name)) continue;
+            // `new` takes the replaced strings and frees them.
+            std.mem.swap([]const u8, &entry.project_dir, &new.project_dir);
+            std.mem.swap(?[]const u8, &entry.description, &new.description);
+            std.mem.swap([]const u8, &entry.target_machines_str, &new.target_machines_str);
+            std.mem.swap([]const u8, &entry.venv_path, &new.venv_path);
+            new.deinit(a);
+            return;
         }
-
-        // Create new entry
-        const id = try generateSHA1ID(self.allocator, env_name, project_dir, registry_target_machines_str);
-        errdefer self.allocator.free(id);
-        const env_name_owned = try self.allocator.dupe(u8, env_name);
-        errdefer self.allocator.free(env_name_owned);
-        const project_dir_owned = try self.allocator.dupe(u8, project_dir);
-        errdefer self.allocator.free(project_dir_owned);
-        const description_owned: ?[]const u8 = if (description) |desc| try self.allocator.dupe(u8, desc) else null;
-        errdefer if (description_owned) |desc| self.allocator.free(desc);
-
-        try self.entries.append(self.allocator, .{
-            .id = id,
-            .env_name = env_name_owned,
-            .project_dir = project_dir_owned,
-            .description = description_owned,
-            .target_machines_str = registry_target_machines_str,
-            .venv_path = venv_path,
-            .aliases = .empty,
-        });
-
-        self.save() catch |err| {
-            // Detach the just-appended entry; the errdefers above free its
-            // strings exactly once (its alias list never allocated).
-            _ = self.entries.orderedRemove(self.entries.items.len - 1);
-            return err;
-        };
+        new.env_name = try a.dupe(u8, env_name);
+        new.id = try generateSHA1ID(a, env_name, project_dir, new.target_machines_str);
+        try self.entries.append(a, new);
     }
 
     /// Structural removal by ref. CONSUMES the ref and RETURNS the owned,
@@ -637,12 +447,9 @@ pub const EnvironmentRegistry = struct {
         const lock = try self.beginUpdate();
         defer endUpdate(lock);
 
-        const removed = self.entries.orderedRemove(try self.indexOfId(id));
-        self.save() catch |err| {
-            var tmp = removed;
-            tmp.deinit(self.allocator);
-            return err;
-        };
+        var removed = self.entries.orderedRemove(try self.indexOfId(id));
+        errdefer removed.deinit(self.allocator);
+        try self.save();
         return removed;
     }
 
@@ -651,39 +458,55 @@ pub const EnvironmentRegistry = struct {
     /// removal (deregister), and does not outlive a reload of the registry.
     pub const EnvRef = struct { idx: usize };
 
-    /// How a candidate set is recognized when host-disambiguating a tie.
-    const CandidateKind = enum { project_dir, alias };
+    /// What an identifier is matched against: "." matches project_dir, any
+    /// other identifier tries name -> alias -> exact id -> 7+ char id prefix.
+    const MatchKind = enum { project_dir, name, alias, id, id_prefix };
 
-    /// Tie-breaker for the host-aware branches ("." and shared alias). Among the
-    /// candidates identified by (kind, key), return the single one whose
-    /// target_machines matches `hostname`. Pure, allocation-free. A tie the host
-    /// cannot break — null hostname, or 0 / >1 survivors — is `AmbiguousIdentifier`.
-    fn pickByHost(
+    fn matches(entry: RegistryEntry, kind: MatchKind, key: []const u8) bool {
+        return switch (kind) {
+            .project_dir => std.mem.eql(u8, entry.project_dir, key),
+            .name => std.mem.eql(u8, entry.env_name, key),
+            .alias => for (entry.aliases.items) |alias| {
+                if (std.mem.eql(u8, alias, key)) break true;
+            } else false,
+            .id => std.mem.eql(u8, entry.id, key),
+            .id_prefix => key.len >= 7 and std.mem.startsWith(u8, entry.id, key),
+        };
+    }
+
+    const Tally = struct { first: ?usize = null, count: usize = 0 };
+
+    /// The entries matching (kind, key), restricted to those whose
+    /// target_machines match `on_host` when it is non-null.
+    fn tally(self: *const EnvironmentRegistry, kind: MatchKind, key: []const u8, on_host: ?[]const u8) Tally {
+        var t: Tally = .{};
+        for (self.entries.items, 0..) |entry, i| {
+            if (!matches(entry, kind, key)) continue;
+            if (on_host) |hn| if (!host.hostMatchesTargets(hn, entry.target_machines_str)) continue;
+            t.count += 1;
+            if (t.first == null) t.first = i;
+        }
+        return t;
+    }
+
+    /// The one entry matching (kind, key), or null when none does. Names and
+    /// ids are unique, so the first match wins. Several project_dir or alias
+    /// matches (per-machine envs sharing a project or an alias) are narrowed to
+    /// the one whose target_machines matches `hostname`; a tie the host cannot
+    /// break (null hostname, 0 or >1 survivors) is `AmbiguousIdentifier`, and
+    /// so is a 7+ char id prefix matching several ids (host-blind, a typo case).
+    fn unique(
         self: *const EnvironmentRegistry,
-        kind: CandidateKind,
+        kind: MatchKind,
         key: []const u8,
         hostname: ?[]const u8,
-    ) error{AmbiguousIdentifier}!EnvRef {
-        const hn = hostname orelse return error.AmbiguousIdentifier;
-        var pick: ?usize = null;
-        var matches: usize = 0;
-        for (self.entries.items, 0..) |entry, i| {
-            const is_candidate = switch (kind) {
-                .project_dir => std.mem.eql(u8, entry.project_dir, key),
-                .alias => blk: {
-                    for (entry.aliases.items) |a| {
-                        if (std.mem.eql(u8, a, key)) break :blk true;
-                    }
-                    break :blk false;
-                },
-            };
-            if (is_candidate and host.hostMatchesTargets(hn, entry.target_machines_str)) {
-                matches += 1;
-                if (pick == null) pick = i;
-            }
-        }
-        if (matches == 1) return .{ .idx = pick.? };
-        return error.AmbiguousIdentifier;
+    ) error{AmbiguousIdentifier}!?EnvRef {
+        const all = self.tally(kind, key, null);
+        if (all.count <= 1 or kind == .name or kind == .id) return if (all.first) |i| .{ .idx = i } else null;
+        if (kind == .id_prefix) return error.AmbiguousIdentifier;
+        const on_host = self.tally(kind, key, hostname orelse return error.AmbiguousIdentifier);
+        if (on_host.count != 1) return error.AmbiguousIdentifier;
+        return .{ .idx = on_host.first.? };
     }
 
     /// Pure resolution core (internal seam). No I/O, no printing. Maps an
@@ -691,77 +514,21 @@ pub const EnvironmentRegistry = struct {
     ///   "." (project_dir == cwd) -> name -> alias -> exact id -> unique 7+ prefix.
     /// `cwd` must be non-null when `identifier` is "."; pass null otherwise.
     /// `hostname`, when non-null, breaks a tie in the host-aware branches ("." and
-    /// a shared alias) by selecting the candidate whose target_machines matches the
-    /// host (see `pickByHost`). Ambiguity (a prefix matching >1, or a "."/alias the
-    /// host can't narrow to one) is distinct from not-found.
+    /// a shared alias), see `unique`. Ambiguity (a prefix matching >1, or a
+    /// "."/alias the host can't narrow to one) is distinct from not-found.
     fn resolveAgainstCwd(
         self: *const EnvironmentRegistry,
         identifier: []const u8,
         cwd: ?[]const u8,
         hostname: ?[]const u8,
     ) error{ EnvironmentNotRegistered, AmbiguousIdentifier }!EnvRef {
-        // 1. "." -> the entry whose project_dir == cwd (host-disambiguated when >1,
-        //    e.g. per-machine envs sharing one project on a shared filesystem).
         if (std.mem.eql(u8, identifier, ".")) {
             const dir = cwd orelse return error.EnvironmentNotRegistered;
-            var found: ?usize = null;
-            var count: usize = 0;
-            for (self.entries.items, 0..) |entry, i| {
-                if (std.mem.eql(u8, entry.project_dir, dir)) {
-                    count += 1;
-                    if (found == null) found = i;
-                }
-            }
-            if (count == 0) return error.EnvironmentNotRegistered;
-            if (count == 1) return .{ .idx = found.? };
-            return self.pickByHost(.project_dir, dir, hostname);
+            return try self.unique(.project_dir, dir, hostname) orelse error.EnvironmentNotRegistered;
         }
-
-        // 2. exact env_name
-        for (self.entries.items, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.env_name, identifier)) return .{ .idx = i };
+        for ([_]MatchKind{ .name, .alias, .id, .id_prefix }) |kind| {
+            if (try self.unique(kind, identifier, hostname)) |ref| return ref;
         }
-
-        // 3. alias -> its entry (a single holder resolves regardless of host; a
-        //    shared alias is host-disambiguated, else ambiguous).
-        {
-            var found: ?usize = null;
-            var count: usize = 0;
-            for (self.entries.items, 0..) |entry, i| {
-                for (entry.aliases.items) |alias| {
-                    if (std.mem.eql(u8, alias, identifier)) {
-                        count += 1;
-                        if (found == null) found = i;
-                        break;
-                    }
-                }
-            }
-            if (count == 1) return .{ .idx = found.? };
-            if (count > 1) return self.pickByHost(.alias, identifier, hostname);
-            // count == 0: not an alias; fall through to id matching.
-        }
-
-        // 4. exact id
-        for (self.entries.items, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.id, identifier)) return .{ .idx = i };
-        }
-
-        // 5. unique 7+ char id prefix (>1 match -> ambiguous; host-blind, a typo case)
-        if (identifier.len >= 7) {
-            var found: ?usize = null;
-            var count: usize = 0;
-            for (self.entries.items, 0..) |entry, i| {
-                if (entry.id.len >= identifier.len and
-                    std.mem.eql(u8, entry.id[0..identifier.len], identifier))
-                {
-                    count += 1;
-                    if (found == null) found = i;
-                }
-            }
-            if (count == 1) return .{ .idx = found.? };
-            if (count > 1) return error.AmbiguousIdentifier;
-        }
-
         return error.EnvironmentNotRegistered;
     }
 
@@ -823,36 +590,18 @@ pub const EnvironmentRegistry = struct {
         var list: std.ArrayList(Candidate) = .empty;
         errdefer list.deinit(allocator);
 
-        if (std.mem.eql(u8, identifier, ".")) {
-            const cwd = runtime.cwdRealpath(allocator) catch return list.toOwnedSlice(allocator);
-            defer allocator.free(cwd);
+        const dot = std.mem.eql(u8, identifier, ".");
+        const cwd = if (dot) runtime.cwdRealpath(allocator) catch return list.toOwnedSlice(allocator) else null;
+        defer if (cwd) |dir| allocator.free(dir);
+        // "." lists the envs of this project; anything else a shared alias's
+        // holders, or failing that the ids a non-unique 7+ prefix matches.
+        const kinds: []const MatchKind = if (dot) &.{.project_dir} else &.{ .alias, .id_prefix };
+        for (kinds) |kind| {
             for (self.entries.items) |entry| {
-                if (std.mem.eql(u8, entry.project_dir, cwd))
+                if (matches(entry, kind, cwd orelse identifier))
                     try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
             }
-            return list.toOwnedSlice(allocator);
-        }
-
-        // A shared alias matched by more than one environment.
-        for (self.entries.items) |entry| {
-            for (entry.aliases.items) |alias| {
-                if (std.mem.eql(u8, alias, identifier)) {
-                    try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
-                    break;
-                }
-            }
-        }
-        if (list.items.len > 0) return list.toOwnedSlice(allocator);
-
-        // A non-unique 7+ id-prefix.
-        if (identifier.len >= 7) {
-            for (self.entries.items) |entry| {
-                if (entry.id.len >= identifier.len and
-                    std.mem.eql(u8, entry.id[0..identifier.len], identifier))
-                {
-                    try list.append(allocator, .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str });
-                }
-            }
+            if (list.items.len > 0) break;
         }
         return list.toOwnedSlice(allocator);
     }
@@ -869,20 +618,17 @@ pub const EnvironmentRegistry = struct {
         const lock = try self.beginUpdate();
         defer endUpdate(lock);
 
-        const entry = try self.attachAlias(alias_name, env_name);
-        self.save() catch |err| {
-            self.allocator.free(entry.aliases.pop().?);
-            return err;
-        };
+        try self.attachAlias(alias_name, env_name);
+        try self.save();
     }
 
-    /// In-memory part of addAlias; returns the entry that got the alias.
-    fn attachAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !*RegistryEntry {
+    /// In-memory part of addAlias.
+    fn attachAlias(self: *EnvironmentRegistry, alias_name: []const u8, env_name: []const u8) !void {
         // Reject an alias that would shadow an existing environment name. Resolution
         // is name-first, so without this guard such an alias would be unreachable
         // and confusing; forbidding it keeps name and alias namespaces disjoint.
         for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.env_name, alias_name)) return error.AliasAlreadyExists;
+            if (matches(entry, .name, alias_name)) return error.AliasAlreadyExists;
         }
 
         // Find the target environment and attach the alias. A given alias MAY be
@@ -890,14 +636,12 @@ pub const EnvironmentRegistry = struct {
         // by the current machine (see resolveAgainstCwd) — so an alias already used
         // by ANOTHER entry is not rejected; only re-adding it to the SAME entry is.
         for (self.entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.env_name, env_name)) {
-                for (entry.aliases.items) |alias| {
-                    if (std.mem.eql(u8, alias, alias_name)) return error.AliasAlreadyExists;
-                }
+            if (matches(entry.*, .name, env_name)) {
+                if (matches(entry.*, .alias, alias_name)) return error.AliasAlreadyExists;
                 const alias_name_owned = try self.allocator.dupe(u8, alias_name);
                 errdefer self.allocator.free(alias_name_owned);
                 try entry.aliases.append(self.allocator, alias_name_owned);
-                return entry;
+                return;
             }
         }
         return error.EnvironmentNotFound;
@@ -931,34 +675,19 @@ pub const EnvironmentRegistry = struct {
         return removed;
     }
 
+    /// The name of the first environment holding alias `identifier`, or null.
     pub fn resolveAlias(self: *const EnvironmentRegistry, identifier: []const u8) ?[]const u8 {
         for (self.entries.items) |entry| {
-            for (entry.aliases.items) |alias| {
-                if (std.mem.eql(u8, alias, identifier)) {
-                    return entry.env_name;
-                }
-            }
+            if (matches(entry, .alias, identifier)) return entry.env_name;
         }
         return null;
     }
 
-    pub fn listAliases(self: *const EnvironmentRegistry, allocator: Allocator) !ArrayList(AliasEntry) {
-        var aliases: std.ArrayList(AliasEntry) = .empty;
-
-        for (self.entries.items) |entry| {
-            for (entry.aliases.items) |alias| {
-                try aliases.append(allocator, .{ .alias = alias, .env_name = entry.env_name });
-            }
-        }
-
-        return aliases;
-    }
-
     /// Field-mutates the entry at `ref` (env_name, venv_path, recomputed id) in
     /// place and persists. `ref` is updated to the entry's index in the
-    /// re-read registry, so a caller's rollback is `rename(ref, old_name)`. Transactional w.r.t. the
-    /// in-memory registry: if the save fails, the in-memory mutation is rolled
-    /// back and the error returned. Does NOT move the venv directory or touch
+    /// re-read registry, so a caller's rollback is `rename(ref, old_name)`. If
+    /// the save fails the error is returned and the in-memory registry keeps
+    /// the change; callers then stop. Does NOT move the venv directory or touch
     /// Jupyter kernels — that orchestration stays in the command.
     pub fn rename(self: *EnvironmentRegistry, ref: *EnvRef, new_name: []const u8) !void {
         if (!paths.isValidEnvName(new_name)) return error.InvalidEnvironmentName;
@@ -967,7 +696,8 @@ pub const EnvironmentRegistry = struct {
         const lock = try self.beginUpdate();
         defer endUpdate(lock);
         ref.* = .{ .idx = try self.indexOfId(id) };
-        return self.renameAt(ref.*, new_name);
+        try self.renameAt(ref.*, new_name);
+        try self.save();
     }
 
     /// Whether `name` already resolves to an entry (name, alias, exact id, or
@@ -980,40 +710,24 @@ pub const EnvironmentRegistry = struct {
         return true;
     }
 
-    /// rename's work on an up-to-date registry: uniqueness, mutation, save.
+    /// In-memory part of rename, on an up-to-date registry: uniqueness check,
+    /// then the new name, venv path and id.
     fn renameAt(self: *EnvironmentRegistry, ref: EnvRef, new_name: []const u8) !void {
         if (self.nameTaken(new_name)) return error.EnvironmentAlreadyExists;
-
+        const a = self.allocator;
         const entry = &self.entries.items[ref.idx];
         const parent_dir = std.Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
 
-        const new_venv = try std.Io.Dir.path.join(self.allocator, &[_][]const u8{ parent_dir, new_name });
-        errdefer self.allocator.free(new_venv);
-        const new_id = try generateSHA1ID(self.allocator, new_name, entry.project_dir, entry.target_machines_str);
-        errdefer self.allocator.free(new_id);
-        const new_name_owned = try self.allocator.dupe(u8, new_name);
-        errdefer self.allocator.free(new_name_owned);
-
-        // Swap in the new strings, keeping the old pointers for rollback.
-        const old_name_ptr = entry.env_name;
-        const old_venv_ptr = entry.venv_path;
-        const old_id_ptr = entry.id;
-        entry.env_name = new_name_owned;
-        entry.venv_path = new_venv;
-        entry.id = new_id;
-
-        self.save() catch |err| {
-            // Restore the in-memory state; the errdefers free the orphaned new_*.
-            entry.env_name = old_name_ptr;
-            entry.venv_path = old_venv_ptr;
-            entry.id = old_id_ptr;
-            return err;
-        };
-
-        // Persisted: the entry owns the new strings now; free the replaced olds.
-        self.allocator.free(old_name_ptr);
-        self.allocator.free(old_venv_ptr);
-        self.allocator.free(old_id_ptr);
+        // Built in full before anything is swapped; it ends up holding (and
+        // freeing) the replaced strings.
+        var new: RegistryEntry = .{};
+        defer new.deinit(a);
+        new.venv_path = try std.Io.Dir.path.join(a, &[_][]const u8{ parent_dir, new_name });
+        new.id = try generateSHA1ID(a, new_name, entry.project_dir, entry.target_machines_str);
+        new.env_name = try a.dupe(u8, new_name);
+        std.mem.swap([]const u8, &entry.venv_path, &new.venv_path);
+        std.mem.swap([]const u8, &entry.id, &new.id);
+        std.mem.swap([]const u8, &entry.env_name, &new.env_name);
     }
 };
 
@@ -1059,7 +773,7 @@ test "registry resolution by name, alias, and id prefix" {
     try testing.expectError(error.EnvironmentNotRegistered, reg.resolveAgainstCwd("nope", null, null));
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("0123456789abcdef", null, null)).idx); // id prefix
 
-    _ = try reg.attachAlias("me", "myenv");
+    try reg.attachAlias("me", "myenv");
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("me", null, null)).idx);
     try testing.expectEqualStrings("myenv", reg.resolveAlias("me").?);
     try testing.expect(reg.detachAlias("me"));
@@ -1091,7 +805,7 @@ test "resolveAgainstCwd: name, alias, exact id, unique prefix, not-found" {
     defer reg.deinit();
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
-    _ = try reg.attachAlias("w", "web");
+    try reg.attachAlias("w", "web");
 
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("web", null, null)).idx);
     try testing.expectEqual(@as(usize, 1), (try reg.resolveAgainstCwd("api", null, null)).idx);
@@ -1132,8 +846,8 @@ test "resolveAgainstCwd: '.' matches by cwd, ambiguous when two share a project_
 fn tSharedAliasReg(reg: *EnvironmentRegistry) !void {
     try tAppendT(reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
-    _ = try reg.attachAlias("dev", "env_m1");
-    _ = try reg.attachAlias("dev", "env_m2");
+    try reg.attachAlias("dev", "env_m1");
+    try reg.attachAlias("dev", "env_m2");
 }
 
 test "resolveAgainstCwd: a shared alias is disambiguated by the current host" {
@@ -1170,8 +884,8 @@ test "resolveAgainstCwd: a shared alias whose holders both target '*' is ambiguo
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_a", "/proj", "*");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_b", "/proj", "*");
-    _ = try reg.attachAlias("dev", "env_a");
-    _ = try reg.attachAlias("dev", "env_b");
+    try reg.attachAlias("dev", "env_a");
+    try reg.attachAlias("dev", "env_b");
     // Both holders match every host, so the host can never narrow to one.
     try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, "anyhost"));
 }
@@ -1181,7 +895,7 @@ test "resolveAgainstCwd: a single-holder alias resolves regardless of host" {
     var reg = EnvironmentRegistry.init(a);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web", "machine1");
-    _ = try reg.attachAlias("w", "web");
+    try reg.attachAlias("w", "web");
     // The host does not match the target, but a lone alias holder still resolves
     // (back-compat: host only breaks ties among >1 candidate).
     try testing.expectEqual(@as(usize, 0), (try reg.resolveAgainstCwd("w", null, "other")).idx);
@@ -1209,8 +923,8 @@ test "addAlias: shares an alias across entries, rejects same-entry dup and name-
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
 
-    _ = try reg.attachAlias("dev", "env_m1");
-    _ = try reg.attachAlias("dev", "env_m2"); // shared across entries: now allowed
+    try reg.attachAlias("dev", "env_m1");
+    try reg.attachAlias("dev", "env_m2"); // shared across entries: now allowed
     // Re-adding the same alias to the SAME entry is still rejected.
     try testing.expectError(error.AliasAlreadyExists, reg.attachAlias("dev", "env_m1"));
     // An alias equal to an existing env name is still rejected (name-shadow guard).
@@ -1276,6 +990,40 @@ test "registry load rejects a non-object root instead of crashing" {
     try runtime.writeFile(zdir ++ "/registry.json", "[]");
 
     try testing.expectError(error.InvalidRegistryFormat, EnvironmentRegistry.load(a));
+}
+
+test "registry load rebuilds a missing id and venv_path and skips malformed entries" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+
+    const zdir = ".zig-cache/tmp/zenv-registry-legacy";
+    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
+    runtime.deleteTree(zdir) catch {};
+    defer runtime.deleteTree(zdir) catch {};
+    try runtime.makePath(zdir);
+    try runtime.writeFile(zdir ++ "/registry.json",
+        \\{ "environments": [
+        \\  { "name": "old", "project_dir": "/p", "target_machine": "*", "extra": 1 },
+        \\  { "name": "bad", "project_dir": 5, "target_machine": "*" },
+        \\  "not an entry",
+        \\  { "id": "abc", "name": "new", "project_dir": "/q", "target_machine": "m1, m2",
+        \\    "venv_path": "/q/.zenv/new", "description": null, "aliases": ["n"] }
+        \\] }
+    );
+
+    var reg = try EnvironmentRegistry.load(a);
+    defer reg.deinit();
+    try testing.expectEqual(@as(usize, 2), reg.entries.items.len);
+    const old = reg.entries.items[0];
+    try testing.expectEqualStrings("/p/zenv/old", old.venv_path);
+    const want_id = try generateSHA1ID(a, "old", "/p", "*");
+    defer a.free(want_id);
+    try testing.expectEqualStrings(want_id, old.id);
+    const new = reg.entries.items[1];
+    try testing.expectEqualStrings("abc", new.id);
+    try testing.expectEqualStrings("/q/.zenv/new", new.venv_path);
+    try testing.expect(new.description == null);
+    try testing.expectEqualStrings("new", reg.resolveAlias("n").?);
 }
 
 test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {

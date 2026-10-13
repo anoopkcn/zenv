@@ -3,8 +3,6 @@ const Allocator = std.mem.Allocator;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
-// Gets the zenv directory path, respecting ZENV_DIR environment variable
-// if set, otherwise uses ~/.zenv
 /// Environment names and aliases become directory names and command-line
 /// identifiers: 1-255 of `[A-Za-z0-9_.-]`, and not `.` (the current-directory
 /// shortcut) or `..`.
@@ -22,6 +20,7 @@ test "isValidEnvName" {
     for ([_][]const u8{ "", ".", "..", "a b", "a/b", "../x", "x\n" }) |bad| try std.testing.expect(!isValidEnvName(bad));
 }
 
+/// The zenv directory: $ZENV_DIR if set, otherwise ~/.zenv.
 pub fn getZenvDir(allocator: Allocator) ![]const u8 {
     // Try to get ZENV_DIR environment variable
     if (runtime.env("ZENV_DIR")) |zenv_dir| {
@@ -37,41 +36,22 @@ pub fn getZenvDir(allocator: Allocator) ![]const u8 {
     return std.Io.Dir.path.join(allocator, &[_][]const u8{ home_dir, ".zenv" });
 }
 
-// Creates the zenv directory if it doesn't exist
-pub fn ensureZenvDir(allocator: Allocator) ![]const u8 {
-    const zenv_dir_path = try getZenvDir(allocator);
-    errdefer allocator.free(zenv_dir_path);
+/// `<zenv dir>/<name>`. Caller owns the result.
+pub fn zenvPath(allocator: Allocator, name: []const u8) ![]const u8 {
+    const dir = try getZenvDir(allocator);
+    defer allocator.free(dir);
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, name });
+}
 
-    runtime.makePath(zenv_dir_path) catch |err| {
+/// Like `zenvPath`, creating the zenv directory first.
+pub fn ensureZenvPath(allocator: Allocator, name: []const u8) ![]const u8 {
+    const dir = try getZenvDir(allocator);
+    defer allocator.free(dir);
+    runtime.makePath(dir) catch |err| {
         output.printError(allocator, "Failed to create zenv directory: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-
-    return zenv_dir_path;
-}
-
-// Gets the path to the registry.json file
-pub fn getRegistryPath(allocator: Allocator) ![]const u8 {
-    const zenv_dir_path = try getZenvDir(allocator);
-    defer allocator.free(zenv_dir_path);
-
-    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "registry.json" });
-}
-
-// Gets the path to the default-python file
-pub fn getDefaultPythonFilePath(allocator: Allocator) ![]const u8 {
-    const zenv_dir_path = try getZenvDir(allocator);
-    defer allocator.free(zenv_dir_path);
-
-    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "default-python" });
-}
-
-// Gets the default python installation directory
-pub fn getPythonInstallDir(allocator: Allocator) ![]const u8 {
-    const zenv_dir_path = try getZenvDir(allocator);
-    defer allocator.free(zenv_dir_path);
-
-    return std.Io.Dir.path.join(allocator, &[_][]const u8{ zenv_dir_path, "python" });
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, name });
 }
 
 /// THE rule for where an environment lives: `<base_dir>/<env_name>`, where a
@@ -89,6 +69,13 @@ pub fn venvPath(
         return std.Io.Dir.path.join(allocator, &[_][]const u8{ base_dir, env_name });
     }
     return std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, base_dir, env_name });
+}
+
+/// Resolves a config-relative path against `anchor_dir`; absolute paths are
+/// left untouched. Caller owns the result.
+pub fn resolvePath(allocator: Allocator, anchor_dir: []const u8, rel: []const u8) ![]u8 {
+    if (std.Io.Dir.path.isAbsolute(rel)) return allocator.dupe(u8, rel);
+    return std.Io.Dir.path.join(allocator, &[_][]const u8{ anchor_dir, rel });
 }
 
 /// The nearest directory at or above `start` (an absolute path) that holds a
@@ -124,10 +111,8 @@ pub fn baseDirIsZenvDir(
     base_dir: []const u8,
     zenv_dir: []const u8,
 ) !bool {
-    const base_abs = if (std.Io.Dir.path.isAbsolute(base_dir))
-        try std.Io.Dir.path.resolve(allocator, &[_][]const u8{base_dir})
-    else
-        try std.Io.Dir.path.resolve(allocator, &[_][]const u8{ project_dir, base_dir });
+    // resolve restarts at an absolute base_dir, dropping project_dir.
+    const base_abs = try std.Io.Dir.path.resolve(allocator, &[_][]const u8{ project_dir, base_dir });
     defer allocator.free(base_abs);
 
     const zenv_abs = try std.Io.Dir.path.resolve(allocator, &[_][]const u8{zenv_dir});

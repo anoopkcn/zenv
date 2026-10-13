@@ -137,9 +137,7 @@ pub fn userOps(allocator: Allocator, env_config: *const EnvironmentConfig, venv_
     var ops: std.ArrayList(Op) = .empty;
     for (env_config.env.items) |v| try ops.append(allocator, .{
         .op = switch (v.kind) {
-            .set => .set,
-            .prepend => .prepend,
-            .append => .append,
+            inline else => |k| @field(OpKind, @tagName(k)),
         },
         .name = v.name,
         .value = try expandValue(allocator, v.value, venv_path, project_dir),
@@ -158,7 +156,7 @@ pub fn readModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache
     }) catch null;
 }
 
-/// Writes the module cache atomically and removes the pre-JSON cache files.
+/// Writes the module cache atomically.
 pub fn writeModuleCache(allocator: Allocator, venv_path: []const u8, cache: *const ModuleCache) !void {
     const text = try json.Stringify.valueAlloc(allocator, cache.*, .{ .whitespace = .indent_2 });
     defer allocator.free(text);
@@ -199,8 +197,8 @@ pub fn isIdentifier(name: []const u8) bool {
     return true;
 }
 
-/// Builds the Spec for `env_config`. Call at the end of setup, after the setup
-/// script has (re)written the module cache files and created the venv.
+/// Builds the Spec for `env_config`. Call at the end of setup, after the venv
+/// was built and the module cache (re)written.
 /// `activate_script` is the hook's path inside the venv (already copied), if
 /// any. `project_dir` anchors `${ZENV_PROJECT_DIR}` in `env` values.
 /// Everything is allocated with, or borrowed from, `allocator` and

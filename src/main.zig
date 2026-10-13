@@ -9,7 +9,6 @@ const output = @import("utils/output.zig");
 const flags_module = @import("utils/flags.zig");
 const validation = @import("utils/validation.zig");
 const runtime = @import("utils/runtime.zig");
-const paths = @import("utils/paths.zig");
 const errors = @import("utils/errors.zig");
 
 pub const Command = enum {
@@ -39,25 +38,7 @@ pub const Command = enum {
     @"--version",
     @"--help",
     unknown,
-
-    fn fromString(s: []const u8) Command {
-        // Tag names ARE the command spellings (including @"-v" etc.), so the
-        // comptime-built string map covers every command with no hand-kept table.
-        return std.meta.stringToEnum(Command, s) orelse .unknown;
-    }
 };
-
-fn stdoutWrite(bytes: []const u8) void {
-    var buf: [256]u8 = undefined;
-    var fw = std.Io.File.stdout().writerStreaming(runtime.io, &buf);
-    const w = &fw.interface;
-    w.writeAll(bytes) catch return;
-    w.flush() catch return;
-}
-
-fn printVersion() void {
-    stdoutWrite(options.version ++ "\n");
-}
 
 fn printUsage() void {
     const usage = comptime
@@ -237,7 +218,7 @@ fn printUsage() void {
         \\  ZENV_DEBUG=1               Prints debug output.
         \\
     ;
-    stdoutWrite(usage);
+    std.Io.File.stdout().writeStreamingAll(runtime.io, usage) catch {};
 }
 
 pub fn main(app: std.process.Init) anyerror!void {
@@ -246,19 +227,12 @@ pub fn main(app: std.process.Init) anyerror!void {
     runtime.environ_map = app.environ_map;
     runtime.version = options.version;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // One arena for the whole run; the process exits when the command ends.
+    const allocator = app.arena.allocator();
+    const args = try app.minimal.args.toSlice(allocator);
 
-    // Collect args into an owned slice. The argv strings are static (owned by
-    // the OS), so we only copy the pointers; the arena owns the slice itself.
-    var args_builder: std.ArrayList([]const u8) = .empty;
-    var arg_it = app.minimal.args.iterate();
-    while (arg_it.next()) |a| try args_builder.append(allocator, a);
-    const args = try args_builder.toOwnedSlice(allocator);
-
-    // Command parsing logic - Use args directly for command parsing
-    const command: Command = if (args.len < 2) .help else Command.fromString(args[1]);
+    // Tag names ARE the command spellings (including @"-v" etc.).
+    const command: Command = if (args.len < 2) .help else std.meta.stringToEnum(Command, args[1]) orelse .unknown;
 
     const config_path = "zenv.json";
 
@@ -270,7 +244,7 @@ pub fn main(app: std.process.Init) anyerror!void {
             process.exit(0);
         },
         .version, .@"-v", .@"-V", .@"--version" => {
-            printVersion();
+            std.Io.File.stdout().writeStreamingAll(runtime.io, options.version ++ "\n") catch {};
             process.exit(0);
         },
         .init => {
@@ -316,7 +290,6 @@ pub fn main(app: std.process.Init) anyerror!void {
     var registry = configurations.EnvironmentRegistry.load(allocator) catch |err| {
         output.printError(allocator, "Failed to load environment registry: {s}", .{@errorName(err)}) catch {};
         errors.report(allocator, error.RegistryError);
-        return;
     };
     defer registry.deinit();
 
@@ -345,10 +318,7 @@ pub fn main(app: std.process.Init) anyerror!void {
                 output.printError(allocator, "Missing environment name. Usage: zenv setup <name> --init", .{}) catch {};
                 process.exit(1);
             };
-            if (!paths.isValidEnvName(env_name)) {
-                output.printError(allocator, "Invalid environment name '{s}'. Use only letters, digits, '-', '_' and '.'.", .{env_name}) catch {};
-                process.exit(1);
-            }
+            commands.requireValidEnvName(allocator, env_name) catch process.exit(1);
             // Writes zenv.json, or adds the env to an existing one; an env the
             // file already defines is simply set up.
             const outcome = commands.initConfig(allocator, env_name, flags_module.positional(args, 1), !flags.no_python) catch |err| {
@@ -369,20 +339,11 @@ pub fn main(app: std.process.Init) anyerror!void {
                 },
             }
         }
-
-        // Now load the config with validation
-        config = validation.validateAndParse(allocator, config_path) catch |err| {
-            errors.report(allocator, err);
-            return; // Exit after handling error
-        };
-    } else if (command == .register) {
-        config = validation.validateAndParse(allocator, config_path) catch |err| {
-            errors.report(allocator, err);
-            return; // Exit after handling error
-        };
+    }
+    if (command == .setup or command == .register) {
+        config = validation.validateAndParse(allocator, config_path) catch |err| errors.report(allocator, err);
     }
 
-    // Dispatch to command handlers
     // Dispatch the command; any error it returns is mapped to a user-facing
     // message (and exits) by the single error handler.
     const config_ptr: ?*const configurations.ZenvConfig = if (config) |*c| c else null;

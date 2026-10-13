@@ -13,79 +13,6 @@ const errors = @import("errors.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
-// Checks if pattern with wildcards matches a string
-// Supports * (any characters) and ? (single character)
-fn patternMatches(pattern: []const u8, str: []const u8) bool {
-    // Empty pattern only matches empty string
-    if (pattern.len == 0) return str.len == 0;
-
-    // Special case: single * matches anything
-    if (pattern.len == 1 and pattern[0] == '*') return true;
-
-    // Empty string only matches if pattern is just asterisks
-    if (str.len == 0) {
-        for (pattern) |c| {
-            if (c != '*') return false;
-        }
-        return true;
-    }
-
-    // Optimize common patterns first
-
-    // 1. Fast path for prefix pattern: "prefix*"
-    if (pattern.len >= 2 and pattern[pattern.len - 1] == '*') {
-        // Check if all other characters are literals (no wildcards)
-        var has_other_wildcards = false;
-        for (pattern[0 .. pattern.len - 1]) |c| {
-            if (c == '*' or c == '?') {
-                has_other_wildcards = true;
-                break;
-            }
-        }
-
-        if (!has_other_wildcards) {
-            const prefix = pattern[0 .. pattern.len - 1];
-            return std.mem.startsWith(u8, str, prefix);
-        }
-    }
-
-    // 2. Fast path for suffix pattern: "*suffix"
-    if (pattern.len >= 2 and pattern[0] == '*' and pattern[1] != '*') {
-        // Check if all other characters are literals (no wildcards)
-        var has_other_wildcards = false;
-        for (pattern[1..]) |c| {
-            if (c == '*' or c == '?') {
-                has_other_wildcards = true;
-                break;
-            }
-        }
-
-        if (!has_other_wildcards) {
-            const suffix = pattern[1..];
-            return std.mem.endsWith(u8, str, suffix);
-        }
-    }
-
-    // 3. Fast path for contains pattern: "*middle*"
-    if (pattern.len >= 3 and pattern[0] == '*' and pattern[pattern.len - 1] == '*') {
-        // Check if middle part has no wildcards
-        var has_wildcards = false;
-        for (pattern[1 .. pattern.len - 1]) |c| {
-            if (c == '*' or c == '?') {
-                has_wildcards = true;
-                break;
-            }
-        }
-
-        if (!has_wildcards) {
-            const middle = pattern[1 .. pattern.len - 1];
-            return std.mem.find(u8, str, middle) != null;
-        }
-    }
-
-    return globMatch(pattern, str);
-}
-
 /// `*` (any run, including empty) and `?` (one character) glob match, by the
 /// classic two-pointer scan with backtracking to the last `*`: no allocation,
 /// no length limit, O(pattern * str) worst case.
@@ -175,7 +102,7 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
     defer allocator.free(result.stderr);
 
     // Check if the command was successful
-    const success = result.term == .exited and result.term.exited == 0;
+    const success = runtime.exitedOk(result.term);
 
     if (!success) {
         output.printError(allocator, "`hostname` command failed. Term: {s} Stderr: {s}", .{ @tagName(result.term), result.stderr }) catch {};
@@ -205,27 +132,12 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
     errors.debugLog(allocator, "Attempting to get machine identity from environment variable...", .{});
 
-    // Prefer SYSTEMNAME (cluster-global), then HOSTNAME, then HOST (if non-empty),
-    // then fall back to the `hostname` command.
-    if (runtime.env("SYSTEMNAME")) |systemname_env| {
-        if (systemname_env.len > 0) {
-            errors.debugLog(allocator, "Got machine identity from SYSTEMNAME: '{s}'", .{systemname_env});
-            return allocator.dupe(u8, systemname_env);
-        }
-    }
-
-    if (runtime.env("HOSTNAME")) |hostname_env| {
-        if (hostname_env.len > 0) {
-            errors.debugLog(allocator, "Got hostname from HOSTNAME: '{s}'", .{hostname_env});
-            return allocator.dupe(u8, hostname_env);
-        }
-    }
-
-    if (runtime.env("HOST")) |host_env| {
-        if (host_env.len > 0) {
-            errors.debugLog(allocator, "Got hostname from HOST: '{s}'", .{host_env});
-            return allocator.dupe(u8, host_env);
-        }
+    // Prefer SYSTEMNAME (cluster-global), then HOSTNAME, then HOST (if non-empty).
+    for ([_][]const u8{ "SYSTEMNAME", "HOSTNAME", "HOST" }) |name| {
+        const value = runtime.env(name) orelse continue;
+        if (value.len == 0) continue;
+        errors.debugLog(allocator, "Got machine identity from {s}: '{s}'", .{ name, value });
+        return allocator.dupe(u8, value);
     }
 
     // Prefer the syscall (no external binary) over the `hostname` command, so
@@ -241,12 +153,10 @@ pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
     return getHostnameFromCommand(allocator);
 }
 
-// Simple check for hostname matching target machine (used by list command)
+/// True if `hostname` matches one `target_machines` entry: a universal target
+/// ("*", "any", "localhost"), "local" for `*.local` hosts, a `*`/`?` glob, the
+/// exact name, one of its dot-separated components, or a domain suffix.
 pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
-    // This function is only for the simplified registry case of a single target machine
-    // Use the same matching logic for consistency
-
-    // Special cases for universal targets
     if (std.mem.eql(u8, target_machine, "localhost") or
         std.mem.eql(u8, target_machine, "any") or
         std.mem.eql(u8, target_machine, "*"))
@@ -254,50 +164,22 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
         return true;
     }
 
-    // Special case for "local" which should match any hostname with ".local" suffix
+    // "local" matches any hostname with a ".local" suffix
     if (std.mem.eql(u8, target_machine, "local") and std.mem.endsWith(u8, hostname, ".local")) {
         return true;
     }
 
-    const norm_hostname = hostname;
+    if (std.mem.findAny(u8, target_machine, "*?") != null) return globMatch(target_machine, hostname);
 
-    // Check if the target contains wildcard characters
-    const has_wildcards = std.mem.findAny(u8, target_machine, "*?") != null;
+    // Exact name, or one of its components ("jureca" for jrlogin01.jureca)
+    if (std.mem.eql(u8, hostname, target_machine) or matchDomainComponent(hostname, target_machine)) return true;
 
-    // If target has wildcards, use pattern matching
-    if (has_wildcards) {
-        return patternMatches(target_machine, norm_hostname);
+    // Domain suffix: ".example.com", or "example.com" after a dot (node1.example.com)
+    if (std.mem.endsWith(u8, hostname, target_machine)) {
+        const rest = hostname[0 .. hostname.len - target_machine.len];
+        if (target_machine.len > 0 and target_machine[0] == '.' and rest.len > 0) return true;
+        if (rest.len > 1 and rest[rest.len - 1] == '.') return true;
     }
-
-    // Try various matching strategies
-
-    // 1. Exact match
-    if (std.mem.eql(u8, norm_hostname, target_machine)) {
-        return true;
-    }
-
-    // 2. Domain component match
-    if (matchDomainComponent(norm_hostname, target_machine)) {
-        return true;
-    }
-
-    // 3. Domain suffix like ".example.com"
-    if (target_machine.len > 0 and target_machine[0] == '.' and norm_hostname.len > target_machine.len and
-        std.mem.endsWith(u8, norm_hostname, target_machine))
-    {
-        return true;
-    }
-
-    // 4. Domain suffix match (e.g., node123.cluster matches target cluster)
-    if (norm_hostname.len > target_machine.len + 1 and
-        norm_hostname[norm_hostname.len - target_machine.len - 1] == '.')
-    {
-        const suffix = norm_hostname[norm_hostname.len - target_machine.len ..];
-        if (std.mem.eql(u8, suffix, target_machine)) {
-            return true;
-        }
-    }
-
     return false;
 }
 
@@ -317,6 +199,7 @@ pub fn hostMatchesTargets(hostname: []const u8, target_machines_str: []const u8)
 
 // ============================ Tests ============================
 const testing = std.testing;
+const test_support = @import("../test_support.zig");
 
 test "checkHostnameMatch: universal targets match any host" {
     try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*"));
@@ -340,13 +223,15 @@ test "checkHostnameMatch: wildcard patterns" {
     try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*jureca*"));
     try testing.expect(checkHostnameMatch("node1", "node?"));
     try testing.expect(!checkHostnameMatch("node12", "node?"));
-    // Mixed wildcard pattern goes through the DP matcher.
+    try testing.expect(!checkHostnameMatch("jrlogin01.jureca", "*juwels*"));
     try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jr*0?.jureca"));
 }
 
 test "checkHostnameMatch: domain suffix forms" {
     try testing.expect(checkHostnameMatch("node1.example.com", ".example.com"));
     try testing.expect(!checkHostnameMatch("example.com", ".example.com"));
+    try testing.expect(checkHostnameMatch("node1.example.com", "example.com"));
+    try testing.expect(!checkHostnameMatch("myexample.com", "example.com"));
     try testing.expect(checkHostnameMatch("mymac.local", "local"));
 }
 
@@ -403,4 +288,28 @@ test "getSystemHostname: empty SYSTEMNAME falls back to HOSTNAME" {
     const id = try getSystemHostname(a);
     defer a.free(id);
     try testing.expectEqualStrings("jrlogin01.jureca", id);
+}
+
+test "getHostnameFromCommand trims output and rejects empty/failed runs" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const prev = test_support.useFakeExec();
+    defer runtime.exec_backend = prev;
+
+    // happy path: surrounding whitespace is trimmed off the captured stdout
+    test_support.fake_run_stdout = "  jrlogin01.jureca \n";
+    test_support.fake_run_stderr = "";
+    test_support.fake_run_exit = 0;
+    const h = try getHostnameFromCommand(a);
+    defer a.free(h);
+    try testing.expectEqualStrings("jrlogin01.jureca", h);
+
+    // whitespace-only output -> MissingHostname
+    test_support.fake_run_stdout = "   \n";
+    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a));
+
+    // non-zero exit -> ProcessError
+    test_support.fake_run_stdout = "ignored";
+    test_support.fake_run_exit = 1;
+    try testing.expectError(error.ProcessError, getHostnameFromCommand(a));
 }

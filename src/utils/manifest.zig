@@ -16,7 +16,6 @@ const json = std.json;
 const Value = json.Value;
 const Array = json.Array;
 const runtime = @import("runtime.zig");
-const output = @import("output.zig");
 const parse_deps = @import("parse_deps.zig");
 
 const MAX_FILE = 10 * 1024 * 1024;
@@ -40,7 +39,6 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
 
     var replaced = false;
     var it = std.mem.splitScalar(u8, content, '\n');
-    var first = true;
     while (it.next()) |line| {
         // Drop a pure trailing-empty segment so we don't accumulate blank lines
         // on every rewrite; real blank lines between entries are preserved.
@@ -49,7 +47,6 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
         const trimmed = std.mem.trim(u8, line, " \t\r");
         const is_entry = trimmed.len > 0 and trimmed[0] != '#';
         if (is_entry and !replaced and parse_deps.samePackage(trimmed, spec)) {
-            if (!first) try out.append(allocator, '\n');
             try out.appendSlice(allocator, spec);
             // Keep an inline comment (`pkg==1.0  # why`); pip needs the
             // whitespace before '#', so it is kept too.
@@ -59,17 +56,15 @@ pub fn addToRequirementsTxt(allocator: Allocator, path: []const u8, spec: []cons
             }
             replaced = true;
         } else {
-            if (!first) try out.append(allocator, '\n');
             try out.appendSlice(allocator, line);
         }
-        first = false;
+        try out.append(allocator, '\n');
     }
 
     if (!replaced) {
-        if (!first) try out.append(allocator, '\n');
         try out.appendSlice(allocator, spec);
+        try out.append(allocator, '\n');
     }
-    try out.append(allocator, '\n');
 
     try runtime.writeFileAtomic(allocator, path, out.items);
 }
@@ -103,18 +98,11 @@ pub fn addToZenvJson(
 
     const key: []const u8 = if (dev) "dev_dependencies" else "dependencies";
 
-    // Get-or-create the target array on the environment object.
-    const arr_ptr: *Value = blk: {
-        if (env_ptr.object.getPtr(key)) |p| {
-            if (p.* == .array) break :blk p;
-            p.* = Value{ .array = Array.init(a) }; // wrong type -> replace
-            break :blk p;
-        }
-        const owned_key = try a.dupe(u8, key);
-        const gop = try env_ptr.object.getOrPut(a, owned_key);
-        gop.value_ptr.* = Value{ .array = Array.init(a) };
-        break :blk gop.value_ptr;
-    };
+    // Get-or-create the target array on the environment object (a value of
+    // the wrong type is replaced). `key` is a literal, so it outlives the map.
+    const gop = try env_ptr.object.getOrPut(a, key);
+    if (!gop.found_existing or gop.value_ptr.* != .array) gop.value_ptr.* = Value{ .array = Array.init(a) };
+    const arr_ptr = gop.value_ptr;
 
     // De-dup by package name: replace an existing spec, else append.
     const owned_spec = try a.dupe(u8, spec);
@@ -302,7 +290,7 @@ fn editPyproject(
         if (!isHeader(t)) continue;
         if (sec_start == null) {
             if (std.mem.eql(u8, headerName(t), section)) sec_start = i;
-        } else if (i > sec_start.?) {
+        } else {
             sec_end = i;
             break;
         }
@@ -357,9 +345,7 @@ fn appendNewBlock(a: Allocator, lines: *LineList, section: []const u8, key: []co
         try lines.append(a, ""); // blank separator line
     }
     try lines.append(a, try a.print("[{s}]", .{section}));
-    try lines.append(a, try a.print("{s} = [", .{key}));
-    try lines.append(a, try a.print("    {s},", .{try tomlString(a, spec)}));
-    try lines.append(a, "]");
+    try insertKeyBlock(a, lines, lines.items.len, key, spec);
 }
 
 /// Inserts `key = [\n    "spec",\n]` at line index `at`.
@@ -707,6 +693,13 @@ test "requirements: creates the file when missing" {
     const c = try runtime.readFileAlloc(a, path, MAX_FILE);
     defer a.free(c);
     try testing.expectEqualStrings("numpy\n", c);
+
+    // Blank lines are kept; a missing final newline is added.
+    try runtime.writeFile(path, "a\n\nb");
+    try addToRequirementsTxt(a, path, "c");
+    const c2 = try runtime.readFileAlloc(a, path, MAX_FILE);
+    defer a.free(c2);
+    try testing.expectEqualStrings("a\n\nb\nc\n", c2);
 }
 
 // --- zenv.json (I/O via runtime) ---
@@ -749,6 +742,26 @@ test "zenv.json: adds to dependencies and dev_dependencies, preserving order" {
     const demo = parsed.value.object.get("demo").?;
     try testing.expectEqual(@as(usize, 2), demo.object.get("dependencies").?.array.items.len);
     try testing.expectEqual(@as(usize, 1), demo.object.get("dev_dependencies").?.array.items.len);
+}
+
+test "zenv.json: a non-array dependencies value is replaced by the new array" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const path = ".zig-cache/tmp/zenv-manifest-bad-deps.json";
+    runtime.deleteFile(path) catch {};
+    defer runtime.deleteFile(path) catch {};
+
+    try runtime.writeFile(path,
+        \\{ "base_dir": ".zenv", "demo": { "dependencies": "requests", "target_machines": ["*"] } }
+    );
+    try addToZenvJson(a, path, "demo", "flask", false);
+    const c = try runtime.readFileAlloc(a, path, MAX_FILE);
+    defer a.free(c);
+    var parsed = try json.parseFromSlice(json.Value, a, c, .{});
+    defer parsed.deinit();
+    const demo = parsed.value.object.get("demo").?.object;
+    try testing.expectEqualStrings("dependencies", demo.keys()[0]); // stays in place
+    try testing.expectEqualStrings("flask", demo.get("dependencies").?.array.items[0].string);
 }
 
 test "zenv.json: addEnvToZenvJson appends a new env and refuses an existing one" {

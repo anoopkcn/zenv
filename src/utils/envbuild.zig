@@ -20,6 +20,7 @@ const envspec = @import("envspec.zig");
 const venv = @import("venv.zig");
 const shell = @import("shell.zig");
 const python_mod = @import("python.zig");
+const parse_deps = @import("parse_deps.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
 const CommandFlags = @import("flags.zig").CommandFlags;
 
@@ -31,7 +32,8 @@ pub const Options = struct {
     /// Absolute project directory (where zenv.json is): the cwd for installs
     /// (`--dev` installs `.`) and hooks.
     project_dir: []const u8,
-    /// Validated dependency lines, in requirements.txt syntax.
+    /// Dependency lines, in requirements.txt syntax; run drops invalid and
+    /// duplicate ones.
     deps: []const []const u8,
     flags: CommandFlags,
 };
@@ -44,6 +46,11 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     const a = arena.allocator();
     const flags = opts.flags;
     const join = std.Io.Dir.path.join;
+
+    info(a, "Setting up environment '{s}' in '{s}'...", .{ opts.env_name, opts.venv_dir });
+    const deps = (try parse_deps.validateDependencies(a, opts.deps, opts.env_name)).items;
+    // A Python-free env installs nothing, so it gets no requirements.txt.
+    if (opts.env_config.python) try writeRequirements(a, opts.venv_dir, deps);
 
     banner(a, "started");
 
@@ -105,7 +112,7 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     const upgrade_pip: []const []const u8 = if (flags.use_uv) &.{ "--upgrade", "pip" } else &.{ "--ignore-installed", "--no-build-isolation", "--upgrade", "pip" };
     try install(a, opts, venv_python, install_env, upgrade_pip, "upgrading pip");
 
-    const plan = try planInstall(a, opts.deps, module_pkgs, flags.force_deps);
+    const plan = try planInstall(a, deps, module_pkgs, flags.force_deps);
     try installRequirements(a, opts, venv_python, install_env, plan);
 
     if (flags.dev_mode) try installEditable(a, opts, venv_python, install_env);
@@ -135,8 +142,7 @@ fn runWithoutPython(a: Allocator, opts: Options, setup_hook: ?[]const u8) !void 
     runtime.makePath(bin) catch |err| return fail(a, "Could not create {s}: {s}", .{ bin, @errorName(err) });
     // Keep the env out of git, as venv.create does for a Python env.
     try runtime.writeFile(try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, ".gitignore" }), "# Created by zenv\n*\n");
-    try envspec.applyOp(&env, .{ .op = .prepend, .name = "PATH", .value = bin });
-    try env.put("ZENV_ENV_DIR", opts.venv_dir);
+    for (try envspec.plainOps(a, opts.venv_dir)) |op| try envspec.applyOp(&env, op);
     try applyUserEnv(a, opts, &env);
 
     try runHooks(a, opts, &env, setup_hook);
@@ -152,7 +158,7 @@ fn applyUserEnv(a: Allocator, opts: Options, env: *Map) !void {
 /// count: a Python-free env has one too.
 fn hasPythonVenv(a: Allocator, venv_dir: []const u8) !bool {
     for (PYTHON_PARTS) |p| {
-        if (lexists(try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, p }))) return true;
+        if (runtime.lexists(try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, p }))) return true;
     }
     return false;
 }
@@ -188,10 +194,6 @@ fn banner(a: Allocator, what: []const u8) void {
         what,                 day.year,                md.month.numeric(),        md.day_index + 1,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
-}
-
-fn exitedOk(term: runtime.Term) bool {
-    return term == .exited and term.exited == 0;
 }
 
 /// "exit status 7" / "signal 15" for error messages.
@@ -281,7 +283,7 @@ fn capture(a: Allocator, argv: []const []const u8, env: ?*const Map) ?[]const u8
         .stderr_limit = .limited(1024 * 1024),
         .environ_map = env,
     }) catch return null;
-    if (!exitedOk(res.term)) return null;
+    if (!runtime.exitedOk(res.term)) return null;
     return res.stdout;
 }
 
@@ -481,7 +483,7 @@ fn loadModules(a: Allocator, opts: Options, env: *Map) !bool {
         info(a, "Module command not found, skipping module operations", .{});
         return false;
     }
-    if (!exitedOk(term)) return fail(a, "Loading modules failed ({s}).", .{describe(a, term)});
+    if (!runtime.exitedOk(term)) return fail(a, "Loading modules failed ({s}).", .{describe(a, term)});
 
     const data = runtime.readFileAlloc(a, snap_path, 64 * 1024 * 1024) catch |err|
         return fail(a, "Could not read the module environment snapshot: {s}", .{@errorName(err)});
@@ -501,12 +503,7 @@ fn loadModules(a: Allocator, opts: Options, env: *Map) !bool {
         // A missing module would otherwise give a "working" env without it, and
         // every activation would retry (and re-report) the failed load.
         envspec.deleteModuleCache(a, opts.venv_dir);
-        var names: std.Io.Writer.Allocating = .init(a);
-        for (snap.failed, 0..) |m, i| {
-            if (i > 0) try names.writer.writeAll(", ");
-            try names.writer.writeAll(m);
-        }
-        return fail(a, "Failed to load module(s): {s}. Check the names in zenv.json ('module spider <name>') and re-run setup.", .{names.written()});
+        return fail(a, "Failed to load module(s): {s}. Check the names in zenv.json ('module spider <name>') and re-run setup.", .{try std.mem.join(a, ", ", snap.failed)});
     }
     if (!cache_active) return true;
     const delta = try moduleDelta(a, snap.base, snap.loaded);
@@ -617,7 +614,7 @@ pub fn scanPythonPath(a: Allocator, python_path: []const u8) ![]const Package {
         }
         for (candidates.items) |path| {
             const pkg = parseMetadata(readMetadataHead(a, path) orelse continue) orelse continue;
-            const key = try canonicalName(a, pkg.name);
+            const key = try parse_deps.canonicalName(a, pkg.name);
             if (seen.contains(key)) continue;
             try seen.put(key, {});
             try pkgs.append(a, pkg);
@@ -700,11 +697,6 @@ fn isFile(path: []const u8) bool {
     return st.kind == .file;
 }
 
-fn lexists(path: []const u8) bool {
-    std.Io.Dir.cwd().access(runtime.io, path, .{ .follow_symlinks = false }) catch return false;
-    return true;
-}
-
 /// Keeps a working venv; otherwise clears any partial one and creates it.
 fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Map) !void {
     const join = std.Io.Dir.path.join;
@@ -721,7 +713,7 @@ fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Ma
         info(a, "Existing venv {s} seems corrupted/incomplete. Clearing it and recreating.", .{venv_dir});
         for ([_][]const u8{ "bin", "lib", "lib64", "include", "pyvenv.cfg" }) |p| {
             const path = try join(a, &[_][]const u8{ venv_dir, p });
-            if (!lexists(path)) continue;
+            if (!runtime.lexists(path)) continue;
             // A file or link (lib64), else a directory. A part that cannot be
             // removed would leave stale links behind, so fail instead.
             runtime.deleteFile(path) catch runtime.deleteTree(path) catch |err|
@@ -741,10 +733,10 @@ fn seedPip(a: Allocator, env: *const Map, venv_python: []const u8, chosen: Chose
     info(a, "Installing pip into the venv", .{});
     if (capture(a, &.{ venv_python, "-c", "import ensurepip" }, env) != null) {
         const t = try runStep(a, &.{ venv_python, "-m", "ensurepip", "--upgrade", "--default-pip" }, env, null);
-        if (!exitedOk(t)) return fail(a, "ensurepip failed to install pip into the venv.", .{});
+        if (!runtime.exitedOk(t)) return fail(a, "ensurepip failed to install pip into the venv.", .{});
     } else if (capture(a, &.{ chosen.path, "-m", "pip", "--version" }, env) != null) {
         const t = try runStep(a, &.{ chosen.path, "-m", "pip", "--python", venv_python, "install", "pip" }, env, null);
-        if (!exitedOk(t)) return fail(a, "Could not install pip with {s}'s pip (needs pip >= 22.3). Re-run with --uv.", .{chosen.description});
+        if (!runtime.exitedOk(t)) return fail(a, "Could not install pip with {s}'s pip (needs pip >= 22.3). Re-run with --uv.", .{chosen.description});
     } else {
         return fail(a, "{s} has neither ensurepip nor pip, so pip cannot be installed into the venv. Re-run with --uv.", .{chosen.description});
     }
@@ -773,27 +765,11 @@ pub fn installerArgv(a: Allocator, venv_python: []const u8, use_uv: bool, no_cac
 fn install(a: Allocator, opts: Options, venv_python: []const u8, env: *const Map, args: []const []const u8, what: []const u8) !void {
     const argv = try installerArgv(a, venv_python, opts.flags.use_uv, opts.flags.no_cache, args);
     const t = try runStep(a, argv, env, opts.project_dir);
-    if (!exitedOk(t)) return fail(a, "Installation failed while {s}.", .{what});
+    if (!runtime.exitedOk(t)) return fail(a, "Installation failed while {s}.", .{what});
 }
 
 pub const Override = struct { name: []const u8, requirement: []const u8, module_version: []const u8 };
 pub const Plan = struct { install: []const []const u8, overrides: []const Override };
-
-/// PEP 503 normalised project name: lowercase, runs of `-_.` become `-`.
-pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var in_sep = false;
-    for (name) |c| {
-        if (c == '-' or c == '_' or c == '.') {
-            if (!in_sep) try out.append(a, '-');
-            in_sep = true;
-        } else {
-            try out.append(a, std.ascii.toLower(c));
-            in_sep = false;
-        }
-    }
-    return out.items;
-}
 
 /// The project name a requirement line starts with (`numpy>=1.26` -> numpy).
 fn requirementName(line: []const u8) []const u8 {
@@ -811,12 +787,12 @@ pub fn planInstall(a: Allocator, deps: []const []const u8, module_pkgs: []const 
     var to_install: std.ArrayList([]const u8) = .empty;
     var overrides: std.ArrayList(Override) = .empty;
     var provided = std.StringHashMap([]const u8).init(a); // canonical name -> version
-    for (module_pkgs) |p| try provided.put(try canonicalName(a, p.name), p.version);
+    for (module_pkgs) |p| try provided.put(try parse_deps.canonicalName(a, p.name), p.version);
     for (deps) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         if (!force) {
-            const name = try canonicalName(a, requirementName(line));
+            const name = try parse_deps.canonicalName(a, requirementName(line));
             if (name.len > 0) {
                 if (provided.get(name)) |version| {
                     try overrides.append(a, .{ .name = name, .requirement = line, .module_version = version });
@@ -851,6 +827,21 @@ fn installRequirements(a: Allocator, opts: Options, venv_python: []const u8, env
     try install(a, opts, venv_python, env, &.{ "-r", path }, "installing dependencies");
 }
 
+/// Writes the validated dependencies to `<venv_dir>/requirements.txt`, the
+/// record of what setup installed.
+fn writeRequirements(a: Allocator, venv_dir: []const u8, deps: []const []const u8) !void {
+    const path = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, "requirements.txt" });
+    info(a, "Writing {d} validated dependencies to {s}", .{ deps.len, path });
+    var text: std.Io.Writer.Allocating = .init(a);
+    if (deps.len == 0) {
+        info(a, "Warning: No valid dependencies found! Writing only a comment to requirements file.", .{});
+        try text.writer.writeAll("# No valid dependencies found\n");
+    }
+    for (deps) |dep| try text.writer.print("{s}\n", .{dep});
+    try runtime.writeFile(path, text.written());
+    info(a, "Created requirements file: {s}", .{path});
+}
+
 fn installEditable(a: Allocator, opts: Options, venv_python: []const u8, env: *const Map) !void {
     info(a, "Installing the project as an editable package", .{});
     const join = std.Io.Dir.path.join;
@@ -863,7 +854,7 @@ fn installEditable(a: Allocator, opts: Options, venv_python: []const u8, env: *c
     const args: []const []const u8 = if (opts.flags.use_uv) &.{ "--editable", ".", "--no-deps" } else &.{ "--no-build-isolation", "--editable", ".", "--no-deps" };
     const argv = try installerArgv(a, venv_python, opts.flags.use_uv, opts.flags.no_cache, args);
     const t = try runStep(a, argv, env, opts.project_dir);
-    if (exitedOk(t)) {
+    if (runtime.exitedOk(t)) {
         info(a, "Installed the project as an editable package", .{});
     } else {
         warn(a, "Editable install failed; check setup.py / pyproject.toml. Continuing without it.", .{});
@@ -880,10 +871,7 @@ fn installEditable(a: Allocator, opts: Options, venv_python: []const u8, env: *c
 fn copySetupHook(a: Allocator, opts: Options) !?[]const u8 {
     const setup = opts.env_config.setup orelse return null;
     const src = setup.script orelse return null;
-    const scripts_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "scripts" });
-    runtime.makePath(scripts_dir) catch |err|
-        return fail(a, "Could not create {s}: {s}", .{ scripts_dir, @errorName(err) });
-    return shell.copyHookScript(a, src, scripts_dir, "setup_hook.sh", opts.project_dir) catch |err|
+    return shell.copyHookScript(a, src, opts.venv_dir, "setup_hook.sh", opts.project_dir) catch |err|
         return fail(a, "Failed to copy setup script '{s}': {s}", .{ src, @errorName(err) });
 }
 
@@ -911,7 +899,7 @@ fn runHooks(a: Allocator, opts: Options, env: *const Map, hook: ?[]const u8) !vo
         try w.writeAll("' || echo \"WARNING: Setup script failed with exit code $?\"\n");
     }
     const t = try runStep(a, &.{ "/bin/bash", "-c", script.written() }, env, opts.project_dir);
-    if (!exitedOk(t)) return fail(a, "Custom setup commands failed ({s}).", .{describe(a, t)});
+    if (!runtime.exitedOk(t)) return fail(a, "Custom setup commands failed ({s}).", .{describe(a, t)});
 }
 
 /// Reports dependencies served by module packages, flagging versions that do
@@ -954,7 +942,7 @@ fn printOverrides(a: Allocator, env: *const Map, venv_python: []const u8, overri
     try argv.appendSlice(a, &.{ venv_python, "-c", OVERRIDE_SCRIPT });
     for (overrides) |o| try argv.appendSlice(a, &.{ o.name, o.requirement, o.module_version });
     const t = runStep(a, argv.items, env, null) catch null;
-    if (t == null or !exitedOk(t.?)) {
+    if (t == null or !runtime.exitedOk(t.?)) {
         for (overrides) |o| info(a, "    {s}  {s}  {s}", .{ o.name, o.requirement, o.module_version });
     }
     info(a, "STATUS 'CONFLICT' means the module version does not satisfy your requirement.", .{});
@@ -1053,14 +1041,6 @@ test "parseMetadata reads Name and Version from the headers only" {
     const folded = parseMetadata("Name: real\nSummary: a summary that\n  Name: wraps onto a second line\nVersion: 2\n").?;
     try testing.expectEqualStrings("real", folded.name);
     try testing.expectEqualStrings("2", folded.version);
-}
-
-test "canonicalName normalises case and separator runs" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try testing.expectEqualStrings("zope-interface", try canonicalName(a, "Zope.Interface"));
-    try testing.expectEqualStrings("a-b", try canonicalName(a, "A__.-b"));
 }
 
 test "scanPythonPath finds dist-info, egg-info and eggs in PYTHONPATH order" {

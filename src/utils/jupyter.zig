@@ -18,7 +18,7 @@ pub fn isJupyterAvailable(allocator: Allocator) bool {
         allocator.free(result.stderr);
     }
 
-    return result.term == .exited and result.term.exited == 0;
+    return runtime.exitedOk(result.term);
 }
 
 /// Get the Jupyter data directory path
@@ -46,6 +46,13 @@ pub fn getKernelDir(allocator: Allocator, kernel_name: []const u8) ![]const u8 {
     defer allocator.free(jupyter_data_dir);
 
     return try allocator.print("{s}/kernels/{s}", .{ jupyter_data_dir, kernel_name });
+}
+
+/// The directory of `env_name`'s default kernel, `zenv-<env_name>`.
+fn envKernelDir(allocator: Allocator, env_name: []const u8) ![]const u8 {
+    const jupyter_data_dir = try getJupyterDataDir(allocator);
+    defer allocator.free(jupyter_data_dir);
+    return allocator.print("{s}/kernels/zenv-{s}", .{ jupyter_data_dir, env_name });
 }
 
 /// The zenv command a kernel launches through: the `zenv` on PATH when there is
@@ -135,22 +142,16 @@ pub fn createKernel(allocator: Allocator, env_name: []const u8, venv_path: []con
 
 /// Remove a Jupyter kernel for the given environment
 pub fn removeKernel(allocator: Allocator, env_name: []const u8) !void {
-    const kernel_name = try allocator.print("zenv-{s}", .{env_name});
-    defer allocator.free(kernel_name);
-
-    const kernel_dir = try getKernelDir(allocator, kernel_name);
+    const kernel_dir = try envKernelDir(allocator, env_name);
     defer allocator.free(kernel_dir);
 
-    // Check if kernel exists
-    runtime.access(kernel_dir) catch |err| switch (err) {
-        error.FileNotFound => {
-            try output.printError(allocator, "Kernel '{s}' not found", .{kernel_name});
+    runtime.access(kernel_dir) catch |err| {
+        if (err == error.FileNotFound) {
+            try output.printError(allocator, "Kernel 'zenv-{s}' not found", .{env_name});
             return error.KernelNotFound;
-        },
-        else => {
-            try output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)});
-            return err;
-        },
+        }
+        try output.printError(allocator, "Failed to access kernel directory: {s}", .{@errorName(err)});
+        return err;
     };
 
     // Remove kernel directory recursively
@@ -159,7 +160,7 @@ pub fn removeKernel(allocator: Allocator, env_name: []const u8) !void {
         return err;
     };
 
-    try output.print(allocator, "Removed Jupyter kernel '{s}' for environment '{s}'", .{ kernel_name, env_name });
+    try output.print(allocator, "Removed Jupyter kernel 'zenv-{s}' for environment '{s}'", .{ env_name, env_name });
 }
 
 /// List all zenv-managed Jupyter kernels
@@ -236,40 +237,20 @@ pub fn checkJupyter(allocator: Allocator) !void {
 
 /// Rename a Jupyter kernel from old environment name to new environment name
 pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name: []const u8) !void {
-    const old_kernel_name = try allocator.print("zenv-{s}", .{old_env_name});
-    defer allocator.free(old_kernel_name);
-
-    const new_kernel_name = try allocator.print("zenv-{s}", .{new_env_name});
-    defer allocator.free(new_kernel_name);
-
-    const old_kernel_dir = try getKernelDir(allocator, old_kernel_name);
+    const old_kernel_dir = try envKernelDir(allocator, old_env_name);
     defer allocator.free(old_kernel_dir);
 
-    const new_kernel_dir = try getKernelDir(allocator, new_kernel_name);
+    const new_kernel_dir = try envKernelDir(allocator, new_env_name);
     defer allocator.free(new_kernel_dir);
 
-    // Check if old kernel exists
-    runtime.access(old_kernel_dir) catch |err| switch (err) {
-        error.FileNotFound => {
-            // Old kernel doesn't exist, nothing to rename
-            return;
-        },
-        else => {
-            return err;
-        },
+    // No old kernel: nothing to rename. The new name must be free.
+    runtime.access(old_kernel_dir) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
     };
-
-    // Check if new kernel already exists
     if (runtime.access(new_kernel_dir)) |_| {
         return error.KernelExists;
-    } else |err| switch (err) {
-        error.FileNotFound => {
-            // Good, new kernel doesn't exist
-        },
-        else => {
-            return err;
-        },
-    }
+    } else |err| if (err != error.FileNotFound) return err;
 
     // Rename the kernel directory
     runtime.rename(old_kernel_dir, new_kernel_dir) catch |err| {
@@ -294,15 +275,12 @@ pub fn renameKernel(allocator: Allocator, old_env_name: []const u8, new_env_name
 
     try runtime.writeFile(kernel_json_path, kernel_json);
 
-    try output.print(allocator, "Renamed Jupyter kernel from '{s}' to '{s}'", .{ old_kernel_name, new_kernel_name });
+    try output.print(allocator, "Renamed Jupyter kernel from 'zenv-{s}' to 'zenv-{s}'", .{ old_env_name, new_env_name });
 }
 
 /// Check if an environment has an associated Jupyter kernel
 pub fn hasKernel(allocator: Allocator, env_name: []const u8) bool {
-    const kernel_name = allocator.print("zenv-{s}", .{env_name}) catch return false;
-    defer allocator.free(kernel_name);
-
-    const kernel_dir = getKernelDir(allocator, kernel_name) catch return false;
+    const kernel_dir = envKernelDir(allocator, env_name) catch return false;
     defer allocator.free(kernel_dir);
 
     runtime.access(kernel_dir) catch return false;
@@ -340,4 +318,42 @@ test "isJupyterAvailable maps exit status to a bool" {
 
     test_support.fake_run_exit = 1; // `jupyter` present but errored
     try testing.expect(!isJupyterAvailable(a));
+}
+
+test "renameKernel and removeKernel act on zenv-<env> kernels" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const data_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ runtime.tempDir(), "zenv_jupyter_test" });
+    defer a.free(data_dir);
+    runtime.deleteTree(data_dir) catch {};
+    defer runtime.deleteTree(data_dir) catch {};
+
+    var env_map = std.process.Environ.Map.init(a);
+    defer env_map.deinit();
+    try env_map.put("JUPYTER_DATA_DIR", data_dir);
+    const prev_env = runtime.environ_map;
+    runtime.environ_map = &env_map;
+    defer runtime.environ_map = prev_env;
+
+    const old_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ data_dir, "kernels", "zenv-old" });
+    defer a.free(old_dir);
+    try runtime.makePath(old_dir);
+    try testing.expect(hasKernel(a, "old"));
+    try testing.expect(!hasKernel(a, "new"));
+
+    try renameKernel(a, "old", "new");
+    try testing.expect(!hasKernel(a, "old"));
+    const json_path = try std.Io.Dir.path.join(a, &[_][]const u8{ data_dir, "kernels", "zenv-new", "kernel.json" });
+    defer a.free(json_path);
+    const text = try runtime.readFileAlloc(a, json_path, 64 * 1024);
+    defer a.free(text);
+    try testing.expect(std.mem.find(u8, text, "\"new\"") != null);
+
+    try renameKernel(a, "missing", "new"); // no old kernel: nothing to do
+    try runtime.makePath(old_dir);
+    try testing.expectError(error.KernelExists, renameKernel(a, "old", "new"));
+
+    try removeKernel(a, "new");
+    try testing.expect(!hasKernel(a, "new"));
+    try testing.expectError(error.KernelNotFound, removeKernel(a, "new"));
 }

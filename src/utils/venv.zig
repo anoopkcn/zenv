@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 const runtime = @import("runtime.zig");
 const output = @import("output.zig");
+const shell = @import("shell.zig");
 
 /// Run by the base interpreter (with `-I`) to describe itself and the venv
 /// layout for `sys.argv[1]`. Mirrors venv.EnvBuilder.ensure_directories.
@@ -75,7 +76,7 @@ pub fn query(a: Allocator, python: []const u8, venv_dir: []const u8, env: ?*cons
         output.printError(a, "Could not run Python '{s}': {s}", .{ python, @errorName(err) }) catch {};
         return error.PythonQueryFailed;
     };
-    if (res.term != .exited or res.term.exited != 0) {
+    if (!runtime.exitedOk(res.term)) {
         output.printError(a, "Python '{s}' failed to describe itself:\n{s}", .{ python, res.stderr }) catch {};
         return error.PythonQueryFailed;
     }
@@ -125,14 +126,25 @@ pub fn pyvenvCfg(a: Allocator, info: *const Interpreter, zenv_version: []const u
     , .{ std.Io.Dir.path.dirname(info.base_executable) orelse "/", info.version, info.real_executable, zenv_version });
 }
 
-fn exists(path: []const u8) bool {
-    std.Io.Dir.cwd().access(runtime.io, path, .{ .follow_symlinks = false }) catch return false;
-    return true;
+fn symlinkIfMissing(target: []const u8, link_path: []const u8, is_dir: bool) !void {
+    if (runtime.lexists(link_path)) return;
+    try std.Io.Dir.cwd().symLink(runtime.io, target, link_path, .{ .is_directory = is_dir });
 }
 
-fn symlinkIfMissing(target: []const u8, link_path: []const u8, is_dir: bool) !void {
-    if (exists(link_path)) return;
-    try std.Io.Dir.cwd().symLink(runtime.io, target, link_path, .{ .is_directory = is_dir });
+/// Writes the `activate*` shims into `scripts` (the venv's bin/): each sources
+/// the zenv script for its shell from `venv_dir`, quoted for that shell.
+fn writeShims(a: Allocator, scripts: []const u8, venv_dir: []const u8) !void {
+    inline for (.{
+        .{ "activate", " (IDEs, scripts)", ".", "activate.sh", shell.appendSqEscaped },
+        .{ "activate.csh", "", "source", "activate.csh", shell.appendCshSqEscaped },
+        .{ "activate.fish", "", "source", "activate.fish", shell.appendFishSqEscaped },
+    }) |s| {
+        var text: std.Io.Writer.Allocating = .init(a);
+        try text.writer.writeAll("# Created by zenv. Sourcing bin/" ++ s[0] ++ s[1] ++ " runs zenv's activation.\n" ++ s[2] ++ " '");
+        try s[4](&text.writer, venv_dir);
+        try text.writer.writeAll("/" ++ s[3] ++ "'\n");
+        try runtime.writeFile(try std.Io.Dir.path.join(a, &[_][]const u8{ scripts, s[0] }), text.written());
+    }
 }
 
 /// Creates the venv at `venv_dir` (absolute) for interpreter `python` (an
@@ -164,21 +176,7 @@ pub fn create(allocator: Allocator, python: []const u8, venv_dir: []const u8, en
     const join = std.Io.Dir.path.join;
     try runtime.writeFile(try join(a, &[_][]const u8{ venv_dir, "pyvenv.cfg" }), try pyvenvCfg(a, &info, runtime.version));
     try runtime.writeFile(try join(a, &[_][]const u8{ venv_dir, ".gitignore" }), "# Created by zenv\n*\n");
-    try runtime.writeFile(try join(a, &[_][]const u8{ info.scripts, "activate" }), try a.print(
-        \\# Created by zenv. Sourcing bin/activate (IDEs, scripts) runs zenv's activation.
-        \\. '{s}/activate.sh'
-        \\
-    , .{venv_dir}));
-    try runtime.writeFile(try join(a, &[_][]const u8{ info.scripts, "activate.csh" }), try a.print(
-        \\# Created by zenv. Sourcing bin/activate.csh runs zenv's activation.
-        \\source '{s}/activate.csh'
-        \\
-    , .{venv_dir}));
-    try runtime.writeFile(try join(a, &[_][]const u8{ info.scripts, "activate.fish" }), try a.print(
-        \\# Created by zenv. Sourcing bin/activate.fish runs zenv's activation.
-        \\source '{s}/activate.fish'
-        \\
-    , .{venv_dir}));
+    try writeShims(a, info.scripts, venv_dir);
 
     output.print(allocator, "Created virtual environment {s} (Python {s}, from {s})", .{ venv_dir, info.version, info.base_executable }) catch {};
 }
@@ -241,4 +239,25 @@ test "pyvenvCfg points home at the base interpreter's directory" {
         \\zenv = 1.2.3
         \\
     , cfg);
+}
+
+test "writeShims quote the venv path for each shell" {
+    const test_support = @import("../test_support.zig");
+    test_support.setupRuntime();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = ".zig-cache/tmp/zenv-venv-shims-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    try runtime.makePath(root);
+    try writeShims(a, root, "/p/it's!");
+
+    const sh = try runtime.readFileAlloc(a, root ++ "/activate", 1024);
+    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate (IDEs, scripts) runs zenv's activation.\n. '/p/it'\\''s!/activate.sh'\n", sh);
+    const csh = try runtime.readFileAlloc(a, root ++ "/activate.csh", 1024);
+    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate.csh runs zenv's activation.\nsource '/p/it'\\''s\\!/activate.csh'\n", csh);
+    const fish = try runtime.readFileAlloc(a, root ++ "/activate.fish", 1024);
+    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate.fish runs zenv's activation.\nsource '/p/it\\'s!/activate.fish'\n", fish);
 }

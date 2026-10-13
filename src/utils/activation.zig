@@ -25,6 +25,8 @@ const output = @import("output.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
 
 const sq = shell.appendSqEscaped;
+const csq = shell.appendCshSqEscaped;
+const fsq = shell.appendFishSqEscaped;
 
 pub const Shell = enum { sh, csh, fish };
 
@@ -57,15 +59,10 @@ pub fn generate(allocator: Allocator, env_config: *const EnvironmentConfig, env_
     output.print(allocator, "Creating activation scripts for '{s}'...", .{env_name}) catch {};
 
     const cwd = try runtime.cwdRealpath(a);
-    const scripts_dir = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_path, "scripts" });
-    runtime.makePath(scripts_dir) catch |err| {
-        output.printError(allocator, "Failed to create scripts directory: {s}", .{@errorName(err)}) catch {};
-    };
-
     var hook: ?[]const u8 = null;
     if (env_config.activate) |act| {
         if (act.script) |src| {
-            hook = shell.copyHookScript(a, src, scripts_dir, "activate_hook.sh", cwd) catch |err| blk: {
+            hook = shell.copyHookScript(a, src, venv_path, "activate_hook.sh", cwd) catch |err| blk: {
                 output.printError(allocator, "Failed to copy activation script '{s}': {s}", .{ src, @errorName(err) }) catch {};
                 break :blk null;
             };
@@ -109,16 +106,12 @@ fn printableModules(allocator: Allocator, a: Allocator, modules: []const []const
 
 fn writeScript(a: Allocator, venv_path: []const u8, name: []const u8, content: []const u8) !void {
     const path = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_path, name });
-    var file = try runtime.createFile(path, .{ .permissions = .fromMode(0o755) });
-    defer file.close(runtime.io);
-    try file.writeStreamingAll(runtime.io, content);
+    try std.Io.Dir.cwd().writeFile(runtime.io, .{ .sub_path = path, .data = content, .flags = .{ .permissions = .fromMode(0o755) } });
 }
 
 // ---------------------------------------------------------------------------
 // Save / restore policy
 // ---------------------------------------------------------------------------
-
-const csq = shell.appendCshSqEscaped;
 
 const Restore = enum {
     /// bin/activate convention: saved as `_OLD_VIRTUAL_<NAME>` when set,
@@ -162,6 +155,90 @@ fn touchedNames(a: Allocator, spec: *const Spec) ![]const []const u8 {
 
 fn indent(w: *Writer, n: usize) !void {
     try w.splatByteAll(' ', n);
+}
+
+// ---------------------------------------------------------------------------
+// Sections every flavour shares
+// ---------------------------------------------------------------------------
+
+/// What differs between the flavours in the module section and the
+/// skipped-hooks notice.
+const Syntax = struct {
+    /// Writes a value as the body of a single-quoted string.
+    esc: fn (*Writer, []const u8) Writer.Error!void,
+    op: fn (*Writer, Op, usize) Writer.Error!void,
+    /// Redirection that sends an `echo` to stderr.
+    stderr: []const u8,
+    /// Runs the next command when the previous one failed.
+    or_else: []const u8,
+    /// Closes an `if` block.
+    end: []const u8,
+    /// Defines `module` from $LMOD_CMD where it is not defined.
+    define_module: [3][]const u8,
+    /// Opens a block that runs when `module` is available.
+    has_module: []const u8,
+    /// Opens the cache replay block: text before the cache file, between it
+    /// and the system name, and after the system name.
+    cache_if: [3][]const u8,
+    /// Closes the cache replay block.
+    cache_end: []const u8,
+
+    fn purge(comptime s: Syntax) []const u8 {
+        return "    module --force purge" ++ s.or_else ++ "echo 'WARNING: Failed to purge modules, continuing anyway' " ++ s.stderr ++ "\n";
+    }
+};
+
+/// `module --force purge` + `module load` for each module. Where `module` is
+/// not defined but Lmod is initialised ($LMOD_CMD), defines it the way Lmod's
+/// init for that shell does; with no module system at all, warns instead.
+fn writeLoads(w: *Writer, comptime s: Syntax, modules: []const []const u8, ind: usize) !void {
+    for (comptime s.define_module ++ [_][]const u8{ s.has_module, s.purge() }) |l| {
+        try indent(w, ind);
+        try w.writeAll(l);
+    }
+    for (modules) |m| {
+        try indent(w, ind + 4);
+        try w.writeAll("module load '");
+        try s.esc(w, m);
+        try w.writeAll("'" ++ s.or_else ++ "echo 'WARNING: Failed to load module ");
+        try s.esc(w, m);
+        try w.writeAll("' " ++ s.stderr ++ "\n");
+    }
+    try indent(w, ind);
+    try w.writeAll("else\n");
+    try indent(w, ind + 4);
+    try w.writeAll("echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" " ++ s.stderr ++ "\n");
+    try indent(w, ind);
+    try w.writeAll(s.end ++ "\n");
+}
+
+/// The module section, chosen at setup:
+///   - no modules: purge where a module system exists (historical behaviour);
+///   - usable captured cache: replay it when the cache file still exists and
+///     the system matches (no `module` command needed), else load;
+///   - otherwise (caching off, or nothing usable captured): load.
+fn writeModules(a: Allocator, w: *Writer, comptime s: Syntax, spec: *const Spec) !void {
+    if (spec.modules.len == 0) return w.writeAll(comptime s.has_module ++ s.purge() ++ s.end ++ "\n\n");
+    const cache = spec.usableModuleCache() orelse {
+        try writeLoads(w, s, spec.modules, 0);
+        return w.writeAll("\n");
+    };
+    try w.writeAll(s.cache_if[0]);
+    try s.esc(w, try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE }));
+    try w.writeAll(s.cache_if[1]);
+    try s.esc(w, cache.system);
+    try w.writeAll(s.cache_if[2]);
+    for (cache.ops) |op| try s.op(w, op, 4);
+    try w.writeAll("else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" " ++ s.stderr ++ "\n");
+    try writeLoads(w, s, spec.modules, 4);
+    try w.writeAll(s.cache_end);
+}
+
+/// The activate hooks are sh code: csh and fish skip them, and say so.
+fn writeHooksSkipped(w: *Writer, comptime s: Syntax, spec: *const Spec) !void {
+    if (spec.hasActivateHooks()) {
+        try w.writeAll("\necho 'WARNING: zenv activate hooks are sh code and were skipped; activate from bash or zsh to run them.' " ++ s.stderr ++ "\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +318,7 @@ pub fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
     };
     try w.writeAll("_ZENV_ACTIVE=1\n\n");
 
-    try writeShModules(a, w, spec);
+    try writeModules(a, w, sh_syntax, spec);
 
     for (spec.ops) |op| try writeShOp(w, op, 0);
 
@@ -280,7 +357,7 @@ pub fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-fn writeShOp(w: *Writer, op: Op, ind: usize) !void {
+fn writeShOp(w: *Writer, op: Op, ind: usize) Writer.Error!void {
     try indent(w, ind);
     switch (op.op) {
         .set => {
@@ -306,63 +383,21 @@ fn writeShOp(w: *Writer, op: Op, ind: usize) !void {
     }
 }
 
-/// `module --force purge` + `module load` for each module. Where `module` is
-/// not defined but Lmod is initialised ($LMOD_CMD), defines it the way Lmod's
-/// bash init does; with no module system at all, warns instead.
-fn writeShLoads(w: *Writer, modules: []const []const u8, ind: usize) !void {
-    const lines = [_][]const u8{
+const sh_syntax: Syntax = .{
+    .esc = sq,
+    .op = writeShOp,
+    .stderr = ">&2",
+    .or_else = " || ",
+    .end = "fi",
+    .define_module = .{
         "if ! command -v module >/dev/null 2>&1 && [ -n \"${LMOD_CMD:-}\" ] ; then\n",
         "    module () { eval \"$(\"$LMOD_CMD\" bash \"$@\")\" ; }\n",
         "fi\n",
-        "if command -v module >/dev/null 2>&1 ; then\n",
-        "    module --force purge || echo 'WARNING: Failed to purge modules, continuing anyway' >&2\n",
-    };
-    for (lines) |l| {
-        try indent(w, ind);
-        try w.writeAll(l);
-    }
-    for (modules) |m| {
-        try indent(w, ind + 4);
-        try w.writeAll("module load '");
-        try sq(w, m);
-        try w.writeAll("' || echo 'WARNING: Failed to load module ");
-        try sq(w, m);
-        try w.writeAll("' >&2\n");
-    }
-    try indent(w, ind);
-    try w.writeAll("else\n");
-    try indent(w, ind + 4);
-    try w.writeAll("echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" >&2\n");
-    try indent(w, ind);
-    try w.writeAll("fi\n");
-}
-
-/// The module section, chosen at setup:
-///   - no modules: purge where a module system exists (historical behaviour);
-///   - usable captured cache: replay it when the cache file still exists and
-///     the system matches (no `module` command needed), else load;
-///   - otherwise (caching off, or nothing usable captured): load.
-fn writeShModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
-    if (spec.modules.len == 0) {
-        try w.writeAll("if command -v module >/dev/null 2>&1 ; then\n    module --force purge || echo 'WARNING: Failed to purge modules, continuing anyway' >&2\nfi\n\n");
-        return;
-    }
-    if (spec.usableModuleCache()) |cache| {
-        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE });
-        try w.writeAll("if [ -f '");
-        try sq(w, cache_file);
-        try w.writeAll("' ] && [ \"${SYSTEMNAME:-$(uname -n)}\" = '");
-        try sq(w, cache.system);
-        try w.writeAll("' ] ; then\n");
-        for (cache.ops) |op| try writeShOp(w, op, 4);
-        try w.writeAll("else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" >&2\n");
-        try writeShLoads(w, spec.modules, 4);
-        try w.writeAll("fi\n\n");
-    } else {
-        try writeShLoads(w, spec.modules, 0);
-        try w.writeAll("\n");
-    }
-}
+    },
+    .has_module = "if command -v module >/dev/null 2>&1 ; then\n",
+    .cache_if = .{ "if [ -f '", "' ] && [ \"${SYSTEMNAME:-$(uname -n)}\" = '", "' ] ; then\n" },
+    .cache_end = "fi\n\n",
+};
 
 // ---------------------------------------------------------------------------
 // csh (csh / tcsh)
@@ -414,7 +449,7 @@ pub fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
     };
     try w.writeAll("set _ZENV_ACTIVE = 1\n\n");
 
-    try writeCshModules(a, w, spec);
+    try writeModules(a, w, csh_syntax, spec);
 
     for (spec.ops) |op| try writeCshOp(w, op, 0);
 
@@ -435,9 +470,7 @@ pub fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
         \\
     );
 
-    if (spec.hasActivateHooks()) {
-        try w.writeAll("\necho 'WARNING: zenv activate hooks are sh code and were skipped; activate from bash or zsh to run them.' > /dev/stderr\n");
-    }
+    try writeHooksSkipped(w, csh_syntax, spec);
     return buf.toOwnedSlice();
 }
 
@@ -486,7 +519,7 @@ pub fn renderCshDeactivate(a: Allocator, spec: *const Spec) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-fn writeCshOp(w: *Writer, op: Op, ind: usize) !void {
+fn writeCshOp(w: *Writer, op: Op, ind: usize) Writer.Error!void {
     if (std.mem.findScalar(u8, op.value, '\n') != null) {
         // A csh quoted string cannot contain a newline.
         try indent(w, ind);
@@ -494,12 +527,7 @@ fn writeCshOp(w: *Writer, op: Op, ind: usize) !void {
         return;
     }
     switch (op.op) {
-        .set => {
-            try indent(w, ind);
-            try w.print("setenv {s} '", .{op.name});
-            try csq(w, op.value);
-            try w.writeAll("'\n");
-        },
+        .set => try writeCshSet(w, op, ind),
         .unset => {
             try indent(w, ind);
             try w.print("unsetenv {s}\n", .{op.name});
@@ -541,70 +569,36 @@ fn writeCshSet(w: *Writer, op: Op, ind: usize) !void {
     try w.writeAll("'\n");
 }
 
-/// csh counterpart of writeShLoads (`module` is an alias here).
-fn writeCshLoads(w: *Writer, modules: []const []const u8, ind: usize) !void {
-    const lines = [_][]const u8{
+/// `module` is an alias in csh.
+const csh_syntax: Syntax = .{
+    .esc = csq,
+    .op = writeCshOp,
+    .stderr = "> /dev/stderr",
+    .or_else = " || ",
+    .end = "endif",
+    .define_module = .{
         "if ( \"`alias module`\" == \"\" ) then\n",
         "    if ( $?LMOD_CMD ) alias module 'eval `$LMOD_CMD tcsh \\!*`'\n",
         "endif\n",
-        "if ( \"`alias module`\" != \"\" ) then\n",
-        "    module --force purge || echo 'WARNING: Failed to purge modules, continuing anyway' > /dev/stderr\n",
-    };
-    for (lines) |l| {
-        try indent(w, ind);
-        try w.writeAll(l);
-    }
-    for (modules) |m| {
-        try indent(w, ind + 4);
-        try w.writeAll("module load '");
-        try csq(w, m);
-        try w.writeAll("' || echo 'WARNING: Failed to load module ");
-        try csq(w, m);
-        try w.writeAll("' > /dev/stderr\n");
-    }
-    try indent(w, ind);
-    try w.writeAll("else\n");
-    try indent(w, ind + 4);
-    try w.writeAll("echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" > /dev/stderr\n");
-    try indent(w, ind);
-    try w.writeAll("endif\n");
-}
-
-/// csh module section: same shapes as sh.
-fn writeCshModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
-    if (spec.modules.len == 0) {
-        try w.writeAll("if ( \"`alias module`\" != \"\" ) then\n    module --force purge || echo 'WARNING: Failed to purge modules, continuing anyway' > /dev/stderr\nendif\n\n");
-        return;
-    }
-    if (spec.usableModuleCache()) |cache| {
-        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE });
-        try w.writeAll(
-            \\set _zenv_sys = "`uname -n`"
-            \\if ( $?SYSTEMNAME ) then
-            \\    if ( "$SYSTEMNAME" != "" ) set _zenv_sys = "$SYSTEMNAME"
-            \\endif
-            \\set _zenv_hit = 0
-            \\if ( -f '
-        );
-        try csq(w, cache_file);
-        try w.writeAll("' ) then\n    if ( \"$_zenv_sys\" == '");
-        try csq(w, cache.system);
-        try w.writeAll("' ) set _zenv_hit = 1\nendif\nif ( $_zenv_hit ) then\n");
-        for (cache.ops) |op| try writeCshOp(w, op, 4);
-        try w.writeAll("else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" > /dev/stderr\n");
-        try writeCshLoads(w, spec.modules, 4);
-        try w.writeAll("endif\nunset _zenv_sys _zenv_hit\n\n");
-    } else {
-        try writeCshLoads(w, spec.modules, 0);
-        try w.writeAll("\n");
-    }
-}
+    },
+    .has_module = "if ( \"`alias module`\" != \"\" ) then\n",
+    .cache_if = .{
+        \\set _zenv_sys = "`uname -n`"
+        \\if ( $?SYSTEMNAME ) then
+        \\    if ( "$SYSTEMNAME" != "" ) set _zenv_sys = "$SYSTEMNAME"
+        \\endif
+        \\set _zenv_hit = 0
+        \\if ( -f '
+        ,
+        "' ) then\n    if ( \"$_zenv_sys\" == '",
+        "' ) set _zenv_hit = 1\nendif\nif ( $_zenv_hit ) then\n",
+    },
+    .cache_end = "endif\nunset _zenv_sys _zenv_hit\n\n",
+};
 
 // ---------------------------------------------------------------------------
 // fish
 // ---------------------------------------------------------------------------
-
-const fsq = shell.appendFishSqEscaped;
 
 pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
     var buf: Writer.Allocating = .init(a);
@@ -671,7 +665,7 @@ pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
     };
     try w.writeAll("set -g _ZENV_ACTIVE 1\n\n");
 
-    try writeFishModules(a, w, spec);
+    try writeModules(a, w, fish_syntax, spec);
 
     for (spec.ops) |op| try writeFishOp(w, op, 0);
 
@@ -693,16 +687,14 @@ pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
         \\
     );
 
-    if (spec.hasActivateHooks()) {
-        try w.writeAll("\necho 'WARNING: zenv activate hooks are sh code and were skipped; activate from bash or zsh to run them.' >&2\n");
-    }
+    try writeHooksSkipped(w, fish_syntax, spec);
     return buf.toOwnedSlice();
 }
 
 /// fish keeps variables whose name ends in PATH as lists that it exports
 /// joined by ':'; list operations then prepend/append without a stray ':'
 /// when the old value is empty. Other variables are plain strings.
-fn writeFishOp(w: *Writer, op: Op, ind: usize) !void {
+fn writeFishOp(w: *Writer, op: Op, ind: usize) Writer.Error!void {
     try indent(w, ind);
     const path_like = std.mem.endsWith(u8, op.name, "PATH");
     switch (op.op) {
@@ -734,74 +726,38 @@ fn writeFishOp(w: *Writer, op: Op, ind: usize) !void {
             }
             try indent(w, ind);
             try w.writeAll("else\n");
-            try indent(w, ind + 4);
-            try w.print("set -gx {s} '", .{op.name});
-            try fsq(w, op.value);
-            try w.writeAll("'\n");
+            try writeFishOp(w, .{ .op = .set, .name = op.name, .value = op.value }, ind + 4);
             try indent(w, ind);
             try w.writeAll("end\n");
         },
     }
 }
 
-/// fish counterpart of writeShLoads; Lmod's fish init defines `module` as
-/// `$LMOD_CMD fish ... | source`.
-fn writeFishLoads(w: *Writer, modules: []const []const u8, ind: usize) !void {
-    const lines = [_][]const u8{
+/// Lmod's fish init defines `module` as `$LMOD_CMD fish ... | source`.
+const fish_syntax: Syntax = .{
+    .esc = fsq,
+    .op = writeFishOp,
+    .stderr = ">&2",
+    .or_else = "; or ",
+    .end = "end",
+    .define_module = .{
         "if not functions -q module; and not type -q module; and set -q LMOD_CMD\n",
         "    function module; $LMOD_CMD fish $argv | source; end\n",
         "end\n",
-        "if functions -q module; or type -q module\n",
-        "    module --force purge; or echo 'WARNING: Failed to purge modules, continuing anyway' >&2\n",
-    };
-    for (lines) |l| {
-        try indent(w, ind);
-        try w.writeAll(l);
-    }
-    for (modules) |m| {
-        try indent(w, ind + 4);
-        try w.writeAll("module load '");
-        try fsq(w, m);
-        try w.writeAll("'; or echo 'WARNING: Failed to load module ");
-        try fsq(w, m);
-        try w.writeAll("' >&2\n");
-    }
-    try indent(w, ind);
-    try w.writeAll("else\n");
-    try indent(w, ind + 4);
-    try w.writeAll("echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" >&2\n");
-    try indent(w, ind);
-    try w.writeAll("end\n");
-}
-
-/// fish module section: same shapes as sh.
-fn writeFishModules(a: Allocator, w: *Writer, spec: *const Spec) !void {
-    if (spec.modules.len == 0) {
-        try w.writeAll("if functions -q module; or type -q module\n    module --force purge; or echo 'WARNING: Failed to purge modules, continuing anyway' >&2\nend\n\n");
-        return;
-    }
-    if (spec.usableModuleCache()) |cache| {
-        const cache_file = try std.Io.Dir.path.join(a, &[_][]const u8{ spec.venv, envspec.MODULE_CACHE_FILE });
-        try w.writeAll(
-            \\set -l _zenv_sys (uname -n)
-            \\if set -q SYSTEMNAME; and test -n "$SYSTEMNAME"
-            \\    set _zenv_sys $SYSTEMNAME
-            \\end
-            \\if test -f '
-        );
-        try fsq(w, cache_file);
-        try w.writeAll("'; and test \"$_zenv_sys\" = '");
-        try fsq(w, cache.system);
-        try w.writeAll("'\n");
-        for (cache.ops) |op| try writeFishOp(w, op, 4);
-        try w.writeAll("else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" >&2\n");
-        try writeFishLoads(w, spec.modules, 4);
-        try w.writeAll("end\nset -e _zenv_sys\n\n");
-    } else {
-        try writeFishLoads(w, spec.modules, 0);
-        try w.writeAll("\n");
-    }
-}
+    },
+    .has_module = "if functions -q module; or type -q module\n",
+    .cache_if = .{
+        \\set -l _zenv_sys (uname -n)
+        \\if set -q SYSTEMNAME; and test -n "$SYSTEMNAME"
+        \\    set _zenv_sys $SYSTEMNAME
+        \\end
+        \\if test -f '
+        ,
+        "'; and test \"$_zenv_sys\" = '",
+        "'\n",
+    },
+    .cache_end = "end\nset -e _zenv_sys\n\n",
+};
 
 // ============================ Tests ============================
 const testing = std.testing;

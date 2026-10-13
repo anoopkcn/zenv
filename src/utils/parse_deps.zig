@@ -1,7 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const StringHashMap = std.StringHashMap(void);
-const errors = @import("errors.zig");
 const output = @import("output.zig");
 const toml = @import("toml");
 
@@ -45,6 +43,14 @@ fn nextNormalized(name: []const u8, i: *usize) ?u8 {
     if (!isNameSeparator(c)) return std.ascii.toLower(c);
     while (i.* < name.len and isNameSeparator(name[i.*])) i.* += 1;
     return '-';
+}
+
+/// PEP 503 normalised project name: lowercase, runs of `-_.` become `-`.
+pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (nextNormalized(name, &i)) |c| try out.append(a, c);
+    return out.items;
 }
 
 // Parse a pyproject.toml file and extract PEP 621 dependencies.
@@ -162,7 +168,8 @@ pub fn parseRequirementsTxt(
     return count;
 }
 
-// Validate raw dependencies, remove duplicates and invalid entries
+/// Drops empty entries, entries without a project name, and later duplicates
+/// of a package (by `samePackage`). The returned list borrows from `raw_deps`.
 pub fn validateDependencies(
     allocator: Allocator,
     raw_deps: []const []const u8,
@@ -170,26 +177,9 @@ pub fn validateDependencies(
 ) !std.ArrayList([]const u8) {
     output.print(allocator, "Validating dependencies for '{s}':", .{env_name}) catch {};
     var valid_deps: std.ArrayList([]const u8) = .empty;
-    // Improved error handling with explicit cleanup of any added items
-    errdefer {
-        // Only free items we owned and added to valid_deps
-        valid_deps.deinit(allocator);
-    }
+    errdefer valid_deps.deinit(allocator);
 
-    // Create a hashmap to track seen package names (case-insensitive). The keys
-    // are owned dupes (see below), so free them before tearing down the table.
-    var seen_packages = StringHashMap.init(allocator);
-    defer {
-        var key_it = seen_packages.keyIterator();
-        while (key_it.next()) |k| allocator.free(k.*);
-        seen_packages.deinit();
-    }
-
-    // Reuse a buffer for lowercase string conversion to reduce allocations
-    var lowercase_buf: std.ArrayList(u8) = .empty;
-    defer lowercase_buf.deinit(allocator);
-
-    for (raw_deps) |dep| {
+    next: for (raw_deps) |dep| {
         if (dep.len == 0) {
             output.print(allocator, "Warning: Skipping empty dependency", .{}) catch {};
             continue;
@@ -204,25 +194,14 @@ pub fn validateDependencies(
             continue;
         }
 
-        // The PEP 503 normal form of the name is the duplicate key (see
-        // samePackage). One buffer is reused for every dependency.
-        lowercase_buf.clearRetainingCapacity();
-        var pos: usize = 0;
-        while (nextNormalized(name, &pos)) |c| try lowercase_buf.append(allocator, c);
-
-        if (seen_packages.contains(lowercase_buf.items)) {
+        for (valid_deps.items) |seen| {
+            if (!samePackage(seen, dep)) continue;
             output.print(allocator, "Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep}) catch {};
-            continue;
+            continue :next;
         }
 
-        // Accept this dependency as valid
         output.print(allocator, "Including dependency: '{s}'", .{dep}) catch {};
         try valid_deps.append(allocator, dep);
-
-        // Add the lowercase name to the seen set using a key we create and own
-        const lowercase_key = try allocator.dupe(u8, lowercase_buf.items);
-        errdefer allocator.free(lowercase_key);
-        try seen_packages.put(lowercase_key, {});
     }
 
     return valid_deps;
@@ -312,12 +291,15 @@ test "validateDependencies keeps any PEP 508 line that starts with a name" {
         "FLASK>=1", // duplicate of flask (case-insensitive)
         "-e .", // not a requirement name
         "",
+        "flask_login",
+        "Flask.Login>=0.6", // duplicate of flask_login (PEP 503)
     };
     var valid = try validateDependencies(a, &raw, "test");
     defer valid.deinit(a);
-    try std.testing.expectEqual(@as(usize, 5), valid.items.len);
+    try std.testing.expectEqual(@as(usize, 6), valid.items.len);
     try std.testing.expectEqualStrings("flask!=2.0", valid.items[0]);
     try std.testing.expectEqualStrings("pkg @ https://example.com/pkg-1.0-py3-none-any.whl", valid.items[4]);
+    try std.testing.expectEqualStrings("flask_login", valid.items[5]);
 }
 
 test "validateDependencies keeps multi-constraint specifiers" {
@@ -456,4 +438,12 @@ test "pyprojectDescription reads [project].description only" {
     try std.testing.expect((try pyprojectDescription(a, "[project]\nname = \"x\"\n")) == null);
     try std.testing.expect((try pyprojectDescription(a, "[project]\ndescription = \"\"\n")) == null);
     try std.testing.expect((try pyprojectDescription(a, "not = = toml")) == null);
+}
+
+test "canonicalName normalises case and separator runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("zope-interface", try canonicalName(a, "Zope.Interface"));
+    try std.testing.expectEqualStrings("a-b", try canonicalName(a, "A__.-b"));
 }

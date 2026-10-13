@@ -11,7 +11,6 @@ test {
     _ = @import("utils/envbuild.zig");
     _ = @import("utils/environment.zig");
     _ = @import("utils/jupyter.zig");
-    _ = @import("utils/auxiliary.zig");
     _ = @import("utils/host.zig");
     _ = @import("utils/paths.zig");
     _ = @import("utils/flags.zig");
@@ -20,5 +19,6 @@ test {
     _ = @import("utils/envspec.zig");
     _ = @import("utils/output.zig");
     _ = @import("utils/hook.zig");
+    _ = @import("utils/python.zig");
     _ = @import("commands.zig");
 }

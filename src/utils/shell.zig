@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const errors = @import("errors.zig");
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
@@ -48,69 +47,44 @@ fn accessFile(path: []const u8) bool {
     return true;
 }
 
-/// Copies a user hook script into the environment's scripts directory and returns
-/// the absolute destination path (caller owns it). Shared by setup and activate.
-///
-/// Source resolution tries, in order: `hook_path` as-is when absolute, then
-/// `cwd_path/hook_path`, then the bare `hook_path` (relative to the process cwd).
-/// `dest_dir` MUST already be the absolute scripts directory (callers resolve any
-/// cwd join before calling); the script is written to `dest_dir/dest_filename`
-/// with mode 0755.
-pub fn copyHookScript(
-    allocator: Allocator,
-    hook_path: []const u8,
-    dest_dir: []const u8,
-    dest_filename: []const u8,
-    cwd_path: []const u8,
-) ![]const u8 {
-    var source_path: []const u8 = undefined;
-    var path_allocd = false;
-
-    if (std.Io.Dir.path.isAbsolute(hook_path)) {
-        source_path = hook_path;
-    } else {
-        // Try relative to cwd (where zenv.json is), then the bare filename.
-        const rel_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ cwd_path, hook_path });
-        defer allocator.free(rel_path);
-
-        if (accessFile(rel_path)) {
-            source_path = try allocator.dupe(u8, rel_path);
-            path_allocd = true;
-        } else if (accessFile(hook_path)) {
-            source_path = hook_path;
-        } else {
-            output.printError(allocator, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
-            return error.FileNotFound;
-        }
-    }
-    defer if (path_allocd) allocator.free(source_path);
-
-    if (!accessFile(source_path)) {
-        output.printError(allocator, "Hook script found but cannot be read: {s}", .{source_path}) catch {};
-        return error.FileNotFound;
-    }
-
-    const dest_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dest_dir, dest_filename });
-    errdefer allocator.free(dest_path);
-
-    output.print(allocator, "Copying hook script {s} -> {s}", .{ source_path, dest_path }) catch {};
-    const content = runtime.readFileAlloc(allocator, source_path, 10 * 1024 * 1024) catch |err| {
-        output.printError(allocator, "Failed to read source hook script '{s}': {s}", .{ source_path, @errorName(err) }) catch {};
+/// Copies a user hook script to `<venv_dir>/scripts/<dest_name>` with mode
+/// 0755, creating scripts/, and returns that path. Shared by setup and
+/// activate. A relative `hook_path` is tried relative to `cwd_path` (where
+/// zenv.json is), then relative to the process cwd. Allocates with `a` (use an
+/// arena).
+pub fn copyHookScript(a: Allocator, hook_path: []const u8, venv_dir: []const u8, dest_name: []const u8, cwd_path: []const u8) ![]const u8 {
+    const src = if (std.Io.Dir.path.isAbsolute(hook_path)) hook_path else blk: {
+        const rel_path = try std.Io.Dir.path.join(a, &[_][]const u8{ cwd_path, hook_path });
+        if (accessFile(rel_path)) break :blk rel_path;
+        if (accessFile(hook_path)) break :blk hook_path;
+        output.printError(a, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path }) catch {};
         return error.FileNotFound;
     };
-    defer allocator.free(content);
+    const dest = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_dir, "scripts", dest_name });
+    output.print(a, "Copying hook script {s} -> {s}", .{ src, dest }) catch {};
+    const cwd = std.Io.Dir.cwd();
+    try cwd.copyFile(src, cwd, dest, runtime.io, .{ .permissions = .fromMode(0o755), .make_path = true });
+    return dest;
+}
 
-    var dest_file = runtime.createFile(dest_path, .{ .permissions = .fromMode(0o755) }) catch |err| {
-        output.printError(allocator, "Failed to create destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
-    defer dest_file.close(runtime.io);
+test "copyHookScript resolves against cwd_path and creates scripts/ with mode 0755" {
+    const test_support = @import("../test_support.zig");
+    test_support.setupRuntime();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    dest_file.writeStreamingAll(runtime.io, content) catch |err| {
-        output.printError(allocator, "Error writing to destination file '{s}': {s}", .{ dest_path, @errorName(err) }) catch {};
-        return error.FileNotFound;
-    };
+    const root = ".zig-cache/tmp/zenv-copy-hook-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    try runtime.makePath(root ++ "/project");
+    try runtime.writeFile(root ++ "/project/hook.sh", "echo hi\n");
 
-    output.print(allocator, "Copied hook script from {s} to {s}", .{ source_path, dest_path }) catch {};
-    return dest_path;
+    const dest = try copyHookScript(a, "hook.sh", root ++ "/venv", "activate_hook.sh", root ++ "/project");
+    try std.testing.expectEqualStrings(root ++ "/venv/scripts/activate_hook.sh", dest);
+    try std.testing.expectEqualStrings("echo hi\n", try runtime.readFileAlloc(a, dest, 1024));
+    const st = try std.Io.Dir.cwd().statFile(runtime.io, dest, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), st.permissions.toMode() & 0o777);
+
+    try std.testing.expectError(error.FileNotFound, copyHookScript(a, "missing.sh", root ++ "/venv", "x.sh", root ++ "/project"));
 }

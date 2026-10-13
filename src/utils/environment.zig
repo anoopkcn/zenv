@@ -3,24 +3,13 @@ const Allocator = std.mem.Allocator;
 const config_module = @import("config.zig");
 const errors = @import("errors.zig");
 const flags_module = @import("flags.zig");
-const process = std.process;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 const host = @import("host.zig");
 
 const ZenvConfig = config_module.ZenvConfig;
 const EnvironmentConfig = config_module.EnvironmentConfig;
-const RegistryEntry = config_module.RegistryEntry;
 const CommandFlags = flags_module.CommandFlags;
-
-// Host / hostname matching primitives now live in host.zig — a leaf module that
-// config.zig can also import without a circular dependency (environment.zig
-// imports config.zig). Re-exported here so existing `environment.<fn>` /
-// `env.<fn>` callers (e.g. in commands.zig) are unchanged.
-pub const getSystemHostname = host.getSystemHostname;
-pub const getHostnameFromCommand = host.getHostnameFromCommand;
-pub const checkHostnameMatch = host.checkHostnameMatch;
-pub const hostMatchesTargets = host.hostMatchesTargets;
 
 // Validate environment for a specific hostname. An environment matches when ANY
 // of its target_machines matches the hostname; an empty target list matches any
@@ -28,21 +17,15 @@ pub const hostMatchesTargets = host.hostMatchesTargets;
 pub fn validateEnvironmentForMachine(env_config: *const EnvironmentConfig, hostname: []const u8) bool {
     if (env_config.target_machines.items.len == 0) return true;
     for (env_config.target_machines.items) |target| {
-        if (checkHostnameMatch(hostname, target)) return true;
+        if (host.checkHostnameMatch(hostname, target)) return true;
     }
     return false;
 }
 
-/// Gets and validates environment configuration based on command-line arguments and current hostname.
-/// This is a key utility function used by most commands to get the environment configuration.
-///
-/// Params:
-///   - allocator: Memory allocator for temporary allocations
-///   - config: ZenvConfig containing all available environments
-///   - args: Command-line arguments including the environment name at args[2]
-///
-/// Returns: Validated environment configuration or null if validation failed
-// Get and validate environment config
+/// The config of the environment named by the first positional argument, with
+/// its `modules_file` (if any) read into `modules`, after checking the current
+/// host against its target_machines unless `--no-host` was given. Prints why
+/// and returns an error when any step fails.
 pub fn getAndValidateEnvironment(
     allocator: Allocator,
     config: *const ZenvConfig,
@@ -65,21 +48,14 @@ pub fn getAndValidateEnvironment(
     if (env_config.modules_file) |modules_file_path| {
         errors.debugLog(allocator, "Modules file specified: {s}", .{modules_file_path});
 
-        // Check if the file exists
-        runtime.access(modules_file_path) catch |err| {
-            if (err == error.FileNotFound) {
-                output.printError(allocator, "Modules file '{s}' not found.", .{modules_file_path}) catch {};
-                return err;
-            } else {
-                output.printError(allocator, "Error accessing modules file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
-                return err;
-            }
-        };
-
         // Read modules with the config's own allocator so the list can be moved
         // into env_config as-is, without copying each name.
         const modules_from_file = readModulesFromFile(env_config.allocator, modules_file_path) catch |err| {
-            output.printError(allocator, "Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
+            if (err == error.FileNotFound) {
+                output.printError(allocator, "Modules file '{s}' not found.", .{modules_file_path}) catch {};
+            } else {
+                output.printError(allocator, "Failed to read modules from file '{s}': {s}", .{ modules_file_path, @errorName(err) }) catch {};
+            }
             return err;
         };
 
@@ -103,26 +79,31 @@ pub fn getAndValidateEnvironment(
         return env_config;
     }
 
-    const hostname = getSystemHostname(allocator) catch |err| {
+    try checkHost(allocator, env_config, env_name);
+    errors.debugLog(allocator, "Hostname validation passed for env '{s}'.", .{env_name});
+    return env_config;
+}
+
+/// Checks the current host against the target_machines of `env_config`. On a
+/// mismatch, says so (naming the targets) and returns TargetMachineMismatch.
+pub fn checkHost(allocator: Allocator, env_config: *const EnvironmentConfig, env_name: []const u8) !void {
+    const hostname = host.getSystemHostname(allocator) catch |err| {
         output.printError(allocator, "Failed to get current hostname: {s}", .{@errorName(err)}) catch {};
         return err;
     };
     defer allocator.free(hostname);
 
     errors.debugLog(allocator, "Comparing current hostname '{s}' with target machines for env '{s}'", .{ hostname, env_name });
-    if (!validateEnvironmentForMachine(env_config, hostname)) {
-        var targets: std.Io.Writer.Allocating = .init(allocator);
-        defer targets.deinit();
-        for (env_config.target_machines.items, 0..) |target, i| {
-            targets.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", target }) catch {};
-        }
-        output.printError(allocator, "Current machine ('{s}') does not match target machines ([{s}]) specified for environment '{s}'.", .{ hostname, targets.written(), env_name }) catch {};
-        output.printError(allocator, "Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
-        return error.TargetMachineMismatch;
-    }
+    if (validateEnvironmentForMachine(env_config, hostname)) return;
 
-    errors.debugLog(allocator, "Hostname validation passed for env '{s}'.", .{env_name});
-    return env_config;
+    var targets: std.Io.Writer.Allocating = .init(allocator);
+    defer targets.deinit();
+    for (env_config.target_machines.items, 0..) |target, i| {
+        targets.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", target }) catch {};
+    }
+    output.printError(allocator, "Current machine ('{s}') does not match target machines ([{s}]) specified for environment '{s}'.", .{ hostname, targets.written(), env_name }) catch {};
+    output.printError(allocator, "Use '--no-host' flag to bypass this check if needed.", .{}) catch {};
+    return error.TargetMachineMismatch;
 }
 
 /// Module names from `file_path`, one per line, in first-seen order without
@@ -178,28 +159,4 @@ test "readModulesFromFile: BOM, CRLF, comments and duplicates" {
     const want = [_][]const u8{ "Stages/2026", "GCC", "Python/3.13.5" };
     try testing.expectEqual(want.len, list.items.len);
     for (want, list.items) |w, got| try testing.expectEqualStrings(w, got);
-}
-
-test "getHostnameFromCommand trims output and rejects empty/failed runs" {
-    test_support.setupRuntime();
-    const a = testing.allocator;
-    const prev = test_support.useFakeExec();
-    defer runtime.exec_backend = prev;
-
-    // happy path: surrounding whitespace is trimmed off the captured stdout
-    test_support.fake_run_stdout = "  jrlogin01.jureca \n";
-    test_support.fake_run_stderr = "";
-    test_support.fake_run_exit = 0;
-    const h = try getHostnameFromCommand(a);
-    defer a.free(h);
-    try testing.expectEqualStrings("jrlogin01.jureca", h);
-
-    // whitespace-only output -> MissingHostname
-    test_support.fake_run_stdout = "   \n";
-    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a));
-
-    // non-zero exit -> ProcessError
-    test_support.fake_run_stdout = "ignored";
-    test_support.fake_run_exit = 1;
-    try testing.expectError(error.ProcessError, getHostnameFromCommand(a));
 }

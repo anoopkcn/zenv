@@ -1,12 +1,10 @@
 const std = @import("std");
 
-const Version = union(Kind) {
+const Version = union(enum) {
     tag: []const u8,
     commit: []const u8,
     // not in a git repo
     unknown,
-
-    pub const Kind = enum { tag, commit, unknown };
 
     pub fn string(v: Version) []const u8 {
         return switch (v) {
@@ -171,125 +169,65 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // --- Individual Target Steps ---
-    if (version == .tag or force_release) {
-        // Add individual target-specific build steps
-        for (release_targets) |release_target| {
-            const target_step_small = b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description}));
-            setupTargetReleaseWithOptimize(b, target_step_small, version_string, release_target.query, .small);
+    // --- Release steps ---
+    // Each target and mode is archived once; its per-target step and the
+    // all-targets step share that archive. Without a tag every release step
+    // fails instead.
+    const tagged = version == .tag or force_release;
+    const fail = &b.addFail("error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.").step;
+    var fast: [release_targets.len]*std.Build.Step = undefined;
+    var small: [release_targets.len]*std.Build.Step = undefined;
+    for (release_targets, &fast, &small) |release_target, *f, *s| {
+        s.* = if (tagged) releaseArchive(b, options_module, release_target.query, .small) else fail;
+        b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})).dependOn(s.*);
 
-            const target_step_fast = b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description}));
-            setupTargetReleaseWithOptimize(b, target_step_fast, version_string, release_target.query, .fast);
-        }
-    } else {
-        // When not on a tag, add the fail message to each individual target step
-        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.";
-        for (release_targets) |release_target| {
-            const target_step_small = b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description}));
-            target_step_small.dependOn(&b.addFail(error_msg).step);
-
-            const target_step_fast = b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description}));
-            target_step_fast.dependOn(&b.addFail(error_msg).step);
-        }
+        f.* = if (tagged) releaseArchive(b, options_module, release_target.query, .fast) else fail;
+        b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description})).dependOn(f.*);
     }
 
-    // --- All Targets Release Step ---
     const release_step = b.step("release", "Create release builds for all targets");
     const release_small_step = b.step("release-small", "Create small release builds for all targets");
-
-    if (version == .tag or force_release) {
-        // Set up release-all steps with different optimizations
-        for (release_targets) |release_target| {
-            setupTargetReleaseWithOptimize(b, release_step, version_string, release_target.query, .fast);
-            setupTargetReleaseWithOptimize(b, release_small_step, version_string, release_target.query, .small);
-        }
-    } else {
-        // Prevent running release builds on non-tagged commits
-        const error_msg = "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.";
-        release_step.dependOn(&b.addFail(error_msg).step);
-        release_small_step.dependOn(&b.addFail(error_msg).step);
+    if (!tagged) {
+        release_step.dependOn(fail);
+        release_small_step.dependOn(fail);
+    } else for (fast, small) |f, s| {
+        release_step.dependOn(f);
+        release_small_step.dependOn(s);
     }
 }
 
-// Creates a simplified version of the target triple for file naming:
-// "<arch>-linux-musl" for musl Linux, "<arch>-<os>" otherwise.
-fn simplifyTripleName(b: *std.Build, target: std.Target) []const u8 {
-    const arch = @tagName(target.cpu.arch);
-    const os = @tagName(target.os.tag);
-    if (target.os.tag == .linux and target.abi == .musl) {
-        return b.fmt("{s}-{s}-musl", .{ arch, os });
-    }
-    return b.fmt("{s}-{s}", .{ arch, os });
-}
-
-// Creates release artifact for a single target with specified optimization
-fn setupTargetReleaseWithOptimize(
+/// Builds zenv for `query` and packs it as
+/// `releases/zenv-<arch>-<os>[-musl][-small].tar.gz` (the names install.sh and
+/// the release workflow expect). Returns the step that installs the archive.
+fn releaseArchive(
     b: *std.Build,
-    release_step: *std.Build.Step,
-    version_string: []const u8,
-    target_query: std.Target.Query,
-    comptime optimize: std.lang.Optimize,
-) void {
-    const target = b.resolveTargetQuery(target_query);
-    const exe_name = "zenv";
-    const release_dir_path = b.pathJoin(&.{"releases"});
-
-    // --- Create Target-Specific Options Module ---
-    const options_module_release = b.addOptions();
-    options_module_release.addOption([]const u8, "version", version_string);
-    const options_import = options_module_release.createModule();
-
-    // --- Build Executable for the Target ---
-    const exe_release = b.addExecutable(.{
-        .name = exe_name,
+    options: *std.Build.Step.Options,
+    query: std.Target.Query,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
+    const target = b.resolveTargetQuery(query);
+    const exe = b.addExecutable(.{
+        .name = "zenv",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    exe_release.root_module.addImport("options", options_import);
+    exe.root_module.addImport("options", options.createModule());
+    exe.root_module.addImport("toml", b.dependency("toml", .{ .target = target, .optimize = optimize }).module("toml"));
 
-    // Add the zig-toml parser for this cross-compiled target
-    const toml_dep_rel = b.dependency("toml", .{ .target = target, .optimize = optimize });
-    exe_release.root_module.addImport("toml", toml_dep_rel.module("toml"));
-
-    // --- Package the Executable ---
-    const triple = target.result.zigTriple(b.allocator) catch |err| {
-        std.log.err("Failed to get target triple: {s}", .{@errorName(err)});
-        return; // Skip this target if we can't get the triple
-    };
-
-    // Create a simplified name for the archive
-    const simplified_triple = simplifyTripleName(b, target.result);
-
-    // Add optimization mode to the archive name for clarity
-    const opt_suffix = switch (optimize) {
-        .small => "-small",
-        else => "",
-    };
-
-    switch (target.result.os.tag) {
-        .macos, .linux => { // Assuming tar for Linux and macOS
-            // Create a more compatible archive format
-            const archive_basename = b.fmt("{s}-{s}{s}.tar.gz", .{ exe_name, simplified_triple, opt_suffix });
-            const tar_cmd = b.addSystemCommand(&.{
-                "tar",
-                "-czf", // Create, use gzip compression (more universal than xz)
-            });
-            const archive_path = tar_cmd.addOutputFileArg(archive_basename);
-            tar_cmd.addArg("-C"); // Change directory before adding files
-            tar_cmd.addDirectoryArg(exe_release.getEmittedBinDirectory()); // Directory containing the exe
-            tar_cmd.addArg(exe_name); // Name of the file to add within the archive
-
-            release_step.dependOn(&b.addInstallFileWithDir(
-                archive_path,
-                .{ .custom = release_dir_path },
-                archive_basename,
-            ).step);
-        },
-        else => {
-            std.log.warn("Skipping packaging for unsupported OS target: {s}", .{triple});
-        },
-    }
+    const t = target.result;
+    const archive_name = b.fmt("zenv-{t}-{t}{s}{s}.tar.gz", .{
+        t.cpu.arch,
+        t.os.tag,
+        if (t.os.tag == .linux and t.abi == .musl) "-musl" else "",
+        if (optimize == .small) "-small" else "",
+    });
+    const tar = b.addSystemCommand(&.{ "tar", "-czf" });
+    const archive = tar.addOutputFileArg(archive_name);
+    tar.addArg("-C");
+    tar.addDirectoryArg(exe.getEmittedBinDirectory());
+    tar.addArg("zenv");
+    return &b.addInstallFileWithDir(archive, .{ .custom = "releases" }, archive_name).step;
 }

@@ -12,34 +12,21 @@ pub const CommandFlags = struct {
     zenv_only: bool = false, // (zenv add) Record the package only in zenv.json, not requirements.txt/pyproject.toml
     no_python: bool = false, // (zenv init, setup --init) Write the new env with "python": false
 
+    /// Each flag's spelling and the field it sets.
+    const spellings = .{
+        .{ "--force", "force_deps" },          .{ "--no-host", "skip_hostname_check" },
+        .{ "--python", "use_default_python" }, .{ "--dev", "dev_mode" },
+        .{ "--uv", "use_uv" },                 .{ "--init", "init_mode" },
+        .{ "--no-cache", "no_cache" },         .{ "--jupyter", "create_jupyter_kernel" },
+        .{ "--zenv", "zenv_only" },            .{ "--no-python", "no_python" },
+    };
+
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
-        var flags = CommandFlags{};
-
-        for (args) |arg| {
-            if (std.mem.eql(u8, arg, "--force")) {
-                flags.force_deps = true;
-            } else if (std.mem.eql(u8, arg, "--no-host")) {
-                flags.skip_hostname_check = true;
-            } else if (std.mem.eql(u8, arg, "--python")) {
-                flags.use_default_python = true;
-            } else if (std.mem.eql(u8, arg, "--dev")) {
-                flags.dev_mode = true;
-            } else if (std.mem.eql(u8, arg, "--uv")) {
-                flags.use_uv = true;
-            } else if (std.mem.eql(u8, arg, "--init")) {
-                flags.init_mode = true;
-            } else if (std.mem.eql(u8, arg, "--no-cache")) {
-                flags.no_cache = true;
-            } else if (std.mem.eql(u8, arg, "--jupyter")) {
-                flags.create_jupyter_kernel = true;
-            } else if (std.mem.eql(u8, arg, "--zenv")) {
-                flags.zenv_only = true;
-            } else if (std.mem.eql(u8, arg, "--no-python")) {
-                flags.no_python = true;
-            }
-        }
-
+        var flags: CommandFlags = .{};
+        for (args) |arg| inline for (spellings) |s| {
+            if (std.mem.eql(u8, arg, s[0])) @field(flags, s[1]) = true;
+        };
         return flags;
     }
 };
@@ -61,6 +48,12 @@ test "unknownFlag finds the first flag a command does not take" {
     try std.testing.expect(unknownFlag(&.{ "zenv", "add", "e", "pkg", "--uv" }, &allowed) == null);
     try std.testing.expectEqualStrings("--no-cach", unknownFlag(&.{ "zenv", "setup", "--uv", "e", "--no-cach" }, &allowed).?);
     try std.testing.expect(unknownFlag(&.{"zenv"}, &allowed) == null);
+}
+
+test "fromArgs sets the field of each flag it sees" {
+    const f = CommandFlags.fromArgs(&.{ "zenv", "setup", "--uv", "e", "--no-host", "--no-python" });
+    try std.testing.expect(f.use_uv and f.skip_hostname_check and f.no_python);
+    try std.testing.expect(!f.force_deps and !f.dev_mode and !f.init_mode and !f.zenv_only);
 }
 
 /// Returns the `idx`-th positional argument after the command (i.e. within
