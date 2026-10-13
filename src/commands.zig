@@ -651,9 +651,16 @@ pub fn handleListCommand(
     const stdout = &stdout_fw.interface; // special case for using standard writer
     defer stdout.flush() catch {};
     const list_all = args.len > 2 and std.mem.eql(u8, args[2], "--all");
-    if (args.len > 3 or (args.len == 3 and !list_all)) {
-        output.printError(allocator, "Unexpected argument '{s}'. Usage: zenv ls [--all]", .{args[args.len - 1]}) catch {};
+    if (args.len > 3 or (args.len == 3 and !list_all and std.mem.startsWith(u8, args[2], "-"))) {
+        output.printError(allocator, "Unexpected argument '{s}'. Usage: zenv ls [--all | <name|id|.>]", .{args[args.len - 1]}) catch {};
         return error.ArgsError;
+    }
+
+    // `zenv ls <name|id|.>`: that one environment, whatever machine it targets.
+    if (args.len == 3 and !list_all) {
+        const ref = try resolveArg(allocator, registry, args, "ls <name|id|.>");
+        printListEntry(allocator, stdout, registry.get(ref));
+        return;
     }
 
     // Without --all, only this machine's envs; a host that cannot be
@@ -672,16 +679,8 @@ pub fn handleListCommand(
         // hostMatchesTargets owns the comma-list matching rules.
         if (current_hostname) |h| if (!host.hostMatchesTargets(h, entry.target_machines_str)) continue;
 
-        stdout.print("- {s}\n  id      : {s}\n  target  : {s}\n  project : {s}\n  venv    : {s}", .{ entry.env_name, entry.id, entry.target_machines_str, entry.project_dir, entry.venv_path }) catch {};
-        // The Python that built the venv, read from <venv>/pyvenv.cfg.
-        // Omitted entirely when the env isn't built (no pyvenv.cfg).
-        if (configurations.readVenvPython(allocator, entry.venv_path) catch null) |py| {
-            defer allocator.free(py);
-            stdout.print("\n  python  : {s}", .{py}) catch {};
-        }
-        if (entry.aliases.items.len > 0) stdout.print("\n  aliases : {f}", .{joinedList(entry.aliases.items)}) catch {};
-        if (entry.description) |desc| stdout.print("\n  desc    : {s}", .{desc}) catch {};
-        stdout.writeAll("\n\n") catch {};
+        printListEntry(allocator, stdout, &entry);
+        stdout.writeAll("\n") catch {};
         count += 1;
     }
 
@@ -707,6 +706,20 @@ pub fn handleListCommand(
     } else {
         stdout.print("Found {d} total registered environment(s)\n", .{count}) catch {};
     }
+}
+
+/// One environment's block in `zenv ls`, ending in a newline.
+fn printListEntry(allocator: Allocator, stdout: *std.Io.Writer, entry: *const configurations.RegistryEntry) void {
+    stdout.print("- {s}\n  id      : {s}\n  target  : {s}\n  project : {s}\n  venv    : {s}", .{ entry.env_name, entry.id, entry.target_machines_str, entry.project_dir, entry.venv_path }) catch {};
+    // The Python that built the venv, read from <venv>/pyvenv.cfg.
+    // Omitted entirely when the env isn't built (no pyvenv.cfg).
+    if (configurations.readVenvPython(allocator, entry.venv_path) catch null) |py| {
+        defer allocator.free(py);
+        stdout.print("\n  python  : {s}", .{py}) catch {};
+    }
+    if (entry.aliases.items.len > 0) stdout.print("\n  aliases : {f}", .{joinedList(entry.aliases.items)}) catch {};
+    if (entry.description) |desc| stdout.print("\n  desc    : {s}", .{desc}) catch {};
+    stdout.writeAll("\n") catch {};
 }
 
 pub fn handleRegisterCommand(

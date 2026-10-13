@@ -93,6 +93,8 @@ fn printUsage() void {
         \\
         \\  ls --all                   Lists all registered environments.
         \\
+        \\  ls <name|id|.>             Shows only the details of the specified environment.
+        \\
         \\  register <name>            Adds the environment '<name>' (from current 'zenv.json') to the
         \\                             global registry[a], making it accessible from any location.
         \\

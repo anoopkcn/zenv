@@ -120,6 +120,8 @@ List all environments registered for the current machine:
 zenv ls # for listing envs configured for current computer
 # OR
 zenv ls --all # for listing all available envs in the registry
+# OR
+zenv ls test # for the details of one env (name, alias, id, or . for the current project)
 ```
 
 Example output:
@@ -516,6 +518,8 @@ Commands:
   ls                         Lists registered environments accessible on this machine.
 
   ls --all                   Lists all registered environments.
+
+  ls <name|id|.>             Shows only the details of the specified environment.
 
   register <name>            Adds the environment '<name>' (from current 'zenv.json') to the
                              global registry[a], making it accessible from any location.
