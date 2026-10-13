@@ -17,6 +17,7 @@ const output = @import("utils/output.zig");
 const runtime = @import("utils/runtime.zig");
 const template = @import("utils/template.zig");
 const envspec = @import("utils/envspec.zig");
+const activation = @import("utils/activation.zig");
 const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -373,14 +374,9 @@ pub fn handleSetupCommand(
     deps_need_cleanup = false;
     command_str.deinit(allocator);
 
-    // 4. Create the final activation script (using a separate utility)
-    try aux.createActivationScript(allocator, env_config, env_name, base_dir);
-
-    // 4b. Record activation as data so run/add can skip bash + activate.sh.
-    // Non-fatal: without it they fall back to sourcing activate.sh.
-    envspec.writeForEnv(allocator, env_config, env_dir_path) catch |err| {
-        output.print(allocator, "Warning: could not write {s}: {s}", .{ envspec.FILE_NAME, @errorName(err) }) catch {};
-    };
+    // 4. Record activation as data (zenv-env.json) and render the per-shell
+    // activation scripts from it.
+    try activation.generate(allocator, env_config, env_name, env_dir_path);
 
     // 5. Register the environment in the global registry
     const cwd_path = runtime.cwdRealpath(allocator) catch |err| {
@@ -491,18 +487,36 @@ pub fn handleActivateCommand(
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
-    if (args.len < 3) {
-        output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id>", .{}) catch {};
+    const identifier = positional(args, 0) orelse {
+        output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id> [--shell=sh|bash|zsh|csh|tcsh]", .{}) catch {};
         return error.EnvironmentNotFound;
+    };
+
+    var shell: activation.Shell = .sh;
+    for (args[2..]) |arg| {
+        const prefix = "--shell=";
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        shell = activation.parseShell(arg[prefix.len..]) orelse {
+            output.printError(allocator, "Unsupported shell '{s}'. Supported: sh, bash, zsh, csh, tcsh.", .{arg[prefix.len..]}) catch {};
+            return error.ArgsError;
+        };
     }
 
-    const ref = registry.resolve(allocator, args[2]) catch |e| return present(allocator, registry, args[2], e);
+    const ref = registry.resolve(allocator, identifier) catch |e| return present(allocator, registry, identifier, e);
     // Rebuild the env first if its config/dependency files changed. The rebuild
     // is silent and any notice goes to stderr, so stdout stays just the
     // activate-script path that the shell sources.
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
 
-    output.rawOut(allocator, "{s}/activate.sh\n", .{registry.get(ref).venv_path}) catch |e| {
+    const script = try std.Io.Dir.path.join(allocator, &[_][]const u8{ registry.get(ref).venv_path, activation.fileName(shell) });
+    defer allocator.free(script);
+    // Envs built by an older zenv have only activate.sh.
+    runtime.access(script) catch {
+        output.printError(allocator, "{s} not found. Re-run 'zenv setup {s}' to generate it.", .{ script, registry.get(ref).env_name }) catch {};
+        return error.EnvironmentNotFound;
+    };
+
+    output.rawOut(allocator, "{s}\n", .{script}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
@@ -1071,7 +1085,7 @@ fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, 
     const spec = &parsed.value;
 
     // Only the module cache needs the system identity; skip the lookup otherwise.
-    const system: ?[]const u8 = if (spec.modules > 0) envspec.currentSystem(allocator) catch null else null;
+    const system: ?[]const u8 = if (spec.modules.len > 0) envspec.currentSystem(allocator) catch null else null;
     defer if (system) |s| allocator.free(s);
     if (envspec.directReason(spec, system, envspec.moduleSystemPresent())) |reason| {
         zerrors.debugLog(allocator, "run: {s}, using activate.sh", .{reason});
@@ -1672,6 +1686,18 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
         output.printError(allocator, "Failed to update activate.sh: {s}", .{@errorName(err)}) catch {};
         return err;
     };
+
+    // csh scripts exist only for envs set up by a zenv that generates them.
+    for ([_][]const u8{ "activate.csh", "deactivate.csh" }) |csh_name| {
+        const csh_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ new_venv_path, csh_name });
+        defer allocator.free(csh_path);
+        updateScriptFile(allocator, csh_path, old_name, new_name, old_venv_path, new_venv_path, .names_and_paths) catch |err| {
+            if (err != error.FileNotFound) {
+                output.printError(allocator, "Failed to update {s}: {s}", .{ csh_name, @errorName(err) }) catch {};
+                return err;
+            }
+        };
+    }
 
     // The setup script aux writes is `setup_env.sh`; `setup.sh` is kept for
     // environments created by older zenv versions. Both may be absent.

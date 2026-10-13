@@ -6,6 +6,9 @@
 //! those operations to their own environment and spawn the command directly,
 //! skipping `bash` + `activate.sh`.
 //!
+//! The same Spec is what activation.zig renders into activate.sh / activate.csh,
+//! so the shells and `run` agree on one description of the environment.
+//!
 //! The data cannot reproduce everything activate.sh does: user activate hooks
 //! are shell code, and a missing or stale module cache means a real
 //! `module load` is needed. `directReason` names the first such blocker and the
@@ -48,24 +51,44 @@ pub const ModuleCache = struct {
 
 pub const Spec = struct {
     format: u32 = FORMAT_VERSION,
+    /// Environment name; the shell prompt prefix is `(name) `.
+    name: []const u8,
     venv: []const u8,
-    /// Number of modules the env declares. Zero means activate.sh only purges.
-    modules: usize,
-    /// activate.commands / activate.script are configured (shell-only).
-    activate_hooks: bool,
-    /// Applied before `ops`, as activate.sh replays the cache before sourcing
-    /// the venv's bin/activate. Null when caching is off or no cache exists.
+    /// Modules the env declares, in load order. Empty means activation only
+    /// purges (when a module system is present).
+    modules: []const []const u8 = &.{},
+    /// `module_cache` from zenv.json. Distinguishes "caching off" from "on but
+    /// nothing captured" when `module_cache` below is null.
+    module_cache_enabled: bool = false,
+    /// Applied before `ops`. Null when caching is off or no data was captured.
     module_cache: ?ModuleCache = null,
-    /// The venv part of activation, in activate.sh order.
+    /// The venv part of activation, in order.
     ops: []const Op,
+    /// activate.commands from zenv.json (sh code, run in the user's shell).
+    activate_commands: []const []const u8 = &.{},
+    /// activate.script, copied into `<venv>/scripts/` at setup (sh code).
+    activate_script: ?[]const u8 = null,
+
+    pub fn hasActivateHooks(self: *const Spec) bool {
+        return self.activate_commands.len > 0 or self.activate_script != null;
+    }
+
+    /// The captured module env when it may be replayed at all: declared
+    /// modules, caching on, a trusted capture in the current format. Whether
+    /// it fits the current system is decided at activation time.
+    pub fn usableModuleCache(self: *const Spec) ?ModuleCache {
+        if (self.modules.len == 0 or !self.module_cache_enabled) return null;
+        const cache = self.module_cache orelse return null;
+        if (cache.version != template.MODULE_CACHE_VERSION or cache.untrusted) return null;
+        return cache;
+    }
 };
 
-/// Ops equivalent to sourcing `<venv>/bin/activate` followed by the exports
-/// activate.sh adds after it. `prompt` is bin/activate's VIRTUAL_ENV_PROMPT
-/// (its format varies by Python version); null leaves the variable alone. Not
-/// reproduced: PS1 (a prompt is meaningless for a spawned command) and the
-/// `deactivate` shell function. All slices are allocated with `allocator`
-/// (use an arena).
+/// The venv part of activation: what the venv's own `bin/activate` exports,
+/// plus zenv's additions. `prompt` is bin/activate's VIRTUAL_ENV_PROMPT (its
+/// format varies by Python version); null leaves the variable alone. PS1 and
+/// `deactivate` are shell concerns, handled by activation.zig. All slices are
+/// allocated with `allocator` (use an arena).
 pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8) ![]const Op {
     const bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
     var ops: std.ArrayList(Op) = .empty;
@@ -92,13 +115,6 @@ pub fn promptFromActivate(script: []const u8) ?[]const u8 {
         return v;
     }
     return null;
-}
-
-fn hasActivateHooks(env_config: *const EnvironmentConfig) bool {
-    const act = env_config.activate orelse return false;
-    if (act.script != null) return true;
-    if (act.commands) |cmds| return cmds.items.len > 0;
-    return false;
 }
 
 /// Parses the module-env data file: one `set NAME=VALUE` or
@@ -150,28 +166,41 @@ fn loadModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache {
     return cache;
 }
 
-/// Writes `<venv_path>/zenv-env.json` for `env_config`. Call at the end of
-/// setup, after the setup script has (re)written the module cache files.
-pub fn writeForEnv(allocator: Allocator, env_config: *const EnvironmentConfig, venv_path: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+/// Builds the Spec for `env_config`. Call at the end of setup, after the setup
+/// script has (re)written the module cache files and created the venv.
+/// `activate_script` is the hook's path inside the venv (already copied), if
+/// any. Everything is allocated with, or borrowed from, `allocator` and
+/// `env_config` (use an arena).
+pub fn build(
+    allocator: Allocator,
+    env_config: *const EnvironmentConfig,
+    env_name: []const u8,
+    venv_path: []const u8,
+    activate_script: ?[]const u8,
+) !Spec {
+    const activate_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin", "activate" });
+    const activate_text = runtime.readFileAlloc(allocator, activate_path, 1024 * 1024) catch "";
 
-    const activate_path = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_path, "bin", "activate" });
-    const activate_script = runtime.readFileAlloc(a, activate_path, 1024 * 1024) catch "";
-    const prompt = promptFromActivate(activate_script);
-
-    const modules = env_config.modules.items.len;
-    const spec = Spec{
+    const modules = env_config.modules.items;
+    return .{
+        .name = env_name,
         .venv = venv_path,
         .modules = modules,
-        .activate_hooks = hasActivateHooks(env_config),
-        .module_cache = if (modules > 0 and env_config.module_cache) loadModuleCache(a, venv_path) else null,
-        .ops = try venvOps(a, venv_path, prompt),
+        .module_cache_enabled = env_config.module_cache,
+        .module_cache = if (modules.len > 0 and env_config.module_cache) loadModuleCache(allocator, venv_path) else null,
+        .ops = try venvOps(allocator, venv_path, promptFromActivate(activate_text)),
+        .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
+        .activate_script = activate_script,
     };
-    const text = try json.Stringify.valueAlloc(a, spec, .{ .whitespace = .indent_2 });
-    const path = try std.Io.Dir.path.join(a, &[_][]const u8{ venv_path, FILE_NAME });
-    try runtime.writeFileAtomic(a, path, text);
+}
+
+/// Writes `spec` to `<spec.venv>/zenv-env.json` atomically.
+pub fn write(allocator: Allocator, spec: *const Spec) !void {
+    const text = try json.Stringify.valueAlloc(allocator, spec.*, .{ .whitespace = .indent_2 });
+    defer allocator.free(text);
+    const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ spec.venv, FILE_NAME });
+    defer allocator.free(path);
+    try runtime.writeFileAtomic(allocator, path, text);
 }
 
 /// Parses a spec. Errors on malformed JSON or a different format version.
@@ -226,8 +255,8 @@ pub fn moduleSystemPresent() bool {
 /// cache, the cache is replayed even when `module` is not initialised in the
 /// calling shell. activate.sh would skip its module section entirely there.
 pub fn directReason(spec: *const Spec, current_system: ?[]const u8, module_system_present: bool) ?[]const u8 {
-    if (spec.activate_hooks) return "activate hooks are configured";
-    if (spec.modules > 0) {
+    if (spec.hasActivateHooks()) return "activate hooks are configured";
+    if (spec.modules.len > 0) {
         const cache = spec.module_cache orelse return "no module cache data";
         if (cache.version != template.MODULE_CACHE_VERSION) return "module cache version mismatch";
         if (cache.untrusted) return "module cache is marked untrusted";
@@ -258,7 +287,7 @@ pub fn applyOp(map: *std.process.Environ.Map, op: Op) !void {
 /// Applies the module cache (when declared) and then the venv ops to `map`.
 /// Only call after `directReason` returned null.
 pub fn apply(map: *std.process.Environ.Map, spec: *const Spec) !void {
-    if (spec.modules > 0) {
+    if (spec.modules.len > 0) {
         if (spec.module_cache) |cache| {
             for (cache.ops) |op| try applyOp(map, op);
         }
@@ -346,10 +375,12 @@ test "spec survives a stringify/parse round trip" {
 
     const mod_ops = [_]Op{.{ .op = .prepend, .name = "LD_LIBRARY_PATH", .value = "/m/lib" }};
     const spec = Spec{
+        .name = "v",
         .venv = "/v",
-        .modules = 1,
-        .activate_hooks = false,
+        .modules = &.{"gcc"},
+        .module_cache_enabled = true,
         .module_cache = .{ .version = 1, .system = "jureca", .untrusted = false, .ops = &mod_ops },
+        .activate_commands = &.{"echo hi"},
         .ops = try venvOps(a, "/v", "(v) "),
     };
     const text = try json.Stringify.valueAlloc(a, spec, .{});
@@ -359,22 +390,25 @@ test "spec survives a stringify/parse round trip" {
     try testing.expectEqual(OpKind.prepend, parsed.value.module_cache.?.ops[0].op);
     try testing.expectEqual(@as(usize, 6), parsed.value.ops.len);
     try testing.expectEqualStrings("", parsed.value.ops[2].value); // unset: default value
+    try testing.expectEqualStrings("gcc", parsed.value.modules[0]);
+    try testing.expect(parsed.value.hasActivateHooks());
+    try testing.expect(parsed.value.activate_script == null);
 
-    try testing.expectError(error.UnsupportedFormat, parseSpec(testing.allocator, "{\"format\":99,\"venv\":\"/v\",\"modules\":0,\"activate_hooks\":false,\"ops\":[]}"));
+    try testing.expectError(error.UnsupportedFormat, parseSpec(testing.allocator, "{\"format\":99,\"name\":\"v\",\"venv\":\"/v\",\"ops\":[]}"));
 }
 
 test "directReason gates on hooks, module cache validity and purge" {
     const cache_ok = ModuleCache{ .version = template.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &.{} };
-    var spec = Spec{ .venv = "/v", .modules = 0, .activate_hooks = false, .ops = &.{} };
+    var spec = Spec{ .name = "v", .venv = "/v", .module_cache_enabled = true, .ops = &.{} };
 
     try testing.expect(directReason(&spec, "laptop", false) == null);
     try testing.expect(directReason(&spec, "laptop", true) != null); // purge needs a shell
 
-    spec.activate_hooks = true;
+    spec.activate_script = "/v/scripts/activate_hook.sh";
     try testing.expect(directReason(&spec, "laptop", false) != null);
-    spec.activate_hooks = false;
+    spec.activate_script = null;
 
-    spec.modules = 2;
+    spec.modules = &.{ "gcc", "cuda" };
     try testing.expect(directReason(&spec, "jureca", true) != null); // no cache
     spec.module_cache = cache_ok;
     try testing.expect(directReason(&spec, "jureca", true) == null);
@@ -390,6 +424,22 @@ test "directReason gates on hooks, module cache validity and purge" {
     untrusted.untrusted = true;
     spec.module_cache = untrusted;
     try testing.expect(directReason(&spec, "jureca", true) != null);
+}
+
+test "usableModuleCache requires modules, caching on, trusted current-format data" {
+    const ok = ModuleCache{ .version = template.MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &.{} };
+    var spec = Spec{ .name = "v", .venv = "/v", .modules = &.{"gcc"}, .module_cache_enabled = true, .module_cache = ok, .ops = &.{} };
+    try testing.expect(spec.usableModuleCache() != null);
+    spec.module_cache_enabled = false;
+    try testing.expect(spec.usableModuleCache() == null);
+    spec.module_cache_enabled = true;
+    spec.modules = &.{};
+    try testing.expect(spec.usableModuleCache() == null);
+    spec.modules = &.{"gcc"};
+    var bad = ok;
+    bad.untrusted = true;
+    spec.module_cache = bad;
+    try testing.expect(spec.usableModuleCache() == null);
 }
 
 test "apply: module ops first, prepend joins non-empty values, unset removes" {
@@ -409,9 +459,10 @@ test "apply: module ops first, prepend joins non-empty values, unset removes" {
         .{ .op = .unset, .name = "PYTHONHOME" },
     };
     const spec = Spec{
+        .name = "v",
         .venv = "/v",
-        .modules = 1,
-        .activate_hooks = false,
+        .modules = &.{"gcc"},
+        .module_cache_enabled = true,
         .module_cache = .{ .version = 1, .system = "s", .untrusted = false, .ops = &mod_ops },
         .ops = &venv_ops,
     };

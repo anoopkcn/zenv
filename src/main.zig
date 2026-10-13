@@ -72,6 +72,7 @@ fn printUsage() void {
         \\
         \\  activate <name|id|.>       Outputs the activation script path for an environment.
         \\                             To use: source $(zenv activate <name|id|.>)
+        \\                             csh/tcsh: source `zenv activate <name|id|.> --shell=csh`
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.

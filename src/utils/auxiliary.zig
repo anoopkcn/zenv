@@ -10,20 +10,9 @@ const EnvironmentRegistry = config_module.EnvironmentRegistry;
 const errors = @import("errors.zig");
 const parse_deps = @import("parse_deps.zig");
 const environment = @import("environment.zig");
-const template_activate = @import("template_activate.zig");
 const template_setup = @import("template_setup.zig");
 const output = @import("output.zig");
 const CommandFlags = @import("flags.zig").CommandFlags;
-
-// Create activation script for the environment
-pub fn createActivationScript(
-    allocator: Allocator,
-    env_config: *const EnvironmentConfig,
-    env_name: []const u8,
-    base_dir: []const u8,
-) !void {
-    return template_activate.createScriptFromTemplate(allocator, env_config, env_name, base_dir);
-}
 
 // Executes a given shell script, inheriting stdio and handling errors
 pub fn executeShellScript(

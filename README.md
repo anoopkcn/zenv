@@ -146,6 +146,14 @@ source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 source $(zenv activate c3c4945)
 ```
 
+From csh or tcsh, ask for the csh script instead (activate hooks are sh code and are skipped there):
+
+```csh
+source `zenv activate test --shell=csh`
+```
+
+Either script defines `deactivate`, which restores the shell to its state before activation.
+
 ### Direct run without activation
 
 One could run commands and tools without explicit activation of Environments using `zenv run` command
