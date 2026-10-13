@@ -7,6 +7,7 @@ test {
     _ = @import("utils/template.zig");
     _ = @import("utils/config.zig");
     _ = @import("utils/activation.zig");
+    _ = @import("utils/venv.zig");
     _ = @import("utils/environment.zig");
     _ = @import("utils/jupyter.zig");
     _ = @import("utils/auxiliary.zig");

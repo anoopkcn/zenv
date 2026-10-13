@@ -84,11 +84,11 @@ pub const Spec = struct {
     }
 };
 
-/// The venv part of activation: what the venv's own `bin/activate` exports,
-/// plus zenv's additions. `prompt` is bin/activate's VIRTUAL_ENV_PROMPT (its
-/// format varies by Python version); null leaves the variable alone. PS1 and
-/// `deactivate` are shell concerns, handled by activation.zig. All slices are
-/// allocated with `allocator` (use an arena).
+/// The venv part of activation: what a venv's `bin/activate` exports, plus
+/// zenv's additions. `prompt` becomes VIRTUAL_ENV_PROMPT; zenv uses the bare
+/// env name, as CPython 3.13+ and uv do. PS1 and `deactivate` are shell
+/// concerns, handled by activation.zig. All slices are allocated with
+/// `allocator` (use an arena).
 pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8) ![]const Op {
     const bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
     var ops: std.ArrayList(Op) = .empty;
@@ -99,22 +99,6 @@ pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8)
     try ops.append(allocator, .{ .op = .set, .name = "PYTHONDONTWRITEBYTECODE", .value = "1" });
     try ops.append(allocator, .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path });
     return ops.toOwnedSlice(allocator);
-}
-
-/// Extracts the `VIRTUAL_ENV_PROMPT=...` assignment from a bin/activate script,
-/// dropping one level of surrounding quotes. Python 3.12 writes `"(name) "`,
-/// 3.13+ writes the bare name. Null when the script has no such line.
-pub fn promptFromActivate(script: []const u8) ?[]const u8 {
-    const key = "VIRTUAL_ENV_PROMPT=";
-    var lines = std.mem.splitScalar(u8, script, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (!std.mem.startsWith(u8, line, key)) continue;
-        const v = line[key.len..];
-        if (v.len >= 2 and (v[0] == '"' or v[0] == '\'') and v[v.len - 1] == v[0]) return v[1 .. v.len - 1];
-        return v;
-    }
-    return null;
 }
 
 /// Parses the module-env data file: one `set NAME=VALUE` or
@@ -178,9 +162,6 @@ pub fn build(
     venv_path: []const u8,
     activate_script: ?[]const u8,
 ) !Spec {
-    const activate_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin", "activate" });
-    const activate_text = runtime.readFileAlloc(allocator, activate_path, 1024 * 1024) catch "";
-
     const modules = env_config.modules.items;
     return .{
         .name = env_name,
@@ -188,7 +169,7 @@ pub fn build(
         .modules = modules,
         .module_cache_enabled = env_config.module_cache,
         .module_cache = if (modules.len > 0 and env_config.module_cache) loadModuleCache(allocator, venv_path) else null,
-        .ops = try venvOps(allocator, venv_path, promptFromActivate(activate_text)),
+        .ops = try venvOps(allocator, venv_path, env_name),
         .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
         .activate_script = activate_script,
     };
@@ -340,13 +321,6 @@ test "venvOps mirrors bin/activate + activate.sh exports, in order" {
 
     const no_prompt = try venvOps(arena.allocator(), "/p/.zenv/demo", null);
     try testing.expectEqual(@as(usize, 5), no_prompt.len);
-}
-
-test "promptFromActivate handles both CPython formats" {
-    try testing.expectEqualStrings("(matbind) ", promptFromActivate("    VIRTUAL_ENV_PROMPT=\"(matbind) \"\n    export VIRTUAL_ENV_PROMPT\n").?);
-    try testing.expectEqualStrings("demo", promptFromActivate("VIRTUAL_ENV_PROMPT=demo\n").?);
-    try testing.expectEqualStrings("my env", promptFromActivate("VIRTUAL_ENV_PROMPT='my env'\n").?);
-    try testing.expect(promptFromActivate("export VIRTUAL_ENV=/x\n") == null);
 }
 
 test "parseModuleData reads set/prepend lines and rejects anything else" {

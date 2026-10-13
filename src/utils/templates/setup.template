@@ -360,9 +360,9 @@ fi
 ohai "Selected Python for venv: $PYTHON_DESCRIPTION ($SELECTED_PYTHON_EXE)"
 info "Version: $($SELECTED_PYTHON_EXE --version 2>&1)"
 
-if ! "$SELECTED_PYTHON_EXE" -c "import venv" 2>/dev/null; then
-    abort "$PYTHON_DESCRIPTION ($SELECTED_PYTHON_EXE) does not support the venv module."
-fi
+# Absolute path of the base interpreter, resolved before the venv's bin/ is put
+# on PATH (a bare "python3" would then resolve to the venv's own link).
+BASE_PYTHON=$(command -v "$SELECTED_PYTHON_EXE") || abort "Cannot resolve $SELECTED_PYTHON_EXE to a path."
 
 VENV_DIR="@@VENV_DIR@@"
 PYTHON_EXE_IN_VENV="$VENV_DIR/bin/python"
@@ -406,7 +406,9 @@ if [ "$PERFORM_VENV_CREATION" = "true" ]; then
         mkdir -p "$VENV_DIR" || abort "Failed to create directory $VENV_DIR for new venv."
     fi
     ohai "Creating/Recreating virtual environment in $VENV_DIR using $PYTHON_DESCRIPTION ($SELECTED_PYTHON_EXE)..."
-    if "$SELECTED_PYTHON_EXE" -m venv "$VENV_DIR"; then
+    # zenv builds the venv layout itself (no venv module, no ensurepip); pip is
+    # installed into it in step 4.
+    if "@@ZENV_EXE@@" __venv "$BASE_PYTHON" "$VENV_DIR"; then
         success "Successfully created/recreated venv."
     else
         abort "Failed to create/recreate venv."
@@ -425,10 +427,25 @@ fi)
 This could indicate that the virtual environment was not created properly."
 fi
 
-source "@@VENV_DIR@@/bin/activate"
+# Activate for the rest of setup. Not via bin/activate: in a zenv-made venv that
+# sources activate.sh, which zenv only writes after this script finishes.
+export VIRTUAL_ENV="@@VENV_DIR@@"
+export PATH="@@VENV_DIR@@/bin:$PATH"
+unset PYTHONHOME
+hash -r 2>/dev/null || true
 
-if ! python -m pip --version >/dev/null 2>&1; then
-  abort "'pip' module not found after activating venv. Ensure Python installation includes pip."
+# Install pip into a venv that has none (zenv-made venvs start without it). With
+# --uv, the uv step below installs it.
+if [ "$USE_UV" != "true" ] && ! python -m pip --version >/dev/null 2>&1; then
+  ohai "Installing pip into the venv"
+  if python -c "import ensurepip" >/dev/null 2>&1; then
+    python -m ensurepip --upgrade --default-pip || abort "ensurepip failed to install pip into the venv."
+  elif "$BASE_PYTHON" -m pip --version >/dev/null 2>&1; then
+    "$BASE_PYTHON" -m pip --python "$PYTHON_EXE_IN_VENV" install pip \
+      || abort "Could not install pip with $PYTHON_DESCRIPTION's pip (needs pip >= 22.3). Re-run with --uv."
+  else
+    abort "$PYTHON_DESCRIPTION has neither ensurepip nor pip, so pip cannot be installed into the venv. Re-run with --uv."
+  fi
 fi
 
 ohai "Temporarily disabling .pyc file generation for package installation"

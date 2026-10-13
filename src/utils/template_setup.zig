@@ -113,6 +113,11 @@ fn createSetupScript(
     try replacements.put("ENV_NAME", env_name);
     try replacements.put("VENV_DIR", venv_dir);
 
+    // The setup script calls back into this binary (`zenv __venv`).
+    const zenv_exe = try runtime.selfExePath(allocator);
+    defer allocator.free(zenv_exe);
+    try replacements.put("ZENV_EXE", zenv_exe);
+
     // Add command string if provided
     if (command_str) |cmd| {
         try replacements.put("COMMAND_STRING", cmd);

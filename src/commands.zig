@@ -18,6 +18,7 @@ const runtime = @import("utils/runtime.zig");
 const template = @import("utils/template.zig");
 const envspec = @import("utils/envspec.zig");
 const activation = @import("utils/activation.zig");
+const venv = @import("utils/venv.zig");
 const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -771,6 +772,16 @@ pub fn handleCdCommand(
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
     };
+}
+
+/// `zenv __venv <python> <dir>`: creates the venv layout at `<dir>` for the
+/// interpreter `<python>` (see utils/venv.zig). Internal, used by setup.
+pub fn handleVenvCommand(allocator: Allocator, args: []const []const u8, zenv_version: []const u8) !void {
+    if (args.len != 4) {
+        output.printError(allocator, "Usage: zenv __venv <python> <absolute venv dir>", .{}) catch {};
+        return error.ArgsError;
+    }
+    try venv.create(allocator, args[2], args[3], zenv_version);
 }
 
 pub fn handlePythonCommand(
@@ -1718,6 +1729,11 @@ fn updateGeneratedScripts(allocator: Allocator, old_name: []const u8, new_name: 
         return err;
     };
 
+    updateVenvBin(allocator, new_venv_path, old_venv_path) catch |err| {
+        output.printError(allocator, "Failed to update venv bin/ scripts: {s}", .{@errorName(err)}) catch {};
+        return err;
+    };
+
     // The module cache embeds absolute paths captured at setup; rather than
     // rewrite them, drop it. Next activate falls back to `module load` and the
     // next `zenv setup` regenerates a correct cache.
@@ -1781,6 +1797,39 @@ fn updateScriptFile(allocator: Allocator, script_path: []const u8, old_name: []c
     }
 
     try runtime.writeFile(script_path, updated_content.items);
+}
+
+/// Rewrites the old venv path in the text files of `<venv>/bin`: console-script
+/// shebangs written by pip/uv (`#!<venv>/bin/python`, or the `/bin/sh` exec
+/// trampoline pip uses for long paths) and activate scripts. Without this,
+/// `pip` and other installed commands break after a rename. Binaries and
+/// symlinks (the python links point outside the venv) are left alone.
+fn updateVenvBin(allocator: Allocator, venv_path: []const u8, old_venv_path: []const u8) !void {
+    const bin_dir = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
+    defer allocator.free(bin_dir);
+
+    var dir = runtime.openDir(bin_dir, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
+    };
+    defer dir.close(runtime.io);
+
+    var it = dir.iterate();
+    while (try it.next(runtime.io)) |entry| {
+        if (entry.kind != .file) continue;
+        const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ bin_dir, entry.name });
+        defer allocator.free(path);
+
+        // Scripts are small; anything bigger (or unreadable) is not ours to edit.
+        const content = runtime.readFileAlloc(allocator, path, 1024 * 1024) catch continue;
+        defer allocator.free(content);
+        if (std.mem.findScalar(u8, content, 0) != null) continue; // binary
+        if (std.mem.find(u8, content, old_venv_path) == null) continue;
+
+        updateScriptFile(allocator, path, "", "", old_venv_path, venv_path, .paths_only) catch |err| {
+            output.printError(allocator, "Failed to update {s}: {s}", .{ path, @errorName(err) }) catch {};
+        };
+    }
 }
 
 fn updateScriptsDirectory(allocator: Allocator, venv_path: []const u8, old_name: []const u8, new_name: []const u8, old_venv_path: []const u8, new_venv_path: []const u8) !void {

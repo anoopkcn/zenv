@@ -34,6 +34,9 @@ pub const Command = enum {
     @"-V",
     @"--version",
     @"--help",
+    /// Internal: `zenv __venv <python> <dir>` creates a venv layout. Called by
+    /// the setup script until setup itself moves into Zig. Not in the help.
+    __venv,
     unknown,
 
     fn fromString(s: []const u8) Command {
@@ -242,6 +245,10 @@ pub fn main(app: std.process.Init) anyerror!void {
             commands.handleValidateCommand(allocator, config_path, args) catch |err| errors.report(allocator, err);
             return;
         },
+        .__venv => {
+            commands.handleVenvCommand(allocator, args, options.version) catch |err| errors.report(allocator, err);
+            return;
+        },
         .unknown => {
             output.printError(allocator, "Unknown command '{s}'", .{args[1]}) catch {};
             output.print(allocator, "run 'zenv help' to see the usage", .{}) catch {};
@@ -367,6 +374,6 @@ fn dispatch(
         .jupyter => try commands.handleJupyterCommand(allocator, registry, args),
 
         // These were handled before dispatch, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .unknown => unreachable,
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .__venv, .unknown => unreachable,
     }
 }
