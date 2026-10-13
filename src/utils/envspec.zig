@@ -245,25 +245,15 @@ pub fn currentSystem(allocator: Allocator) ![]const u8 {
     return host.getHostnameFromSyscall(allocator);
 }
 
-/// Whether a module system (Lmod / Environment Modules) is initialised in this
-/// process environment. activate.sh guards its module section with
-/// `command -v module`; these are the variables that come with that function.
-pub fn moduleSystemPresent() bool {
-    for ([_][]const u8{ "LMOD_CMD", "MODULESHOME", "BASH_FUNC_module%%" }) |name| {
-        if (runtime.env(name)) |v| {
-            if (v.len > 0) return true;
-        }
-    }
-    return false;
-}
-
 /// Returns why `spec` cannot be applied directly (so the caller must source
-/// activate.sh), or null when applying it reproduces activation.
+/// activate.sh), or null when the direct path may be used.
 ///
-/// Known difference on the direct path: with modules declared and a valid
-/// cache, the cache is replayed even when `module` is not initialised in the
-/// calling shell. activate.sh would skip its module section entirely there.
-pub fn directReason(spec: *const Spec, current_system: ?[]const u8, module_system_present: bool) ?[]const u8 {
+/// The direct path deliberately differs from activate.sh in two ways:
+///   - an env without modules does not purge the caller's loaded modules
+///     (activate.sh runs `module --force purge` when a module system exists);
+///   - with modules declared and a valid cache, the cache is replayed even
+///     when `module` is not initialised in the calling shell.
+pub fn directReason(spec: *const Spec, current_system: ?[]const u8) ?[]const u8 {
     if (spec.hasActivateHooks()) return "activate hooks are configured";
     if (spec.modules.len > 0) {
         const cache = spec.module_cache orelse return "no module cache data";
@@ -271,10 +261,6 @@ pub fn directReason(spec: *const Spec, current_system: ?[]const u8, module_syste
         if (cache.untrusted) return "module cache is marked untrusted";
         const sys = current_system orelse return "cannot determine the current system";
         if (!std.mem.eql(u8, sys, cache.system)) return "module cache was captured on another system";
-    } else if (module_system_present) {
-        // activate.sh runs `module --force purge` here, which depends on the
-        // caller's loaded modules and so cannot be stored as data.
-        return "module system present (activate.sh purges modules)";
     }
     return null;
 }
@@ -402,33 +388,33 @@ test "spec survives a stringify/parse round trip" {
     try testing.expectError(error.UnsupportedFormat, parseSpec(testing.allocator, "{\"format\":99,\"name\":\"v\",\"venv\":\"/v\",\"ops\":[]}"));
 }
 
-test "directReason gates on hooks, module cache validity and purge" {
+test "directReason gates on hooks and module cache validity, never on purge" {
     const cache_ok = ModuleCache{ .version = MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &.{} };
     var spec = Spec{ .name = "v", .venv = "/v", .module_cache_enabled = true, .ops = &.{} };
 
-    try testing.expect(directReason(&spec, "laptop", false) == null);
-    try testing.expect(directReason(&spec, "laptop", true) != null); // purge needs a shell
+    // No modules: direct, even on a machine with Lmod (no purge on this path).
+    try testing.expect(directReason(&spec, "laptop") == null);
 
     spec.activate_script = "/v/scripts/activate_hook.sh";
-    try testing.expect(directReason(&spec, "laptop", false) != null);
+    try testing.expect(directReason(&spec, "laptop") != null);
     spec.activate_script = null;
 
     spec.modules = &.{ "gcc", "cuda" };
-    try testing.expect(directReason(&spec, "jureca", true) != null); // no cache
+    try testing.expect(directReason(&spec, "jureca") != null); // no cache
     spec.module_cache = cache_ok;
-    try testing.expect(directReason(&spec, "jureca", true) == null);
-    try testing.expect(directReason(&spec, "juwels", true) != null); // other system
-    try testing.expect(directReason(&spec, null, true) != null);
+    try testing.expect(directReason(&spec, "jureca") == null);
+    try testing.expect(directReason(&spec, "juwels") != null); // other system
+    try testing.expect(directReason(&spec, null) != null);
 
     var stale = cache_ok;
     stale.version += 1;
     spec.module_cache = stale;
-    try testing.expect(directReason(&spec, "jureca", true) != null);
+    try testing.expect(directReason(&spec, "jureca") != null);
 
     var untrusted = cache_ok;
     untrusted.untrusted = true;
     spec.module_cache = untrusted;
-    try testing.expect(directReason(&spec, "jureca", true) != null);
+    try testing.expect(directReason(&spec, "jureca") != null);
 }
 
 test "usableModuleCache requires modules, caching on, trusted current-format data" {

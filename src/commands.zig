@@ -1083,7 +1083,7 @@ fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, 
     // Only the module cache needs the system identity; skip the lookup otherwise.
     const system: ?[]const u8 = if (spec.modules.len > 0) envspec.currentSystem(allocator) catch null else null;
     defer if (system) |s| allocator.free(s);
-    if (envspec.directReason(spec, system, envspec.moduleSystemPresent())) |reason| {
+    if (envspec.directReason(spec, system)) |reason| {
         zerrors.debugLog(allocator, "run: {s}, using activate.sh", .{reason});
         return null;
     }

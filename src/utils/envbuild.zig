@@ -72,7 +72,7 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     var module_pkgs: []const Package = &.{};
     if (modules_present) {
         module_python = try workingPython(a, &env);
-        module_pkgs = try modulePackages(a, &env, module_python);
+        module_pkgs = try modulePackages(a, &env);
     }
 
     const chosen = try selectPython(a, &env, fallback, flags.use_default_python, module_python);
@@ -445,27 +445,90 @@ fn workingPython(a: Allocator, env: *const Map) !?[]const u8 {
 
 pub const Package = struct { name: []const u8, version: []const u8 };
 
-/// `pip list --format=freeze` lines as name/version pairs (`name==version`
-/// only; direct-URL lines are skipped).
-pub fn parseFreeze(a: Allocator, text: []const u8) ![]const Package {
-    var pkgs: std.ArrayList(Package) = .empty;
+/// Name and Version from core metadata (a dist-info METADATA or egg-info
+/// PKG-INFO): RFC 822 style headers up to the first blank line. Null when
+/// either is missing.
+pub fn parseMetadata(text: []const u8) ?Package {
+    var name: ?[]const u8 = null;
+    var version: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \r\t");
-        const sep = std.mem.find(u8, line, "==") orelse continue;
-        try pkgs.append(a, .{ .name = line[0..sep], .version = line[sep + 2 ..] });
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (line.len == 0) break; // end of headers; the body is the description
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
+        const key = line[0..colon];
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (name == null and std.ascii.eqlIgnoreCase(key, "Name")) name = value;
+        if (version == null and std.ascii.eqlIgnoreCase(key, "Version")) version = value;
+    }
+    return .{ .name = name orelse return null, .version = version orelse return null };
+}
+
+/// The leading part of a metadata file: enough for the headers without reading
+/// a long description. Null when unreadable.
+fn readMetadataHead(a: Allocator, path: []const u8) ?[]const u8 {
+    var file = runtime.openFile(path, .{}) catch return null;
+    defer file.close(runtime.io);
+    const buf = a.alloc(u8, 64 * 1024) catch return null;
+    const n = file.readPositionalAll(runtime.io, buf, 0) catch return null;
+    return buf[0..n];
+}
+
+/// Distributions importable from the directories on `python_path`, in
+/// PYTHONPATH order (the first of a name wins, as for the interpreter). Looks
+/// where importlib.metadata looks on a path entry: `*.dist-info/METADATA`,
+/// `*.egg-info/PKG-INFO` or an `*.egg-info` file, and an unzipped `*.egg`
+/// entry's `EGG-INFO/PKG-INFO`. Unreadable entries are skipped.
+pub fn scanPythonPath(a: Allocator, python_path: []const u8) ![]const Package {
+    const join = std.Io.Dir.path.join;
+    var pkgs: std.ArrayList(Package) = .empty;
+    var seen = std.StringHashMap(void).init(a);
+
+    var entries = std.mem.splitScalar(u8, python_path, ':');
+    while (entries.next()) |entry| {
+        if (entry.len == 0) continue;
+        var candidates: std.ArrayList([]const u8) = .empty;
+        if (std.mem.endsWith(u8, entry, ".egg")) {
+            try candidates.append(a, try join(a, &[_][]const u8{ entry, "EGG-INFO", "PKG-INFO" }));
+        } else {
+            var dir = runtime.openDir(entry, .{ .iterate = true }) catch continue;
+            defer dir.close(runtime.io);
+            var it = dir.iterate();
+            while (it.next(runtime.io) catch null) |e| {
+                if (std.mem.endsWith(u8, e.name, ".dist-info")) {
+                    try candidates.append(a, try join(a, &[_][]const u8{ entry, e.name, "METADATA" }));
+                } else if (std.mem.endsWith(u8, e.name, ".egg-info")) {
+                    // A directory holds PKG-INFO; a plain file is the metadata itself.
+                    const inner = try join(a, &[_][]const u8{ entry, e.name, "PKG-INFO" });
+                    const path = if (e.kind == .file) try join(a, &[_][]const u8{ entry, e.name }) else inner;
+                    try candidates.append(a, path);
+                }
+            }
+            // Directory order is arbitrary; keep the result deterministic.
+            std.mem.sort([]const u8, candidates.items, {}, struct {
+                fn lessThan(_: void, l: []const u8, r: []const u8) bool {
+                    return std.mem.lessThan(u8, l, r);
+                }
+            }.lessThan);
+        }
+        for (candidates.items) |path| {
+            const pkg = parseMetadata(readMetadataHead(a, path) orelse continue) orelse continue;
+            const key = try canonicalName(a, pkg.name);
+            if (seen.contains(key)) continue;
+            try seen.put(key, {});
+            try pkgs.append(a, pkg);
+        }
     }
     return pkgs.items;
 }
 
-/// Packages the module Python already provides, which setup does not reinstall.
-fn modulePackages(a: Allocator, env: *const Map, module_python: ?[]const u8) ![]const Package {
-    info(a, "Checking Python packages provided by modules", .{});
-    const py = module_python orelse
-        (try findExecutable(a, "python3", env.get("PATH"))) orelse
-        (try findExecutable(a, "python", env.get("PATH"))) orelse return &.{};
-    const text = capture(a, &.{ py, "-m", "pip", "list", "--format=freeze" }, env) orelse "";
-    const pkgs = try parseFreeze(a, text);
+/// Packages the modules provide *to the venv*: those on the module env's
+/// PYTHONPATH. The module Python's own site-packages do not count: the venv is
+/// created with include-system-site-packages = false and cannot import them,
+/// so such dependencies must still be installed.
+fn modulePackages(a: Allocator, env: *const Map) ![]const Package {
+    info(a, "Checking Python packages the modules provide on PYTHONPATH", .{});
+    const pkgs = try scanPythonPath(a, env.get("PYTHONPATH") orelse "");
     if (pkgs.len == 0) {
         info(a, "No Python packages detected from modules", .{});
         return pkgs;
@@ -866,15 +929,53 @@ test "planInstall excludes module-provided packages by normalised name" {
     try testing.expectEqual(@as(usize, 0), forced.overrides.len);
 }
 
-test "parseFreeze and canonicalName" {
+test "parseMetadata reads Name and Version from the headers only" {
+    const meta = "Metadata-Version: 2.1\r\nname: Zope.Interface\r\nVersion: 6.0\r\n\r\nName: not-a-header\n";
+    const pkg = parseMetadata(meta).?;
+    try testing.expectEqualStrings("Zope.Interface", pkg.name);
+    try testing.expectEqualStrings("6.0", pkg.version);
+    try testing.expect(parseMetadata("Metadata-Version: 2.1\nName: x\n\nVersion: 1\n") == null);
+}
+
+test "canonicalName normalises case and separator runs" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const pkgs = try parseFreeze(a, "numpy==1.26.4\nfoo @ file:///x\nZope.Interface==6.0\r\n");
-    try testing.expectEqual(@as(usize, 2), pkgs.len);
-    try testing.expectEqualStrings("Zope.Interface", pkgs[1].name);
-    try testing.expectEqualStrings("zope-interface", try canonicalName(a, pkgs[1].name));
+    try testing.expectEqualStrings("zope-interface", try canonicalName(a, "Zope.Interface"));
     try testing.expectEqualStrings("a-b", try canonicalName(a, "A__.-b"));
+}
+
+test "scanPythonPath finds dist-info, egg-info and eggs in PYTHONPATH order" {
+    const test_support = @import("../test_support.zig");
+    test_support.setupRuntime();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = ".zig-cache/tmp/zenv-scan-pythonpath-test";
+    runtime.deleteTree(root) catch {};
+    defer runtime.deleteTree(root) catch {};
+    const files = [_][2][]const u8{
+        .{ root ++ "/first/numpy-1.26.4.dist-info/METADATA", "Name: numpy\nVersion: 1.26.4\n" },
+        .{ root ++ "/first/old_pkg-0.1-py3.9.egg-info/PKG-INFO", "Name: old-pkg\nVersion: 0.1\n" },
+        .{ root ++ "/first/flat.egg-info", "Name: flat\nVersion: 2.0\n" },
+        .{ root ++ "/first/broken-1.0.dist-info/RECORD", "" }, // no METADATA: skipped
+        .{ root ++ "/second/NumPy-2.0.dist-info/METADATA", "Name: NumPy\nVersion: 2.0\n" }, // shadowed
+        .{ root ++ "/third/legacy-3.0-py3.9.egg/EGG-INFO/PKG-INFO", "Name: legacy\nVersion: 3.0\n" },
+    };
+    for (files) |f| {
+        try runtime.makePath(std.Io.Dir.path.dirname(f[0]).?);
+        try runtime.writeFile(f[0], f[1]);
+    }
+
+    const pp = root ++ "/first::" ++ root ++ "/missing:" ++ root ++ "/second:" ++ root ++ "/third/legacy-3.0-py3.9.egg";
+    const pkgs = try scanPythonPath(a, pp);
+    try testing.expectEqual(@as(usize, 4), pkgs.len);
+    try testing.expectEqualStrings("flat", pkgs[0].name);
+    try testing.expectEqualStrings("numpy", pkgs[1].name);
+    try testing.expectEqualStrings("1.26.4", pkgs[1].version); // first on the path wins
+    try testing.expectEqualStrings("old-pkg", pkgs[2].name);
+    try testing.expectEqualStrings("legacy", pkgs[3].name);
 }
 
 test "installerArgv for uv and pip" {

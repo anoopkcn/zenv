@@ -13,7 +13,7 @@ The tool provides several key features:
 1. **Environment Management**: Create, activate, and manage Python virtual environments with configurations stored in `zenv.json`
 2. **Registry**: Track environments globally so they can be activated from any directory
 3. **System Targeting**: Configure environments for specific machines or clusters
-4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules
+4. **Dependency Management**: Install Python packages with awareness of what's already provided by system modules (dependencies that the loaded modules put on `PYTHONPATH` are not reinstalled; `zenv setup --force` installs them anyway)
 5. **Add packages on the fly**: `zenv add` installs a package into an environment and records it in the project's manifest (`requirements.txt` / `pyproject.toml` / `zenv.json`)
 6. **Module Integration**: Load HPC modules required for environment setup
 
