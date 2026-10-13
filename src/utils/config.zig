@@ -803,15 +803,23 @@ pub const EnvironmentRegistry = struct {
     /// `getSystemHostname` retry. So the common path never spawns `hostname`, and
     /// a hostname that can't be determined degrades gracefully to the ambiguity.
     pub fn resolve(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) !EnvRef {
-        var cwd: ?[]const u8 = null;
-        defer if (cwd) |c| allocator.free(c);
-        if (std.mem.eql(u8, identifier, ".")) {
-            runtime.access("zenv.json") catch |err| {
-                if (err == error.FileNotFound) return error.ConfigFileNotFound;
-                return err;
-            };
-            cwd = try runtime.cwdRealpath(allocator);
-        }
+        if (!std.mem.eql(u8, identifier, ".")) return self.resolveWithHost(allocator, identifier, null);
+        runtime.access("zenv.json") catch |err| {
+            if (err == error.FileNotFound) return error.ConfigFileNotFound;
+            return err;
+        };
+        const cwd = try runtime.cwdRealpath(allocator);
+        defer allocator.free(cwd);
+        return self.resolveWithHost(allocator, identifier, cwd);
+    }
+
+    /// Resolves "." as if run from `dir`, a canonical project directory (as
+    /// `realpathAlloc` returns it), without changing the process cwd.
+    pub fn resolveDir(self: *const EnvironmentRegistry, allocator: Allocator, dir: []const u8) !EnvRef {
+        return self.resolveWithHost(allocator, ".", dir);
+    }
+
+    fn resolveWithHost(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8, cwd: ?[]const u8) !EnvRef {
         return self.resolveAgainstCwd(identifier, cwd, null) catch |e| {
             if (e != error.AmbiguousIdentifier) return e;
             const hn = host.getSystemHostname(allocator) catch return e;

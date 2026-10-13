@@ -17,6 +17,7 @@ const output = @import("utils/output.zig");
 const runtime = @import("utils/runtime.zig");
 const envspec = @import("utils/envspec.zig");
 const activation = @import("utils/activation.zig");
+const shell_hook = @import("utils/hook.zig");
 const zerrors = @import("utils/errors.zig");
 const ZenvConfig = configurations.ZenvConfig;
 const EnvironmentConfig = configurations.EnvironmentConfig;
@@ -587,13 +588,13 @@ pub fn handleActivateCommand(
     registry: *const EnvironmentRegistry,
     args: []const []const u8,
 ) !void {
-    const identifier = positional(args, 0) orelse {
-        output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id> [--shell=sh|bash|zsh|csh|tcsh|fish]", .{}) catch {};
-        return error.EnvironmentNotFound;
-    };
-
     var shell: activation.Shell = .sh;
+    var auto = false;
     for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--auto")) {
+            auto = true;
+            continue;
+        }
         const prefix = "--shell=";
         if (!std.mem.startsWith(u8, arg, prefix)) continue;
         shell = activation.parseShell(arg[prefix.len..]) orelse {
@@ -601,24 +602,75 @@ pub fn handleActivateCommand(
             return error.ArgsError;
         };
     }
+    if (auto) return activateAuto(allocator, registry, positional(args, 0) orelse ".", shell);
+
+    const identifier = positional(args, 0) orelse {
+        output.printError(allocator, "Missing environment name or ID argument. Usage: zenv activate <name|id> [--shell=sh|bash|zsh|csh|tcsh|fish]", .{}) catch {};
+        return error.EnvironmentNotFound;
+    };
 
     const ref = registry.resolve(allocator, identifier) catch |e| return present(allocator, registry, identifier, e);
     // Rebuild the env first if its config/dependency files changed. The rebuild
     // is silent and any notice goes to stderr, so stdout stays just the
     // activate-script path that the shell sources.
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
+    try printActivateScript(allocator, registry.get(ref), shell);
+}
 
-    const script = try std.Io.Dir.path.join(allocator, &[_][]const u8{ registry.get(ref).venv_path, activation.fileName(shell) });
+/// `zenv activate --auto [dir]`, for the shell hook (`zenv hook`): prints the
+/// activation script of the env registered for the nearest directory at or
+/// above `dir` that holds a zenv.json. Prints nothing when there is none or
+/// several match, so the hook can run it on every project change. Never
+/// rebuilds: a build on `cd` would be slow, and would run newly pulled
+/// activate hooks unasked. A stale env gets a notice and activates as built.
+fn activateAuto(allocator: Allocator, registry: *const EnvironmentRegistry, dir: []const u8, shell: activation.Shell) !void {
+    const start = try runtime.realpathAlloc(allocator, dir);
+    defer allocator.free(start);
+    const root = (try paths.findProjectRoot(allocator, start)) orelse return;
+    defer allocator.free(root);
+
+    const ref = registry.resolveDir(allocator, root) catch |e| switch (e) {
+        error.EnvironmentNotRegistered => return,
+        error.AmbiguousIdentifier => {
+            output.rawErr(allocator, "zenv: {s} has several environments for this machine; activate one by name.\n", .{root}) catch {};
+            return;
+        },
+    };
+    const entry = registry.get(ref);
+    if (autosetup.isStale(allocator, entry) catch false) {
+        output.rawErr(allocator, "zenv: '{s}' is out of date with zenv.json; run 'zenv setup {s}' to rebuild it.\n", .{ entry.env_name, entry.env_name }) catch {};
+    }
+    try printActivateScript(allocator, entry, shell);
+}
+
+fn printActivateScript(allocator: Allocator, entry: *const configurations.RegistryEntry, shell: activation.Shell) !void {
+    const script = try std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.venv_path, activation.fileName(shell) });
     defer allocator.free(script);
     // Envs built by an older zenv have only activate.sh.
     runtime.access(script) catch {
-        output.printError(allocator, "{s} not found. Re-run 'zenv setup {s}' to generate it.", .{ script, registry.get(ref).env_name }) catch {};
+        output.printError(allocator, "{s} not found. Re-run 'zenv setup {s}' to generate it.", .{ script, entry.env_name }) catch {};
         return error.EnvironmentNotFound;
     };
 
     output.rawOut(allocator, "{s}\n", .{script}) catch |e| {
         output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
         return;
+    };
+}
+
+/// `zenv hook <shell>`: prints the shell code that `eval "$(zenv hook zsh)"`
+/// loads to activate project environments on cd.
+pub fn handleHookCommand(allocator: Allocator, args: []const []const u8) !void {
+    const name = positional(args, 0) orelse {
+        output.printError(allocator, "Missing shell. Usage: zenv hook zsh", .{}) catch {};
+        return error.ArgsError;
+    };
+    const code = shell_hook.forShell(name) orelse {
+        output.printError(allocator, "Unsupported shell '{s}' for 'zenv hook'. Supported: zsh.", .{name}) catch {};
+        return error.ArgsError;
+    };
+    output.rawOut(allocator, "{s}", .{code}) catch |e| {
+        output.printError(allocator, "Error writing to stdout: {s}", .{@errorName(e)}) catch {};
     };
 }
 
@@ -1503,7 +1555,7 @@ fn handleAliasCreate(
     const env_identifier = args[4];
 
     // Check if alias name would conflict with existing commands
-    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "rename", "python", "log", "run", "add", "validate", "alias", "jupyter", "help", "version" };
+    const reserved_names = [_][]const u8{ "setup", "activate", "list", "register", "deregister", "cd", "init", "rm", "rename", "python", "log", "run", "add", "validate", "alias", "jupyter", "hook", "help", "version" };
     for (reserved_names) |reserved| {
         if (std.mem.eql(u8, alias_name, reserved)) {
             output.printError(allocator, "Alias name '{s}' conflicts with existing command.", .{alias_name}) catch {};

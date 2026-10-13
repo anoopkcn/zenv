@@ -93,6 +93,22 @@ pub fn venvPath(
     return std.Io.Dir.path.join(allocator, &[_][]const u8{ project_dir, base_dir, env_name });
 }
 
+/// The nearest directory at or above `start` (an absolute path) that holds a
+/// zenv.json, or null if none does. Caller owns the result. The nearest file
+/// wins even if its project has no registered environment, matching how
+/// direnv treats .envrc: a nested project shadows the one around it.
+pub fn findProjectRoot(allocator: Allocator, start: []const u8) !?[]u8 {
+    var dir: []const u8 = start;
+    while (true) {
+        const candidate = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, "zenv.json" });
+        defer allocator.free(candidate);
+        if (runtime.access(candidate)) |_| {
+            return try allocator.dupe(u8, dir);
+        } else |_| {}
+        dir = std.Io.Dir.path.dirname(dir) orelse return null;
+    }
+}
+
 /// True when `base_dir`, resolved against `project_dir` the way `venvPath`
 /// resolves it (a relative base_dir is anchored at project_dir), refers to the
 /// same directory as `zenv_dir` — the global ZENV_DIR holding registry.json,
@@ -185,4 +201,37 @@ test "baseDirIsZenvDir ignores a trailing slash on base_dir" {
     test_support.setupRuntime();
     const a = testing.allocator;
     try testing.expect(try baseDirIsZenvDir(a, "/home/u", ".zenv/", "/home/u/.zenv"));
+}
+
+test "findProjectRoot finds the nearest zenv.json at or above start" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const base = try std.Io.Dir.path.join(a, &[_][]const u8{ runtime.env("TMPDIR") orelse "/tmp", "zenv_paths_test" });
+    defer a.free(base);
+    runtime.deleteTree(base) catch {};
+    defer runtime.deleteTree(base) catch {};
+
+    const outer = try std.Io.Dir.path.join(a, &[_][]const u8{ base, "outer" });
+    defer a.free(outer);
+    const inner = try std.Io.Dir.path.join(a, &[_][]const u8{ outer, "src", "inner" });
+    defer a.free(inner);
+    const deep = try std.Io.Dir.path.join(a, &[_][]const u8{ inner, "pkg" });
+    defer a.free(deep);
+    try runtime.makePath(deep);
+
+    const outer_cfg = try std.Io.Dir.path.join(a, &[_][]const u8{ outer, "zenv.json" });
+    defer a.free(outer_cfg);
+    try runtime.writeFile(outer_cfg, "{}");
+
+    const from_deep = (try findProjectRoot(a, deep)).?;
+    defer a.free(from_deep);
+    try testing.expectEqualStrings(outer, from_deep);
+
+    const inner_cfg = try std.Io.Dir.path.join(a, &[_][]const u8{ inner, "zenv.json" });
+    defer a.free(inner_cfg);
+    try runtime.writeFile(inner_cfg, "{}");
+
+    const nested = (try findProjectRoot(a, deep)).?;
+    defer a.free(nested);
+    try testing.expectEqualStrings(inner, nested);
 }

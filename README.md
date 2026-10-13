@@ -166,6 +166,23 @@ Either script defines `deactivate`, which restores what activation set: `PATH`, 
 
 Jupyter kernels created by zenv (`zenv jupyter create <env>` or `zenv setup <env> --jupyter`) start through `zenv run`, so they get the environment's modules even when the Jupyter server runs with a different module set. The environment needs `ipykernel` (`zenv add <env> ipykernel`).
 
+### Activating on cd (zsh)
+
+To activate a project's environment whenever you `cd` into the project, and deactivate it when you leave, add this to `~/.zshrc`:
+
+```zsh
+eval "$(zenv hook zsh)"
+```
+
+Like direnv, this is a shell hook with no background process. On each directory change it looks for the nearest `zenv.json` at or above the current directory. Moving around inside the same project does nothing; only entering a different project calls `zenv activate --auto`, which prints the activation script of the environment registered for that project.
+
+- Only environments you have built with `zenv setup` (or registered) activate. A `zenv.json` in a cloned repository does nothing until you set it up, and a project with several environments for this machine prints a hint and activates none.
+- The hook never rebuilds. If `zenv.json` or a dependency file changed since the last setup, it prints `zenv: '<name>' is out of date with zenv.json; run 'zenv setup <name>'` and activates the environment as built. This keeps `cd` fast and means newly pulled `activate` hooks run only after you set the environment up again.
+- The nearest `zenv.json` wins: a nested project without a registered environment shadows the project around it, so entering it deactivates the outer environment.
+- The hook deactivates only an environment it activated itself. If you run `deactivate` or activate another environment by hand inside a project, it leaves that alone until you enter another project.
+
+`zenv activate --auto [dir]` also works on its own: `source $(zenv activate --auto)` activates the environment of the project you are in, from any subdirectory.
+
 ### Direct run without activation
 
 One could run commands and tools without explicit activation of Environments using `zenv run` command
@@ -443,6 +460,13 @@ Commands:
                              fish:     source (zenv activate <name|id|.> --shell=fish)
                              'deactivate' then restores what activation set; activating
                              another environment deactivates this one first.
+                             --auto [dir]: the env registered for the nearest zenv.json at
+                             or above dir (default: .); prints nothing if none. Never
+                             rebuilds. Used by 'zenv hook'.
+
+  hook <shell>               Outputs a shell hook that activates a project's environment
+                             when you cd into it and deactivates it when you leave.
+                             Supported: zsh. Add to ~/.zshrc: eval "$(zenv hook zsh)"
 
   run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
                              Does NOT require manual activation of the environment.

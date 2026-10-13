@@ -29,6 +29,7 @@ pub const Command = enum {
     validate,
     alias,
     jupyter,
+    hook,
     help,
     version,
     @"-v",
@@ -81,6 +82,13 @@ fn printUsage() void {
         \\                             fish:     source (zenv activate <name|id|.> --shell=fish)
         \\                             'deactivate' then restores what activation set; activating
         \\                             another environment deactivates this one first.
+        \\                             --auto [dir]: the env registered for the nearest zenv.json at
+        \\                             or above dir (default: .); prints nothing if none. Never
+        \\                             rebuilds. Used by 'zenv hook'.
+        \\
+        \\  hook <shell>               Outputs a shell hook that activates a project's environment
+        \\                             when you cd into it and deactivates it when you leave.
+        \\                             Supported: zsh. Add to ~/.zshrc: eval "$(zenv hook zsh)"
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.
@@ -253,6 +261,10 @@ pub fn main(app: std.process.Init) anyerror!void {
             commands.handlePythonCommand(allocator, args) catch |err| errors.report(allocator, err);
             return;
         },
+        .hook => {
+            commands.handleHookCommand(allocator, args) catch |err| errors.report(allocator, err);
+            return;
+        },
         .validate => {
             commands.handleValidateCommand(allocator, config_path, args) catch |err| errors.report(allocator, err);
             return;
@@ -380,6 +392,6 @@ fn dispatch(
         .jupyter => try commands.handleJupyterCommand(allocator, registry, args),
 
         // These were handled before dispatch, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .unknown => unreachable,
+        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .hook, .unknown => unreachable,
     }
 }

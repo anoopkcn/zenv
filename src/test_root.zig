@@ -19,5 +19,6 @@ test {
     _ = @import("utils/autosetup.zig");
     _ = @import("utils/envspec.zig");
     _ = @import("utils/output.zig");
+    _ = @import("utils/hook.zig");
     _ = @import("commands.zig");
 }

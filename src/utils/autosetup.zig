@@ -301,6 +301,37 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
     output.rawErr(allocator, "zenv: environment '{s}' is up to date.\n", .{entry.env_name}) catch {};
 }
 
+/// How an env's tracked files compare with its recorded stamp.
+const Drift = union(enum) {
+    none,
+    /// Changed since the stamped build; carries the stamp for its replay flags.
+    changed: Stamp,
+    /// No (valid) stamp: built by an older zenv, or the stamp is unreadable.
+    unstamped,
+};
+
+/// A removed/broken config, or an env it no longer defines, counts as no drift:
+/// it must not block a working venv.
+fn drift(allocator: Allocator, entry: *const config.RegistryEntry) !Drift {
+    const config_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" }) catch return .none;
+    defer allocator.free(config_path);
+
+    var cfg = validation.validateAndParse(allocator, config_path) catch return .none;
+    defer cfg.deinit();
+
+    const env_cfg = cfg.getEnvironment(entry.env_name) orelse return .none;
+
+    const current = try computeTrackedHash(allocator, entry.project_dir, entry.env_name, env_cfg);
+    defer allocator.free(current);
+
+    const stamp = readStamp(allocator, entry.venv_path) orelse return .unstamped;
+    if (std.mem.eql(u8, stamp.hash, current)) {
+        stamp.deinit(allocator);
+        return .none;
+    }
+    return .{ .changed = stamp };
+}
+
 /// THE GATE. Call after an environment is resolved and before a command uses its
 /// venv. If the env's tracked files differ from the recorded stamp (or no stamp
 /// exists yet), silently re-runs setup first. Bypassed entirely when
@@ -308,27 +339,28 @@ fn runSetup(allocator: Allocator, entry: *const config.RegistryEntry, replay_fla
 pub fn ensureUpToDate(allocator: Allocator, entry: *const config.RegistryEntry) !void {
     if (runtime.env("ZENV_NO_AUTO_SETUP")) |_| return;
 
-    const config_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ entry.project_dir, "zenv.json" }) catch return;
-    defer allocator.free(config_path);
-
-    // A removed/broken config must not block a working venv; skip the check.
-    var cfg = validation.validateAndParse(allocator, config_path) catch return;
-    defer cfg.deinit();
-
-    const env_cfg = cfg.getEnvironment(entry.env_name) orelse return;
-
-    const current = try computeTrackedHash(allocator, entry.project_dir, entry.env_name, env_cfg);
-    defer allocator.free(current);
-
-    if (readStamp(allocator, entry.venv_path)) |stamp| {
-        defer stamp.deinit(allocator);
-        if (std.mem.eql(u8, stamp.hash, current)) return; // up to date
-        try runSetup(allocator, entry, stamp.flags, "configuration or dependency files changed");
-        return;
+    switch (try drift(allocator, entry)) {
+        .none => {},
+        .changed => |stamp| {
+            defer stamp.deinit(allocator);
+            try runSetup(allocator, entry, stamp.flags, "configuration or dependency files changed");
+        },
+        // Force a one-time re-setup with no replayed flags.
+        .unstamped => try runSetup(allocator, entry, &[_][]const u8{}, "no build record found"),
     }
+}
 
-    // No (valid) stamp: force a one-time re-setup with no replayed flags.
-    try runSetup(allocator, entry, &[_][]const u8{}, "no build record found");
+/// True when the gate would rebuild the env. Never builds: for callers that
+/// must stay fast and side-effect free, like `activate --auto` on every cd.
+pub fn isStale(allocator: Allocator, entry: *const config.RegistryEntry) !bool {
+    switch (try drift(allocator, entry)) {
+        .none => return false,
+        .changed => |stamp| {
+            stamp.deinit(allocator);
+            return true;
+        },
+        .unstamped => return true,
+    }
 }
 
 // ===========================================================================
@@ -571,4 +603,40 @@ test "ensureUpToDate respects ZENV_NO_AUTO_SETUP" {
     test_spawned = false;
     try ensureUpToDate(a, &entry);
     try testing.expect(!test_spawned); // opt-out short-circuits before any work
+}
+
+test "isStale reports drift without spawning setup" {
+    test_support.setupRuntime();
+    const a = testing.allocator;
+    const prev = runtime.exec_backend;
+    runtime.exec_backend = .{ .run = recordingRun, .exec = recordingExec };
+    defer runtime.exec_backend = prev;
+
+    const proj = try testDir(a, "stale_proj");
+    defer cleanup(a, proj);
+    try writeAt(a, proj, "zenv.json", test_config_a);
+
+    const venv = try testDir(a, "stale_venv");
+    defer cleanup(a, venv);
+
+    var entry = try makeEntry(a, "zenv-test", proj, venv);
+    defer entry.deinit(a);
+
+    test_spawned = false;
+    try testing.expect(try isStale(a, &entry)); // no stamp yet
+
+    {
+        const cfg_path = try std.Io.Dir.path.join(a, &[_][]const u8{ proj, "zenv.json" });
+        defer a.free(cfg_path);
+        var cfg = try validation.validateAndParse(a, cfg_path);
+        defer cfg.deinit();
+        const h = try computeTrackedHash(a, proj, "zenv-test", cfg.getEnvironment("zenv-test").?);
+        defer a.free(h);
+        try writeStamp(a, venv, h, &[_][]const u8{});
+    }
+    try testing.expect(!try isStale(a, &entry)); // stamp matches
+
+    try writeAt(a, proj, "zenv.json", test_config_b);
+    try testing.expect(try isStale(a, &entry)); // config drifted
+    try testing.expect(!test_spawned);
 }
