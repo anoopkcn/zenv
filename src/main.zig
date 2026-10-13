@@ -197,6 +197,8 @@ fn printUsage() void {
         \\  3. zenv-pinned Python (set via 'zenv python pin <version>').
         \\  4. System Python.
         \\  Use 'zenv setup <name> --python' to use only the pinned version.
+        \\  When pyproject.toml sets requires-python (as the dependency_file, or with
+        \\  --dev), setup stops if the selected Python does not satisfy it.
         \\
         \\[.] Dot Notation:
         \\  Use '.' as the environment identifier to automatically select an environment

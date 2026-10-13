@@ -315,6 +315,13 @@ The default priority of the Python is as follows:
 
 Environments with `"python": false` skip this entirely: no interpreter is looked up.
 
+If the project's `pyproject.toml` declares `requires-python` and zenv reads it (it is the
+`dependency_file`, or `--dev` installs the project), setup checks the selected Python against it
+before creating the venv. When it does not match, setup stops and says how to make a matching
+Python the one zenv selects: a Python module, `fallback_python`, or a zenv-installed Python you pin.
+An existing venv built with a non-matching Python is reported too; remove it with `zenv rm <name>`
+and set it up again.
+
 If you would like to use zenv-managed default Python for the environment, run:
 
 ```bash
@@ -614,6 +621,8 @@ Options for 'zenv add <name> <package>':
   3. zenv-pinned Python (set via 'zenv python pin <version>').
   4. System Python.
   Use 'zenv setup <name> --python' to use only the pinned version.
+  When pyproject.toml sets requires-python (as the dependency_file, or with
+  --dev), setup stops if the selected Python does not satisfy it.
 
 [.] Dot Notation:
   Use '.' as the environment identifier to automatically select an environment

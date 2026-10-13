@@ -36,6 +36,16 @@ pub const Options = struct {
     /// duplicate ones.
     deps: []const []const u8,
     flags: CommandFlags,
+    /// The project's requires-python, checked against the venv's interpreter
+    /// before the venv is made. Null: no check.
+    requires_python: ?RequiresPython = null,
+};
+
+pub const RequiresPython = struct {
+    /// PEP 440 specifiers, e.g. ">=3.10, <4".
+    spec: []const u8,
+    /// The pyproject.toml it came from, for messages.
+    file: []const u8,
 };
 
 /// Builds the venv for `opts`. Failures are reported before returning
@@ -83,7 +93,9 @@ pub fn run(allocator: Allocator, opts: Options) !void {
 
     const chosen = try selectPython(a, &env, fallback, flags.use_default_python, module_python);
     info(a, "Selected Python for venv: {s} ({s})", .{ chosen.description, chosen.path });
-    if (capture(a, &.{ chosen.path, "--version" }, &env)) |v| info(a, "Version: {s}", .{std.mem.trim(u8, v, " \n")});
+    const chosen_version = capture(a, &.{ chosen.path, "--version" }, &env);
+    if (chosen_version) |v| info(a, "Version: {s}", .{std.mem.trim(u8, v, " \n")});
+    if (opts.requires_python) |rp| try checkRequiresPython(a, opts, &env, chosen, chosen_version, rp);
 
     try ensureVenv(a, opts.venv_dir, chosen, &env);
 
@@ -672,7 +684,12 @@ fn fallbackPython(a: Allocator, cfg: *const EnvironmentConfig, flags: CommandFla
     return if (pinned) |p| try join(a, &[_][]const u8{ p, "bin", "python3" }) else null;
 }
 
-const Chosen = struct { path: []const u8, description: []const u8 };
+const Chosen = struct {
+    path: []const u8,
+    description: []const u8,
+    /// Which step of selectPython found it.
+    source: enum { pinned, module, fallback, system },
+};
 
 /// The interpreter for the venv, in zenv's documented priority: --python's
 /// pinned Python; the module Python; `fallback`; python3; python.
@@ -680,15 +697,15 @@ fn selectPython(a: Allocator, env: *const Map, fallback: ?[]const u8, use_defaul
     const path = env.get("PATH");
     if (use_default) {
         // fallbackPython always returns the pinned Python with --python.
-        if (try findExecutable(a, fallback.?, path)) |p| return .{ .path = p, .description = "default configured Python (from --python flag)" };
+        if (try findExecutable(a, fallback.?, path)) |p| return .{ .path = p, .description = "default configured Python (from --python flag)", .source = .pinned };
         return fail(a, "Default Python ({s}) not found or invalid, but --python flag was specified.", .{fallback.?});
     }
-    if (module_python) |p| return .{ .path = p, .description = "module-provided Python" };
+    if (module_python) |p| return .{ .path = p, .description = "module-provided Python", .source = .module };
     if (fallback) |f| {
-        if (try findExecutable(a, f, path)) |p| return .{ .path = p, .description = "fallback Python" };
+        if (try findExecutable(a, f, path)) |p| return .{ .path = p, .description = "fallback Python", .source = .fallback };
     }
-    if (try findExecutable(a, "python3", path)) |p| return .{ .path = p, .description = "system python3" };
-    if (try findExecutable(a, "python", path)) |p| return .{ .path = p, .description = "system python" };
+    if (try findExecutable(a, "python3", path)) |p| return .{ .path = p, .description = "system python3", .source = .system };
+    if (try findExecutable(a, "python", path)) |p| return .{ .path = p, .description = "system python", .source = .system };
     return fail(a, "Failed to find a suitable Python executable. Please ensure Python is installed and in PATH.", .{});
 }
 
@@ -697,12 +714,17 @@ fn isFile(path: []const u8) bool {
     return st.kind == .file;
 }
 
+/// Whether `venv_dir` holds a working venv, which ensureVenv keeps.
+fn venvUsable(a: Allocator, venv_dir: []const u8) !bool {
+    const join = std.Io.Dir.path.join;
+    return isFile(try join(a, &[_][]const u8{ venv_dir, "bin", "python" })) and
+        isFile(try join(a, &[_][]const u8{ venv_dir, "bin", "activate" }));
+}
+
 /// Keeps a working venv; otherwise clears any partial one and creates it.
 fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Map) !void {
     const join = std.Io.Dir.path.join;
-    const py = try join(a, &[_][]const u8{ venv_dir, "bin", "python" });
-    const act = try join(a, &[_][]const u8{ venv_dir, "bin", "activate" });
-    if (isFile(py) and isFile(act)) {
+    if (try venvUsable(a, venv_dir)) {
         info(a, "Using existing valid virtual environment {s}.", .{venv_dir});
         return;
     }
@@ -724,6 +746,59 @@ fn ensureVenv(a: Allocator, venv_dir: []const u8, chosen: Chosen, env: *const Ma
     info(a, "Creating virtual environment in {s} using {s} ({s})...", .{ venv_dir, chosen.description, chosen.path });
     venv.create(a, chosen.path, venv_dir, env) catch |err|
         return fail(a, "Failed to create the virtual environment: {s}", .{@errorName(err)});
+}
+
+/// Fails setup when the interpreter the venv will run on does not satisfy the
+/// project's requires-python: the existing venv's, which ensureVenv keeps,
+/// else `chosen`. It runs before the venv is made, so a failed setup leaves no
+/// venv with the wrong Python behind. A version or specifier it cannot read
+/// only warns.
+fn checkRequiresPython(a: Allocator, opts: Options, env: *const Map, chosen: Chosen, chosen_version: ?[]const u8, rp: RequiresPython) !void {
+    const kept = try venvUsable(a, opts.venv_dir);
+    const python = if (kept) try std.Io.Dir.path.join(a, &[_][]const u8{ opts.venv_dir, "bin", "python" }) else chosen.path;
+    const out = std.mem.trim(u8, (if (kept) capture(a, &.{ python, "--version" }, env) else chosen_version) orelse "", " \r\n");
+    if (!std.mem.startsWith(u8, out, "Python ")) {
+        warn(a, "Could not read the version of {s}; skipping the requires-python check.", .{python});
+        return;
+    }
+    const version = out["Python ".len..];
+    const ok = python_mod.satisfies(rp.spec, version) catch {
+        warn(a, "Cannot read requires-python '{s}' in {s}; skipping the check.", .{ rp.spec, rp.file });
+        return;
+    };
+    if (ok) return info(a, "Python {s} satisfies requires-python '{s}' from {s}", .{ version, rp.spec, rp.file });
+
+    const name = opts.env_name;
+    if (kept) {
+        return fail(a, "Environment '{s}' was created with Python {s}, but {s} requires Python '{s}'. Remove it with 'zenv rm {s}', then run 'zenv setup {s}' again with a matching Python.", .{ name, version, rp.file, rp.spec, name, name });
+    }
+    const use_pinned = opts.flags.use_default_python;
+    output.printError(a, "{s} requires Python '{s}', but the selected interpreter, {s} ({s}), is Python {s}.", .{ rp.file, rp.spec, chosen.description, chosen.path, version }) catch {};
+    output.printError(a, "Make zenv select a matching Python, then run the setup again:", .{}) catch {};
+
+    // What makes selectPython pick another interpreter: a module Python wins
+    // over all but --python, and fallback_python wins over the pinned Python.
+    const modules_hint = "load a matching Python through \"modules\" in zenv.json ('module spider Python' lists the versions)";
+    if (chosen.source == .module) {
+        output.printError(a, "  - {s}", .{modules_hint}) catch {};
+        return error.ProcessError;
+    }
+    if (use_pinned or opts.env_config.fallback_python == null) {
+        var matching: std.ArrayList([]const u8) = .empty;
+        for (python_mod.installedVersions(a) catch &.{}) |v| {
+            if (python_mod.satisfies(rp.spec, v) catch false) try matching.append(a, v);
+        }
+        if (matching.items.len > 0) {
+            output.printError(a, "  - pin a matching Python zenv installed ({s}): zenv python pin {s}", .{ try std.mem.join(a, ", ", matching.items), matching.items[0] }) catch {};
+        } else {
+            output.printError(a, "  - build one with zenv: zenv python install <version>, then zenv python pin <version>", .{}) catch {};
+        }
+    }
+    if (!use_pinned) {
+        output.printError(a, "  - point \"fallback_python\" in zenv.json at a matching interpreter", .{}) catch {};
+        if (runtime.env("LMOD_CMD") != null or runtime.env("MODULESHOME") != null) output.printError(a, "  - {s}", .{modules_hint}) catch {};
+    }
+    return error.ProcessError;
 }
 
 /// Installs pip into a venv that has none (zenv-made venvs start without it).

@@ -37,33 +37,38 @@ fn getPythonVersionPath(allocator: Allocator, version: []const u8) ![]const u8 {
     return install_dir;
 }
 
+/// The versions installed under ZENV_DIR/python: its subdirectories with a
+/// bin/python3, in directory order. `allocator` should be an arena; the list
+/// and its names are not freed separately.
+pub fn installedVersions(allocator: Allocator) ![]const []const u8 {
+    const base_install_dir = try paths.zenvPath(allocator, "python");
+    var versions: std.ArrayList([]const u8) = .empty;
+    const dir = runtime.openDir(base_install_dir, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) return versions.items;
+        return err;
+    };
+    defer dir.close(runtime.io);
+    var it = dir.iterate();
+    while (try it.next(runtime.io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const install_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, entry.name });
+        if (try hasPython3(allocator, install_path)) try versions.append(allocator, try allocator.dupe(u8, entry.name));
+    }
+    return versions.items;
+}
+
 // List all installed Python versions
 pub fn listInstalledVersions(allocator: Allocator) !void {
+    const versions = try installedVersions(allocator);
     const base_install_dir = try paths.zenvPath(allocator, "python");
-    defer allocator.free(base_install_dir);
+    const default_path = try getDefaultPythonPath(allocator);
+    for (versions) |v| {
+        const install_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, v });
+        const is_default = if (default_path) |path| std.mem.eql(u8, install_path, path) else false;
+        output.rawOut(allocator, "{s}{s}\n", .{ v, if (is_default) " (pinned)" else "" }) catch {};
+    }
 
-    var installed_count: usize = 0;
-    if (runtime.openDir(base_install_dir, .{ .iterate = true })) |dir| {
-        defer dir.close(runtime.io);
-
-        const default_path = try getDefaultPythonPath(allocator);
-        defer if (default_path) |path| allocator.free(path);
-
-        var it = dir.iterate();
-        while (try it.next(runtime.io)) |entry| {
-            if (entry.kind != .directory) continue;
-
-            const install_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ base_install_dir, entry.name });
-            defer allocator.free(install_path);
-            if (!try hasPython3(allocator, install_path)) continue;
-
-            const is_default = if (default_path) |path| std.mem.eql(u8, install_path, path) else false;
-            output.rawOut(allocator, "{s}{s}\n", .{ entry.name, if (is_default) " (pinned)" else "" }) catch {};
-            installed_count += 1;
-        }
-    } else |err| if (err != error.FileNotFound) return err;
-
-    if (installed_count == 0) {
+    if (versions.len == 0) {
         output.print(allocator, "No Python versions installed yet", .{}) catch {};
         output.print(allocator, "Use 'zenv python install <version>' to install a Python version", .{}) catch {};
     }
@@ -224,6 +229,75 @@ pub fn installPython(allocator: Allocator, version: ?[]const u8) !void {
     output.print(allocator, "Installation path: {s}", .{install_dir}) catch {};
 }
 
+/// The release numbers of a version ("3.12.1" -> 3, 12, 1), zero-padded so
+/// that 3.10 equals 3.10.0. A suffix such as "rc1" or "+local" ends it.
+const Release = struct {
+    parts: [4]u32 = @splat(0),
+    len: usize = 0,
+
+    /// Null without a leading number, or with more than four numbers.
+    fn parse(text: []const u8) ?Release {
+        var r: Release = .{};
+        var it = std.mem.splitScalar(u8, text, '.');
+        while (it.next()) |part| {
+            const digits = std.mem.findNone(u8, part, "0123456789") orelse part.len;
+            if (digits == 0 or r.len == r.parts.len) return null;
+            r.parts[r.len] = std.fmt.parseInt(u32, part[0..digits], 10) catch return null;
+            r.len += 1;
+            if (digits < part.len) break;
+        }
+        return r;
+    }
+
+    fn order(a: Release, b: Release) std.math.Order {
+        return std.mem.order(u32, &a.parts, &b.parts);
+    }
+
+    fn samePrefix(a: Release, b: Release, n: usize) bool {
+        return std.mem.eql(u32, a.parts[0..n], b.parts[0..n]);
+    }
+};
+
+/// Whether Python `version` ("3.12.1") satisfies the PEP 440 specifier set
+/// `spec`, as written in requires-python: ">=3.10, <4", "~=3.11", "==3.12.*",
+/// "!=3.9.*". Like pip, only the release numbers count, so 3.13.0rc1 is
+/// treated as 3.13.0. error.InvalidSpecifier when either does not parse;
+/// "===" (arbitrary equality) is not supported.
+pub fn satisfies(spec: []const u8, version: []const u8) error{InvalidSpecifier}!bool {
+    const have = Release.parse(version) orelse return error.InvalidSpecifier;
+    var clauses = std.mem.splitScalar(u8, spec, ',');
+    while (clauses.next()) |raw| {
+        const clause = std.mem.trim(u8, raw, " \t");
+        const op_end = std.mem.findNone(u8, clause, "<>=!~") orelse return error.InvalidSpecifier;
+        const op = clause[0..op_end];
+        var text = std.mem.trim(u8, clause[op_end..], " \t");
+        const wildcard = std.mem.endsWith(u8, text, ".*");
+        if (wildcard) text = text[0 .. text.len - 2];
+        const want = Release.parse(text) orelse return error.InvalidSpecifier;
+        const ord = have.order(want);
+
+        const ok = if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) blk: {
+            const equal = if (wildcard) have.samePrefix(want, want.len) else ord == .eq;
+            break :blk equal == (op[0] == '=');
+        } else if (wildcard)
+            return error.InvalidSpecifier
+        else if (std.mem.eql(u8, op, ">="))
+            ord != .lt
+        else if (std.mem.eql(u8, op, "<="))
+            ord != .gt
+        else if (std.mem.eql(u8, op, ">"))
+            ord == .gt
+        else if (std.mem.eql(u8, op, "<"))
+            ord == .lt
+        else if (std.mem.eql(u8, op, "~=") and want.len >= 2)
+            ord != .lt and have.samePrefix(want, want.len - 1)
+        else
+            return error.InvalidSpecifier;
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // ============================ Tests ============================
 const testing = std.testing;
 const test_support = @import("../test_support.zig");
@@ -262,4 +336,44 @@ test "extractPythonSource names the tarball's directory and fails with tar" {
     test_support.fake_exec_exit = 2; // e.g. a truncated download
     defer test_support.fake_exec_exit = 0;
     try testing.expectError(error.ExtractFailed, extractPythonSource(a, "/b/Python-3.12.1.tgz", "/b", "3.12.1"));
+}
+
+test "satisfies matches requires-python specifiers on release numbers" {
+    const cases = [_]struct { spec: []const u8, version: []const u8, ok: bool }{
+        .{ .spec = ">=3.10", .version = "3.12.1", .ok = true },
+        .{ .spec = ">=3.10", .version = "3.9.6", .ok = false },
+        .{ .spec = ">=3.10", .version = "3.10.0", .ok = true },
+        .{ .spec = ">= 3.8, <4", .version = "3.13.0", .ok = true },
+        .{ .spec = ">=3.8,<3.12", .version = "3.12.0", .ok = false },
+        .{ .spec = ">3.9", .version = "3.9.1", .ok = true },
+        .{ .spec = ">3.9", .version = "3.9", .ok = false },
+        .{ .spec = "<=3.11", .version = "3.11.0", .ok = true },
+        .{ .spec = "<=3.11", .version = "3.11.2", .ok = false },
+        .{ .spec = "~=3.10", .version = "3.13.2", .ok = true },
+        .{ .spec = "~=3.10", .version = "4.0.0", .ok = false },
+        .{ .spec = "~=3.10.2", .version = "3.10.9", .ok = true },
+        .{ .spec = "~=3.10.2", .version = "3.11.0", .ok = false },
+        .{ .spec = "==3.12.*", .version = "3.12.4", .ok = true },
+        .{ .spec = "==3.12.*", .version = "3.13.0", .ok = false },
+        .{ .spec = "==3.12", .version = "3.12.0", .ok = true },
+        .{ .spec = "==3.12", .version = "3.12.1", .ok = false },
+        .{ .spec = "!=3.9.*", .version = "3.9.7", .ok = false },
+        .{ .spec = ">=3.8, !=3.9.*", .version = "3.10.1", .ok = true },
+        // Pre-releases count as their final release, as pip treats them.
+        .{ .spec = ">=3.13", .version = "3.13.0rc1", .ok = true },
+        .{ .spec = "<3.13", .version = "3.13.0rc1", .ok = false },
+    };
+    for (cases) |c| {
+        if ((try satisfies(c.spec, c.version)) != c.ok) {
+            std.debug.print("satisfies(\"{s}\", \"{s}\") != {}\n", .{ c.spec, c.version, c.ok });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "satisfies rejects specifiers it cannot read" {
+    for ([_][]const u8{ "3.10", ">=3.x", ">=3.10,", "===3.10.0", ">=3.*", "~=3", "", ">=1.2.3.4.5" }) |spec| {
+        try testing.expectError(error.InvalidSpecifier, satisfies(spec, "3.12.1"));
+    }
+    try testing.expectError(error.InvalidSpecifier, satisfies(">=3.10", "unknown"));
 }

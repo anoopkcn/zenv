@@ -163,7 +163,7 @@ pub fn initConfig(allocator: Allocator, env_name: []const u8, description: ?[]co
 
     const desc = description orelse pyproject: {
         const content = runtime.readFileAlloc(a, "pyproject.toml", 10 * 1024 * 1024) catch break :pyproject null;
-        break :pyproject try deps.pyprojectDescription(a, content);
+        break :pyproject try deps.pyprojectField(a, content, "description");
     } orelse "Env config created by zenv";
 
     const template = try initConfigJson(a, env_name, desc, dependency_file, with_python);
@@ -388,6 +388,10 @@ pub fn handleSetupCommand(
         try all_required_deps.appendSlice(allocator, env_config.dev_dependencies.items);
     }
 
+    // The project's requires-python, from a pyproject.toml dependency file;
+    // with --dev, ./pyproject.toml (the project pip installs) takes precedence.
+    var requires_python: ?envbuild.RequiresPython = null;
+
     // Add dependencies from requirements file if specified
     if (env_config.dependency_file) |req_file| {
         const req_content = runtime.readFileAlloc(allocator, req_file, 1 * 1024 * 1024) catch |err| {
@@ -407,6 +411,9 @@ pub fn handleSetupCommand(
             try deps.parsePyprojectToml(allocator, req_content, &all_required_deps)
         else
             try deps.parseRequirementsTxt(allocator, req_content, &all_required_deps);
+        if (is_toml) if (try deps.pyprojectField(allocator, req_content, "requires-python")) |spec| {
+            requires_python = .{ .spec = spec, .file = req_file };
+        };
 
         if (req_file_dep_count > 0) {
             output.print(allocator, "Added {d} dependencies from file '{s}'", .{ req_file_dep_count, req_file }) catch {};
@@ -415,6 +422,12 @@ pub fn handleSetupCommand(
         }
     } else {
         output.print(allocator, "No requirements file specified in configuration.", .{}) catch {};
+    }
+
+    if (flags.dev_mode and env_config.python) {
+        if (runtime.readFileAlloc(allocator, "pyproject.toml", 10 * 1024 * 1024)) |content| {
+            if (try deps.pyprojectField(allocator, content, "requires-python")) |spec| requires_python = .{ .spec = spec, .file = "pyproject.toml" };
+        } else |_| {}
     }
 
     // Debug output - print the combined dependencies
@@ -431,6 +444,7 @@ pub fn handleSetupCommand(
         .project_dir = setup_cwd,
         .deps = all_required_deps.items,
         .flags = flags,
+        .requires_python = requires_python,
     });
     output.print(allocator, "Environment '{s}' setup completed successfully.", .{env_name}) catch {};
 

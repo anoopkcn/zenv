@@ -116,18 +116,19 @@ pub fn parsePyprojectToml(
     return count;
 }
 
-/// `[project].description` of the pyproject.toml `content`, duped into
-/// `allocator`; null when absent, empty or the document does not parse.
-pub fn pyprojectDescription(allocator: Allocator, content: []const u8) !?[]u8 {
+/// The string `[project].<key>` of the pyproject.toml `content` (e.g.
+/// "description", "requires-python"), trimmed and duped into `allocator`;
+/// null when absent, empty, not a string or the document does not parse.
+pub fn pyprojectField(allocator: Allocator, content: []const u8, key: []const u8) !?[]u8 {
     var parser = toml.Parser(toml.Table).init(allocator);
     defer parser.deinit();
     var parsed = parser.parseString(content) catch return null;
     defer parsed.deinit();
     const project = parsed.value.get("project") orelse return null;
     if (project != .table) return null;
-    const desc = project.table.get("description") orelse return null;
-    if (desc != .string) return null;
-    const trimmed = std.mem.trim(u8, desc.string, " \t\r\n");
+    const value = project.table.get(key) orelse return null;
+    if (value != .string) return null;
+    const trimmed = std.mem.trim(u8, value.string, " \t\r\n");
     if (trimmed.len == 0) return null;
     return try allocator.dupe(u8, trimmed);
 }
@@ -424,20 +425,27 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
     }
 }
 
-test "pyprojectDescription reads [project].description only" {
+test "pyprojectField reads [project] strings only" {
     const a = std.testing.allocator;
-    const d = (try pyprojectDescription(a,
+    const content =
         \\[tool.x]
         \\description = "not this"
         \\[project]
         \\name = "demo"
         \\description = "  A demo project  "
-    )).?;
+        \\requires-python = ">=3.10"
+        \\version = 1
+    ;
+    const d = (try pyprojectField(a, content, "description")).?;
     defer a.free(d);
     try std.testing.expectEqualStrings("A demo project", d);
-    try std.testing.expect((try pyprojectDescription(a, "[project]\nname = \"x\"\n")) == null);
-    try std.testing.expect((try pyprojectDescription(a, "[project]\ndescription = \"\"\n")) == null);
-    try std.testing.expect((try pyprojectDescription(a, "not = = toml")) == null);
+    const rp = (try pyprojectField(a, content, "requires-python")).?;
+    defer a.free(rp);
+    try std.testing.expectEqualStrings(">=3.10", rp);
+    try std.testing.expect((try pyprojectField(a, content, "version")) == null); // not a string
+    try std.testing.expect((try pyprojectField(a, "[project]\nname = \"x\"\n", "description")) == null);
+    try std.testing.expect((try pyprojectField(a, "[project]\ndescription = \"\"\n", "description")) == null);
+    try std.testing.expect((try pyprojectField(a, "not = = toml", "description")) == null);
 }
 
 test "canonicalName normalises case and separator runs" {
