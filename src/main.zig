@@ -72,7 +72,8 @@ fn printUsage() void {
         \\
         \\  hook <shell>               Outputs a shell hook that activates a project's environment
         \\                             when you cd into it and deactivates it when you leave.
-        \\                             Supported: zsh. Add to ~/.zshrc: eval "$(zenv hook zsh)"
+        \\                             zsh:  add to ~/.zshrc: eval "$(zenv hook zsh)"
+        \\                             bash: add to the end of ~/.bashrc: eval "$(zenv hook bash)"
         \\
         \\  run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
         \\                             Does NOT require manual activation of the environment.

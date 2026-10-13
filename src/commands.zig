@@ -626,14 +626,14 @@ fn printActivateScript(allocator: Allocator, entry: *const configurations.Regist
 }
 
 /// `zenv hook <shell>`: prints the shell code that `eval "$(zenv hook zsh)"`
-/// loads to activate project environments on cd.
+/// (or `bash`) loads to activate project environments on cd.
 pub fn handleHookCommand(allocator: Allocator, args: []const []const u8) !void {
     const name = positional(args, 0) orelse {
-        output.printError(allocator, "Missing shell. Usage: zenv hook zsh", .{}) catch {};
+        output.printError(allocator, "Missing shell. Usage: zenv hook <zsh|bash>", .{}) catch {};
         return error.ArgsError;
     };
     const code = shell_hook.forShell(name) orelse {
-        output.printError(allocator, "Unsupported shell '{s}' for 'zenv hook'. Supported: zsh.", .{name}) catch {};
+        output.printError(allocator, "Unsupported shell '{s}' for 'zenv hook'. Supported: zsh, bash.", .{name}) catch {};
         return error.ArgsError;
     };
     output.rawOut(allocator, "{s}", .{code}) catch |e| {

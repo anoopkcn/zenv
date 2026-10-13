@@ -160,7 +160,7 @@ source $(zenv activate c3c4945)
 source $(zenv activate --auto .)
 ```
 
-`zenv activate .` needs the `zenv.json` in the current directory itself. `--auto .` searches upward from the current directory for the nearest `zenv.json` instead, and prints nothing if that project has no registered environment (it is what the [cd hook](#activating-on-cd-zsh) runs). Unlike a plain `activate`, it never rebuilds an out-of-date environment: it prints a notice and activates it as built.
+`zenv activate .` needs the `zenv.json` in the current directory itself. `--auto .` searches upward from the current directory for the nearest `zenv.json` instead, and prints nothing if that project has no registered environment (it is what the [cd hook](#activating-on-cd-zsh-bash) runs). Unlike a plain `activate`, it never rebuilds an out-of-date environment: it prints a notice and activates it as built.
 
 From csh/tcsh or fish, ask for that shell's script instead (activate hooks are sh code and are skipped there):
 
@@ -176,13 +176,21 @@ Either script defines `deactivate`, which restores what activation set: `PATH`, 
 
 Jupyter kernels created by zenv (`zenv jupyter create <env>` or `zenv setup <env> --jupyter`) start through `zenv run`, so they get the environment's modules even when the Jupyter server runs with a different module set. The environment needs `ipykernel` (`zenv add <env> ipykernel`). The kernel is named `zenv-<env>` and shown as `Python (<env>)`; `zenv jupyter create <env> --name <kernel> --display-name <text>` picks others.
 
-### Activating on cd (zsh)
+### Activating on cd (zsh, bash)
 
 To activate a project's environment whenever you `cd` into the project, and deactivate it when you leave, add this to `~/.zshrc`:
 
 ```zsh
 eval "$(zenv hook zsh)"
 ```
+
+or, for bash (3.2 or newer), to the end of `~/.bashrc`:
+
+```bash
+eval "$(zenv hook bash)"
+```
+
+bash has no hook for directory changes, so there the hook runs from `PROMPT_COMMAND` before each prompt and returns at once while the directory is unchanged. It adds itself to whatever `PROMPT_COMMAND` holds and keeps `$?` for prompts that show it, so load it after anything that assigns `PROMPT_COMMAND` outright.
 
 Like direnv, this is a shell hook with no background process. On each directory change it looks for the nearest `zenv.json` at or above the current directory. Moving around inside the same project does nothing; only entering a different project calls `zenv activate --auto`, which prints the activation script of the environment registered for that project.
 
@@ -283,7 +291,7 @@ A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<n
 
 - `zenv add` and `zenv rename` change these files themselves and keep the environment's build record current, so they do not cause a rebuild.
 - If the project's `zenv.json` was removed, the environment is used as last built. If `zenv.json` does not validate (for example while you are editing it), zenv prints one line saying so and uses the environment as last built; `zenv validate` shows what is wrong.
-- `zenv activate --auto` (the [cd hook](#activating-on-cd-zsh)) never rebuilds; it prints a notice instead.
+- `zenv activate --auto` (the [cd hook](#activating-on-cd-zsh-bash)) never rebuilds; it prints a notice instead.
 - Set `ZENV_NO_AUTO_SETUP=1` to turn automatic rebuilds off.
 
 ### Registering and Deregistering Environments
@@ -498,7 +506,8 @@ Commands:
 
   hook <shell>               Outputs a shell hook that activates a project's environment
                              when you cd into it and deactivates it when you leave.
-                             Supported: zsh. Add to ~/.zshrc: eval "$(zenv hook zsh)"
+                             zsh:  add to ~/.zshrc: eval "$(zenv hook zsh)"
+                             bash: add to the end of ~/.bashrc: eval "$(zenv hook bash)"
 
   run <name|id|.> <command>  Executes a <command> within the specified isolated environment.
                              Does NOT require manual activation of the environment.
