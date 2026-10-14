@@ -161,10 +161,10 @@ source $(zenv activate c3c494547b40f070b4c080f95c707622d84fe749)
 source $(zenv activate c3c4945)
 
 # Activate the project you are in, from any subdirectory of it
-source $(zenv activate --auto .)
+source $(zenv activate .)
 ```
 
-`zenv activate .` needs the `zenv.json` in the current directory itself. `--auto .` searches upward from the current directory for the nearest `zenv.json` instead, and prints nothing if that project has no registered environment (it is what the [cd hook](#activating-on-cd-zsh-bash) runs). Unlike a plain `activate`, it never rebuilds an out-of-date environment: it prints a notice and activates it as built.
+`.` names the project you are in: the nearest `zenv.json` at or above the current directory, so `zenv activate .`, `zenv run .` and `zenv cd .` work from any subdirectory of the project. A nested project with its own `zenv.json` shadows the one around it. `zenv activate --auto .` uses the same lookup but prints nothing if that project has no registered environment (it is what the [cd hook](#activating-on-cd-zsh-bash) runs). Unlike a plain `activate`, it never rebuilds an out-of-date environment: it prints a notice and activates it as built.
 
 From csh/tcsh or fish, ask for that shell's script instead (activate hooks are sh code and are skipped there):
 
@@ -500,7 +500,7 @@ Commands:
                              fish:     source (zenv activate <name|id|.> --shell=fish)
                              'deactivate' then restores what activation set; activating
                              another environment deactivates this one first.
-                             --auto [dir]: the project you are in, from any subdirectory:
+                             --auto [dir]: for the cd hook; like '.', but from dir:
                              source $(zenv activate --auto .)
                              Uses the nearest zenv.json at or above dir (default: .);
                              prints nothing if it has no registered env. Never rebuilds.
@@ -643,10 +643,10 @@ Options for 'zenv add <name> <package>':
   --dev), setup stops if the selected Python does not satisfy it.
 
 [.] Dot Notation:
-  Use '.' as the environment identifier to automatically select an environment
-  from the current directory. This works when you're in a directory containing
-  a zenv.json file and have registered environments for that directory.
-  From a subdirectory of the project, use 'zenv activate --auto .' instead.
+  Use '.' as the environment identifier to select the environment of the project
+  you are in: the nearest zenv.json at or above the current directory, so it
+  works from any subdirectory. A nested project's zenv.json shadows the one
+  around it.
 
 Automatic rebuilds:
   'run', 'activate', 'cd' and 'jupyter create' first rebuild an environment whose

@@ -530,7 +530,11 @@ fn present(allocator: Allocator, registry: *const EnvironmentRegistry, identifie
             output.rawErr(allocator, "Could not determine the current host. Use the exact env name or id.\n", .{}) catch {};
         }
     } else if (err == error.EnvironmentNotRegistered) {
-        output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
+        if (std.mem.eql(u8, identifier, ".")) {
+            const root = EnvironmentRegistry.dotProjectDir(allocator) catch return err;
+            defer allocator.free(root);
+            output.rawErr(allocator, "ERROR: No environment is registered for the project at '{s}' (the nearest zenv.json).\n", .{root}) catch {};
+        } else output.rawErr(allocator, "ERROR: Environment with name or ID '{s}' not found in registry.\n", .{identifier}) catch {};
         output.rawErr(allocator, "Use 'zenv ls' to see all available environments with their IDs.\n", .{}) catch {};
     }
     return err;

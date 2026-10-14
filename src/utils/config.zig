@@ -512,7 +512,8 @@ pub const EnvironmentRegistry = struct {
     /// Pure resolution core (internal seam). No I/O, no printing. Maps an
     /// identifier to exactly one entry index, applying the load-bearing order:
     ///   "." (project_dir == cwd) -> name -> alias -> exact id -> unique 7+ prefix.
-    /// `cwd` must be non-null when `identifier` is "."; pass null otherwise.
+    /// `cwd` is the project directory "." names (see `dotProjectDir`); it must
+    /// be non-null when `identifier` is "."; pass null otherwise.
     /// `hostname`, when non-null, breaks a tie in the host-aware branches ("." and
     /// a shared alias), see `unique`. Ambiguity (a prefix matching >1, or a
     /// "."/alias the host can't narrow to one) is distinct from not-found.
@@ -533,10 +534,10 @@ pub const EnvironmentRegistry = struct {
     }
 
     /// Handler-facing entry point. Resolves a raw <name|id|.> to a stable EnvRef.
-    /// Touches the filesystem for the "." branch (cwd realpath + zenv.json
-    /// presence) and, ONLY to break a tie, for the current hostname. Prints
-    /// nothing — failures are typed errors that the caller renders (see
-    /// commands.present) and main.zig maps.
+    /// Touches the filesystem for the "." branch (the nearest zenv.json at or
+    /// above the cwd, see `dotProjectDir`) and, ONLY to break a tie, for the
+    /// current hostname. Prints nothing — failures are typed errors that the
+    /// caller renders (see commands.present) and main.zig maps.
     ///
     /// Hostname is fetched lazily: the first pass runs host-blind, and only an
     /// `AmbiguousIdentifier` (the sole outcome a host can change) triggers a
@@ -544,13 +545,18 @@ pub const EnvironmentRegistry = struct {
     /// a hostname that can't be determined degrades gracefully to the ambiguity.
     pub fn resolve(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) !EnvRef {
         if (!std.mem.eql(u8, identifier, ".")) return self.resolveWithHost(allocator, identifier, null);
-        runtime.access("zenv.json") catch |err| {
-            if (err == error.FileNotFound) return error.ConfigFileNotFound;
-            return err;
-        };
+        const root = try dotProjectDir(allocator);
+        defer allocator.free(root);
+        return self.resolveWithHost(allocator, identifier, root);
+    }
+
+    /// The project "." names: the nearest directory at or above the cwd that
+    /// holds a zenv.json, as the cd hook finds it (`paths.findProjectRoot`).
+    /// `ConfigFileNotFound` when there is none. Caller owns the result.
+    pub fn dotProjectDir(allocator: Allocator) ![]u8 {
         const cwd = try runtime.cwdRealpath(allocator);
         defer allocator.free(cwd);
-        return self.resolveWithHost(allocator, identifier, cwd);
+        return try paths.findProjectRoot(allocator, cwd) orelse error.ConfigFileNotFound;
     }
 
     /// Resolves "." as if run from `dir`, a canonical project directory (as
@@ -583,15 +589,15 @@ pub const EnvironmentRegistry = struct {
     };
 
     /// Names the candidates an ambiguous identifier matched, for the call-site
-    /// error message. Covers all three ambiguity kinds: "." (project_dir == cwd),
-    /// a shared alias, and a non-unique 7+ id-prefix. Returns borrowed slices;
-    /// caller frees the outer slice only.
+    /// error message. Covers all three ambiguity kinds: "." (the envs of the
+    /// project "." names), a shared alias, and a non-unique 7+ id-prefix.
+    /// Returns borrowed slices; caller frees the outer slice only.
     pub fn candidates(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) ![]Candidate {
         var list: std.ArrayList(Candidate) = .empty;
         errdefer list.deinit(allocator);
 
         const dot = std.mem.eql(u8, identifier, ".");
-        const cwd = if (dot) runtime.cwdRealpath(allocator) catch return list.toOwnedSlice(allocator) else null;
+        const cwd = if (dot) dotProjectDir(allocator) catch return list.toOwnedSlice(allocator) else null;
         defer if (cwd) |dir| allocator.free(dir);
         // "." lists the envs of this project; anything else a shared alias's
         // holders, or failing that the ids a non-unique 7+ prefix matches.

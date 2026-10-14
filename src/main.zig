@@ -66,7 +66,7 @@ fn printUsage() void {
         \\                             fish:     source (zenv activate <name|id|.> --shell=fish)
         \\                             'deactivate' then restores what activation set; activating
         \\                             another environment deactivates this one first.
-        \\                             --auto [dir]: the project you are in, from any subdirectory:
+        \\                             --auto [dir]: for the cd hook; like '.', but from dir:
         \\                             source $(zenv activate --auto .)
         \\                             Uses the nearest zenv.json at or above dir (default: .);
         \\                             prints nothing if it has no registered env. Never rebuilds.
@@ -209,10 +209,10 @@ fn printUsage() void {
         \\  --dev), setup stops if the selected Python does not satisfy it.
         \\
         \\[.] Dot Notation:
-        \\  Use '.' as the environment identifier to automatically select an environment
-        \\  from the current directory. This works when you're in a directory containing
-        \\  a zenv.json file and have registered environments for that directory.
-        \\  From a subdirectory of the project, use 'zenv activate --auto .' instead.
+        \\  Use '.' as the environment identifier to select the environment of the project
+        \\  you are in: the nearest zenv.json at or above the current directory, so it
+        \\  works from any subdirectory. A nested project's zenv.json shadows the one
+        \\  around it.
         \\
         \\Automatic rebuilds:
         \\  'run', 'activate', 'cd' and 'jupyter create' first rebuild an environment whose
