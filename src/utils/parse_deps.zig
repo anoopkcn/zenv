@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const output = @import("output.zig");
 const toml = @import("toml");
 
@@ -46,11 +47,12 @@ fn nextNormalized(name: []const u8, i: *usize) ?u8 {
 }
 
 /// PEP 503 normalised project name: lowercase, runs of `-_.` become `-`.
+/// Caller owns the result.
 pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (nextNormalized(name, &i)) |c| try out.append(a, c);
-    return out.items;
+    return out.toOwnedSlice(a);
 }
 
 // Parse a pyproject.toml file and extract PEP 621 dependencies.
@@ -64,16 +66,17 @@ pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
 // here (warn and return 0) so `zenv setup` still proceeds, matching prior behavior.
 pub fn parsePyprojectToml(
     allocator: Allocator,
+    io: Io,
     content: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
-    output.print(allocator, "Parsing pyproject.toml for dependencies...", .{}) catch {};
+    output.print(io, "Parsing pyproject.toml for dependencies...", .{});
 
     var parser = toml.Parser(toml.Table).init(allocator);
     defer parser.deinit();
 
     var parsed = parser.parseString(content) catch |err| {
-        output.printError(allocator, "Failed to parse pyproject.toml: {s}", .{@errorName(err)}) catch {};
+        output.printError(io, "Failed to parse pyproject.toml: {t}", .{err});
         return 0;
     };
     // The parse arena owns every parsed string; dupe what we keep before it is freed.
@@ -81,7 +84,7 @@ pub fn parsePyprojectToml(
 
     // Navigate to [project].dependencies, bailing out (non-fatally) if absent or mistyped.
     const project_tbl = switch (parsed.value.get("project") orelse {
-        output.print(allocator, "No [project] table found in pyproject.toml", .{}) catch {};
+        output.print(io, "No [project] table found in pyproject.toml", .{});
         return 0;
     }) {
         .table => |t| t,
@@ -89,7 +92,7 @@ pub fn parsePyprojectToml(
     };
 
     const deps_arr = switch (project_tbl.get("dependencies") orelse {
-        output.print(allocator, "No [project].dependencies found in pyproject.toml", .{}) catch {};
+        output.print(io, "No [project].dependencies found in pyproject.toml", .{});
         return 0;
     }) {
         .array => |arr| arr,
@@ -103,15 +106,15 @@ pub fn parsePyprojectToml(
             else => continue,
         };
         const dep = try allocator.dupe(u8, spec);
-        output.print(allocator, "  - TOML dependency: {s}", .{dep}) catch {};
+        output.print(io, "  - TOML dependency: {s}", .{dep});
         try deps_list.append(allocator, dep);
         count += 1;
     }
 
     if (count > 0) {
-        output.print(allocator, "Found {d} dependencies in pyproject.toml", .{count}) catch {};
+        output.print(io, "Found {d} dependencies in pyproject.toml", .{count});
     } else {
-        output.print(allocator, "Processed pyproject.toml but found no valid dependencies", .{}) catch {};
+        output.print(io, "Processed pyproject.toml but found no valid dependencies", .{});
     }
     return count;
 }
@@ -137,26 +140,24 @@ pub fn pyprojectField(allocator: Allocator, content: []const u8, key: []const u8
 // Returns the number of dependencies found
 pub fn parseRequirementsTxt(
     allocator: Allocator,
+    io: Io,
     content: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
-    output.print(allocator, "Parsing requirements.txt for dependencies...", .{}) catch {};
+    output.print(io, "Parsing requirements.txt for dependencies...", .{});
     var count: usize = 0;
 
     // Split lines more efficiently with iterator directly
     var line_iter = std.mem.splitScalar(u8, content, '\n');
 
     while (line_iter.next()) |line| {
-        // Skip empty lines and comments early
-        if (line.len == 0) continue;
-
         const trimmed_line = std.mem.trim(u8, line, " \t\r");
         if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
             continue;
         }
 
         // For valid dependencies, add directly
-        output.print(allocator, "  - Requirements file dependency: {s}", .{trimmed_line}) catch {};
+        output.print(io, "  - Requirements file dependency: {s}", .{trimmed_line});
 
         // Create a duplicate of the trimmed line
         const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
@@ -165,7 +166,7 @@ pub fn parseRequirementsTxt(
         try deps_list.append(allocator, trimmed_dupe);
         count += 1;
     }
-    output.print(allocator, "Found {d} dependencies in requirements.txt format", .{count}) catch {};
+    output.print(io, "Found {d} dependencies in requirements.txt format", .{count});
     return count;
 }
 
@@ -173,16 +174,17 @@ pub fn parseRequirementsTxt(
 /// of a package (by `samePackage`). The returned list borrows from `raw_deps`.
 pub fn validateDependencies(
     allocator: Allocator,
+    io: Io,
     raw_deps: []const []const u8,
     env_name: []const u8,
 ) !std.ArrayList([]const u8) {
-    output.print(allocator, "Validating dependencies for '{s}':", .{env_name}) catch {};
+    output.print(io, "Validating dependencies for '{s}':", .{env_name});
     var valid_deps: std.ArrayList([]const u8) = .empty;
     errdefer valid_deps.deinit(allocator);
 
     next: for (raw_deps) |dep| {
         if (dep.len == 0) {
-            output.print(allocator, "Warning: Skipping empty dependency", .{}) catch {};
+            output.print(io, "Warning: Skipping empty dependency", .{});
             continue;
         }
 
@@ -191,17 +193,17 @@ pub fn validateDependencies(
         // is left for pip/uv, which validate it properly at install time.
         const name = packageBaseName(dep);
         if (name.len == 0 or !std.ascii.isAlphanumeric(name[0])) {
-            output.print(allocator, "Warning: Skipping invalid dependency (no project name): '{s}'", .{dep}) catch {};
+            output.print(io, "Warning: Skipping invalid dependency (no project name): '{s}'", .{dep});
             continue;
         }
 
         for (valid_deps.items) |seen| {
             if (!samePackage(seen, dep)) continue;
-            output.print(allocator, "Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep}) catch {};
+            output.print(io, "Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep});
             continue :next;
         }
 
-        output.print(allocator, "Including dependency: '{s}'", .{dep}) catch {};
+        output.print(io, "Including dependency: '{s}'", .{dep});
         try valid_deps.append(allocator, dep);
     }
 
@@ -211,10 +213,8 @@ pub fn validateDependencies(
 // ============================ Tests ============================
 
 const testing = std.testing;
-const test_support = @import("../test_support.zig");
 
 test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const content =
         \\[project]
@@ -229,7 +229,7 @@ test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, &deps);
     try testing.expect(count >= 2);
     var has_req = false;
     var has_flask = false;
@@ -241,7 +241,6 @@ test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
 }
 
 test "parseRequirementsTxt: skips comments and blank lines" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const content =
         \\# a comment
@@ -255,7 +254,7 @@ test "parseRequirementsTxt: skips comments and blank lines" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parseRequirementsTxt(a, content, &deps);
+    const count = try parseRequirementsTxt(a, testing.io, content, &deps);
     try testing.expectEqual(@as(usize, 2), count);
 }
 
@@ -281,7 +280,6 @@ test "samePackage is case-insensitive and ignores constraints" {
 }
 
 test "validateDependencies keeps any PEP 508 line that starts with a name" {
-    test_support.setupRuntime();
     const a = std.testing.allocator;
     const raw = [_][]const u8{
         "flask!=2.0",
@@ -295,7 +293,7 @@ test "validateDependencies keeps any PEP 508 line that starts with a name" {
         "flask_login",
         "Flask.Login>=0.6", // duplicate of flask_login (PEP 503)
     };
-    var valid = try validateDependencies(a, &raw, "test");
+    var valid = try validateDependencies(a, testing.io, &raw, "test");
     defer valid.deinit(a);
     try std.testing.expectEqual(@as(usize, 6), valid.items.len);
     try std.testing.expectEqualStrings("flask!=2.0", valid.items[0]);
@@ -304,13 +302,12 @@ test "validateDependencies keeps any PEP 508 line that starts with a name" {
 }
 
 test "validateDependencies keeps multi-constraint specifiers" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const raw = [_][]const u8{
         "numpy>=1.26.0,<2.0",
         "requests>=2.8.1, <3.0",
     };
-    var valid = try validateDependencies(a, &raw, "test");
+    var valid = try validateDependencies(a, testing.io, &raw, "test");
     defer valid.deinit(a);
     try testing.expectEqual(@as(usize, 2), valid.items.len);
     try testing.expectEqualStrings("numpy>=1.26.0,<2.0", valid.items[0]);
@@ -318,7 +315,6 @@ test "validateDependencies keeps multi-constraint specifiers" {
 }
 
 test "parsePyprojectToml: single-line dependencies array does not swallow later keys" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     // Regression: a single-line `dependencies = [...]` used to leave the parser
     // stuck in the in_deps_array state, so following lines like `name = "proj"`
@@ -334,7 +330,7 @@ test "parsePyprojectToml: single-line dependencies array does not swallow later 
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, &deps);
     try testing.expectEqual(@as(usize, 2), count);
     for (deps.items) |d| {
         try testing.expect(std.mem.find(u8, d, "proj") == null);
@@ -343,7 +339,6 @@ test "parsePyprojectToml: single-line dependencies array does not swallow later 
 }
 
 test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const content =
         \\[project]
@@ -357,7 +352,7 @@ test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, &deps);
     try testing.expect(count >= 1);
     var found = false;
     for (deps.items) |d| {
@@ -367,7 +362,6 @@ test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
 }
 
 test "parsePyprojectToml: extracts [project].dependencies from a realistic full file" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     // A real-world pyproject.toml carries many sections beyond dependencies. The strict
     // TOML parser must read the whole document without tripping over build-system, tool
@@ -413,7 +407,7 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, &deps);
     // Exactly the three [project].dependencies entries — not the optional-deps or tool config.
     try testing.expectEqual(@as(usize, 3), count);
     try testing.expectEqualStrings("requests>=2.28.0", deps.items[0]);

@@ -1,6 +1,6 @@
 //! Host / hostname matching primitives.
 //!
-//! A leaf module: it depends only on `std`, `runtime`, `errors`, and `output`,
+//! A leaf module: it depends only on `std`, `runtime` and `output`,
 //! and is imported by both `environment.zig` (which re-exports the public
 //! functions for its existing callers) and `config.zig` (which uses them for
 //! host-aware identifier resolution). Keeping these here avoids a circular
@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const errors = @import("errors.zig");
+const Io = std.Io;
 const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 
@@ -72,49 +72,46 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
 // on Linux it goes straight to the kernel via `uname`, so it works on minimal
 // systems (containers, HPC compute nodes, busybox images) where `/bin/hostname`
 // is absent. We try this before shelling out to the command.
-pub fn getHostnameFromSyscall(allocator: Allocator) ![]const u8 {
-    errors.debugLog(allocator, "Querying hostname via gethostname syscall", .{});
+pub fn getHostnameFromSyscall(allocator: Allocator, io: Io) ![]const u8 {
+    output.debug(io, "Querying hostname via gethostname syscall", .{});
     var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
     const name = std.posix.gethostname(&buf) catch |err| {
-        errors.debugLog(allocator, "gethostname syscall failed: {s}", .{@errorName(err)});
+        output.debug(io, "gethostname syscall failed: {t}", .{err});
         return error.ProcessError;
     };
     const trimmed = std.mem.trim(u8, name, &std.ascii.whitespace);
     if (trimmed.len == 0) {
-        errors.debugLog(allocator, "gethostname syscall returned empty output", .{});
+        output.debug(io, "gethostname syscall returned empty output", .{});
         return error.MissingHostname;
     }
-    errors.debugLog(allocator, "Got hostname from syscall: '{s}'", .{trimmed});
+    output.debug(io, "Got hostname from syscall: '{s}'", .{trimmed});
     return allocator.dupe(u8, trimmed);
 }
 
 // Helper function to get hostname using the `hostname` command (internal)
-pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
-    errors.debugLog(allocator, "Executing 'hostname' command", .{});
-    const result = runtime.run(allocator, &[_][]const u8{"hostname"}, .{
+pub fn getHostnameFromCommand(allocator: Allocator, io: Io) ![]const u8 {
+    output.debug(io, "Executing 'hostname' command", .{});
+    const result = runtime.run(allocator, io, &.{"hostname"}, .{
         .stdout_limit = .limited(128),
         .stderr_limit = .limited(512),
     }) catch |err| {
-        output.printError(allocator, "Failed to run `hostname` command: {s}", .{@errorName(err)}) catch {};
+        output.printError(io, "Failed to run `hostname` command: {t}", .{err});
         return error.ProcessError;
     };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    // Check if the command was successful
-    const success = runtime.exitedOk(result.term);
-
-    if (!success) {
-        output.printError(allocator, "`hostname` command failed. Term: {s} Stderr: {s}", .{ @tagName(result.term), result.stderr }) catch {};
+    if (!result.term.success()) {
+        output.printError(io, "`hostname` command {f}. Stderr: {s}", .{ result.term, result.stderr });
         return error.ProcessError;
     }
 
     const trimmed_hostname = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
     if (trimmed_hostname.len == 0) {
-        output.printError(allocator, "`hostname` command returned empty output.", .{}) catch {};
+        output.printError(io, "`hostname` command returned empty output.", .{});
         return error.MissingHostname;
     }
-    errors.debugLog(allocator, "Got hostname from command: '{s}'", .{trimmed_hostname});
+    output.debug(io, "Got hostname from command: '{s}'", .{trimmed_hostname});
     // Return a duplicate of the trimmed hostname
     return allocator.dupe(u8, trimmed_hostname);
 }
@@ -129,28 +126,28 @@ pub fn getHostnameFromCommand(allocator: Allocator) ![]const u8 {
 // the module cache (envspec.currentSystem, and the check in generated
 // activate scripts), so matching and caching agree on one cluster identity. Off HPC, `$SYSTEMNAME` is unset and we
 // fall back to the previous hostname behaviour unchanged.
-pub fn getSystemHostname(allocator: Allocator) ![]const u8 {
-    errors.debugLog(allocator, "Attempting to get machine identity from environment variable...", .{});
+pub fn getSystemHostname(allocator: Allocator, io: Io, env: *const std.process.Environ.Map) ![]const u8 {
+    output.debug(io, "Attempting to get machine identity from environment variable...", .{});
 
     // Prefer SYSTEMNAME (cluster-global), then HOSTNAME, then HOST (if non-empty).
     for ([_][]const u8{ "SYSTEMNAME", "HOSTNAME", "HOST" }) |name| {
-        const value = runtime.env(name) orelse continue;
+        const value = env.get(name) orelse continue;
         if (value.len == 0) continue;
-        errors.debugLog(allocator, "Got machine identity from {s}: '{s}'", .{ name, value });
+        output.debug(io, "Got machine identity from {s}: '{s}'", .{ name, value });
         return allocator.dupe(u8, value);
     }
 
     // Prefer the syscall (no external binary) over the `hostname` command, so
     // machines without `/bin/hostname` still resolve an identity. Fall back to
     // the command only if the syscall itself fails.
-    errors.debugLog(allocator, "Hostname env vars not set, trying gethostname syscall...", .{});
-    if (getHostnameFromSyscall(allocator)) |name| {
+    output.debug(io, "Hostname env vars not set, trying gethostname syscall...", .{});
+    if (getHostnameFromSyscall(allocator, io)) |name| {
         return name;
     } else |err| {
-        errors.debugLog(allocator, "Syscall hostname failed ({s}), falling back to 'hostname' command...", .{@errorName(err)});
+        output.debug(io, "Syscall hostname failed ({t}), falling back to 'hostname' command...", .{err});
     }
 
-    return getHostnameFromCommand(allocator);
+    return getHostnameFromCommand(allocator, io);
 }
 
 /// True if `hostname` matches one `target_machines` entry: a universal target
@@ -175,8 +172,7 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
     if (std.mem.eql(u8, hostname, target_machine) or matchDomainComponent(hostname, target_machine)) return true;
 
     // Domain suffix: ".example.com", or "example.com" after a dot (node1.example.com)
-    if (std.mem.endsWith(u8, hostname, target_machine)) {
-        const rest = hostname[0 .. hostname.len - target_machine.len];
+    if (std.mem.cutSuffix(u8, hostname, target_machine)) |rest| {
         if (target_machine.len > 0 and target_machine[0] == '.' and rest.len > 0) return true;
         if (rest.len > 1 and rest[rest.len - 1] == '.') return true;
     }
@@ -245,9 +241,6 @@ test "hostMatchesTargets: comma-separated list, blank, and no-match" {
 
 test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
     const a = testing.allocator;
-    const prev_env = runtime.environ_map;
-    defer runtime.environ_map = prev_env;
-
     var env_map = std.process.Environ.Map.init(a);
     defer env_map.deinit();
     // A node whose hostname does NOT carry the cluster name still resolves to the
@@ -255,9 +248,8 @@ test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
     try env_map.put("SYSTEMNAME", "jureca");
     try env_map.put("HOSTNAME", "jrc0042");
     try env_map.put("HOST", "jrc0042");
-    runtime.environ_map = &env_map;
 
-    const id = try getSystemHostname(a);
+    const id = try getSystemHostname(a, testing.io, &env_map);
     defer a.free(id);
     try testing.expectEqualStrings("jureca", id);
     try testing.expect(hostMatchesTargets(id, "jureca"));
@@ -265,7 +257,7 @@ test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
 
 test "getHostnameFromSyscall: returns a non-empty hostname without the `hostname` binary" {
     const a = testing.allocator;
-    const name = getHostnameFromSyscall(a) catch |err| {
+    const name = getHostnameFromSyscall(a, testing.io) catch |err| {
         // Some sandboxed CI environments block the syscall; tolerate that.
         try testing.expect(err == error.ProcessError or err == error.MissingHostname);
         return;
@@ -276,22 +268,17 @@ test "getHostnameFromSyscall: returns a non-empty hostname without the `hostname
 
 test "getSystemHostname: empty SYSTEMNAME falls back to HOSTNAME" {
     const a = testing.allocator;
-    const prev_env = runtime.environ_map;
-    defer runtime.environ_map = prev_env;
-
     var env_map = std.process.Environ.Map.init(a);
     defer env_map.deinit();
     try env_map.put("SYSTEMNAME", ""); // set-but-empty must not win
     try env_map.put("HOSTNAME", "jrlogin01.jureca");
-    runtime.environ_map = &env_map;
 
-    const id = try getSystemHostname(a);
+    const id = try getSystemHostname(a, testing.io, &env_map);
     defer a.free(id);
     try testing.expectEqualStrings("jrlogin01.jureca", id);
 }
 
 test "getHostnameFromCommand trims output and rejects empty/failed runs" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const prev = test_support.useFakeExec();
     defer runtime.exec_backend = prev;
@@ -300,16 +287,16 @@ test "getHostnameFromCommand trims output and rejects empty/failed runs" {
     test_support.fake_run_stdout = "  jrlogin01.jureca \n";
     test_support.fake_run_stderr = "";
     test_support.fake_run_exit = 0;
-    const h = try getHostnameFromCommand(a);
+    const h = try getHostnameFromCommand(a, testing.io);
     defer a.free(h);
     try testing.expectEqualStrings("jrlogin01.jureca", h);
 
     // whitespace-only output -> MissingHostname
     test_support.fake_run_stdout = "   \n";
-    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a));
+    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a, testing.io));
 
     // non-zero exit -> ProcessError
     test_support.fake_run_stdout = "ignored";
     test_support.fake_run_exit = 1;
-    try testing.expectError(error.ProcessError, getHostnameFromCommand(a));
+    try testing.expectError(error.ProcessError, getHostnameFromCommand(a, testing.io));
 }

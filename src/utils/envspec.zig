@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const json = std.json;
 const runtime = @import("runtime.zig");
 const host = @import("host.zig");
@@ -101,7 +102,7 @@ pub const Spec = struct {
 /// concerns, handled by activation.zig. All slices are allocated with
 /// `allocator` (use an arena).
 pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8) ![]const Op {
-    const bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
+    const bin = try std.Io.Dir.path.join(allocator, &.{ venv_path, "bin" });
     var ops: std.ArrayList(Op) = .empty;
     try ops.append(allocator, .{ .op = .set, .name = "VIRTUAL_ENV", .value = venv_path });
     try ops.append(allocator, .{ .op = .prepend, .name = "PATH", .value = bin });
@@ -116,11 +117,10 @@ pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8)
 /// ZENV_ENV_DIR, without the venv variables. VIRTUAL_ENV would make uv and pip
 /// target a directory that has no Python in it.
 pub fn plainOps(allocator: Allocator, venv_path: []const u8) ![]const Op {
-    const bin = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "bin" });
-    var ops: std.ArrayList(Op) = .empty;
-    try ops.append(allocator, .{ .op = .prepend, .name = "PATH", .value = bin });
-    try ops.append(allocator, .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path });
-    return ops.toOwnedSlice(allocator);
+    return allocator.dupe(Op, &.{
+        .{ .op = .prepend, .name = "PATH", .value = try std.Io.Dir.path.join(allocator, &.{ venv_path, "bin" }) },
+        .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path },
+    });
 }
 
 /// `value` with `${ZENV_ENV_DIR}` and `${ZENV_PROJECT_DIR}` replaced by the
@@ -134,56 +134,54 @@ pub fn expandValue(allocator: Allocator, value: []const u8, venv_path: []const u
 /// The `env` entries of zenv.json as ops, expanded, in file order. Applied
 /// after the venv ops, so they may extend PATH in front of the env's bin/.
 pub fn userOps(allocator: Allocator, env_config: *const EnvironmentConfig, venv_path: []const u8, project_dir: []const u8) ![]const Op {
-    var ops: std.ArrayList(Op) = .empty;
-    for (env_config.env.items) |v| try ops.append(allocator, .{
+    const ops = try allocator.alloc(Op, env_config.env.items.len);
+    for (ops, env_config.env.items) |*op, v| op.* = .{
         .op = switch (v.kind) {
             inline else => |k| @field(OpKind, @tagName(k)),
         },
         .name = v.name,
         .value = try expandValue(allocator, v.value, venv_path, project_dir),
-    });
-    return ops.toOwnedSlice(allocator);
+    };
+    return ops;
 }
 
-/// Reads `<venv_path>/.zenv_module_cache.json`. Null when missing or
-/// malformed. Results are allocated with `allocator` (use an arena).
-pub fn readModuleCache(allocator: Allocator, venv_path: []const u8) ?ModuleCache {
-    const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE }) catch return null;
-    const text = runtime.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch return null;
-    return json.parseFromSliceLeaky(ModuleCache, allocator, text, .{
+/// Reads `<venv_path>/.zenv_module_cache.json`. Null when missing, malformed,
+/// or naming a variable that is not a shell identifier (see `parseSpec`).
+/// Results are allocated with `allocator` (use an arena).
+pub fn readModuleCache(allocator: Allocator, io: Io, venv_path: []const u8) ?ModuleCache {
+    const path = std.Io.Dir.path.join(allocator, &.{ venv_path, MODULE_CACHE_FILE }) catch return null;
+    const text = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024)) catch return null;
+    const cache = json.parseFromSliceLeaky(ModuleCache, allocator, text, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
-    }) catch null;
+    }) catch return null;
+    for (cache.ops) |op| if (!isIdentifier(op.name)) return null;
+    return cache;
 }
 
 /// Writes the module cache atomically.
-pub fn writeModuleCache(allocator: Allocator, venv_path: []const u8, cache: *const ModuleCache) !void {
-    const text = try json.Stringify.valueAlloc(allocator, cache.*, .{ .whitespace = .indent_2 });
-    defer allocator.free(text);
-    const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE });
+pub fn writeModuleCache(allocator: Allocator, io: Io, venv_path: []const u8, cache: *const ModuleCache) !void {
+    const path = try std.Io.Dir.path.join(allocator, &.{ venv_path, MODULE_CACHE_FILE });
     defer allocator.free(path);
-    try runtime.writeFileAtomic(allocator, path, text);
+    try runtime.writeJsonAtomic(io, path, cache.*, false);
 }
 
 /// Removes the module cache; a missing file is fine.
-pub fn deleteModuleCache(allocator: Allocator, venv_path: []const u8) void {
-    const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, MODULE_CACHE_FILE }) catch return;
+pub fn deleteModuleCache(allocator: Allocator, io: Io, venv_path: []const u8) void {
+    const path = std.Io.Dir.path.join(allocator, &.{ venv_path, MODULE_CACHE_FILE }) catch return;
     defer allocator.free(path);
-    runtime.deleteFile(path) catch {};
+    Io.Dir.cwd().deleteFile(io, path) catch {};
 }
 
 /// Lowercase-hex SHA-1 of the module list, in load order: the key under which
 /// auto-setup may reuse a cache instead of re-running Lmod. Caller owns the result.
 pub fn modulesSignature(allocator: Allocator, modules: []const []const u8) ![]u8 {
-    var sha = std.crypto.hash.Sha1.init(.{});
+    var sha: std.crypto.hash.Sha1 = .init(.{});
     for (modules) |m| {
         sha.update(m);
         sha.update("\x00");
     }
-    var digest: [20]u8 = undefined;
-    sha.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return allocator.dupe(u8, &hex);
+    return allocator.dupe(u8, &std.fmt.bytesToHex(sha.finalResult(), .lower));
 }
 
 /// Whether `name` is a shell identifier, i.e. can be exported and rendered
@@ -205,6 +203,7 @@ pub fn isIdentifier(name: []const u8) bool {
 /// `env_config` (use an arena).
 pub fn build(
     allocator: Allocator,
+    io: Io,
     env_config: *const EnvironmentConfig,
     env_name: []const u8,
     venv_path: []const u8,
@@ -218,7 +217,7 @@ pub fn build(
         .venv = venv_path,
         .modules = modules,
         .module_cache_enabled = env_config.module_cache,
-        .module_cache = if (modules.len > 0 and env_config.module_cache) readModuleCache(allocator, venv_path) else null,
+        .module_cache = if (modules.len > 0 and env_config.module_cache) readModuleCache(allocator, io, venv_path) else null,
         .ops = try std.mem.concat(allocator, Op, &.{ venv_ops, try userOps(allocator, env_config, venv_path, project_dir) }),
         .activate_commands = if (env_config.activate) |act| (if (act.commands) |c| c.items else &.{}) else &.{},
         .activate_script = activate_script,
@@ -228,11 +227,10 @@ pub fn build(
 /// `value` moved from under `old_dir` to `new_dir` when it is that directory or
 /// a path inside it; otherwise `value` itself.
 fn movePath(a: Allocator, value: []const u8, old_dir: []const u8, new_dir: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, value, old_dir)) return new_dir;
-    if (value.len > old_dir.len and std.mem.startsWith(u8, value, old_dir) and value[old_dir.len] == '/') {
-        return std.mem.concat(a, u8, &.{ new_dir, value[old_dir.len..] });
-    }
-    return value;
+    const rest = std.mem.cutPrefix(u8, value, old_dir) orelse return value;
+    if (rest.len == 0) return new_dir;
+    if (rest[0] != '/') return value;
+    return std.mem.concat(a, u8, &.{ new_dir, rest });
 }
 
 /// `spec` for a venv moved from `old_venv` to `new_venv` and renamed to
@@ -252,45 +250,46 @@ pub fn relocate(a: Allocator, spec: *const Spec, old_venv: []const u8, new_venv:
 }
 
 /// Writes `spec` to `<spec.venv>/zenv-env.json` atomically.
-pub fn write(allocator: Allocator, spec: *const Spec) !void {
-    const text = try json.Stringify.valueAlloc(allocator, spec.*, .{ .whitespace = .indent_2 });
-    defer allocator.free(text);
-    const path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ spec.venv, FILE_NAME });
+pub fn write(allocator: Allocator, io: Io, spec: *const Spec) !void {
+    const path = try std.Io.Dir.path.join(allocator, &.{ spec.venv, FILE_NAME });
     defer allocator.free(path);
-    try runtime.writeFileAtomic(allocator, path, text);
+    try runtime.writeJsonAtomic(io, path, spec.*, false);
 }
 
-/// Parses a spec. Errors on malformed JSON or a different format version.
+/// Parses a spec. Errors on malformed JSON, a different format version, or a
+/// variable name that is not a shell identifier (`apply` relies on that).
 /// Caller must `deinit` the result.
 pub fn parseSpec(allocator: Allocator, text: []const u8) !json.Parsed(Spec) {
     const parsed = try json.parseFromSlice(Spec, allocator, text, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });
-    if (parsed.value.format != FORMAT_VERSION) {
-        parsed.deinit();
-        return error.UnsupportedFormat;
+    errdefer parsed.deinit();
+    if (parsed.value.format != FORMAT_VERSION) return error.UnsupportedFormat;
+    const cache_ops = if (parsed.value.module_cache) |c| c.ops else &.{};
+    for ([_][]const Op{ parsed.value.ops, cache_ops }) |ops| {
+        for (ops) |op| if (!isIdentifier(op.name)) return error.InvalidVariableName;
     }
     return parsed;
 }
 
 /// Reads `<venv_path>/zenv-env.json`. Null when absent, unreadable, malformed
 /// or from another format version. Caller must `deinit` the result.
-pub fn readSpec(allocator: Allocator, venv_path: []const u8) ?json.Parsed(Spec) {
-    const path = std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, FILE_NAME }) catch return null;
+pub fn readSpec(allocator: Allocator, io: Io, venv_path: []const u8) ?json.Parsed(Spec) {
+    const path = std.Io.Dir.path.join(allocator, &.{ venv_path, FILE_NAME }) catch return null;
     defer allocator.free(path);
-    const text = runtime.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch return null;
+    const text = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024)) catch return null;
     defer allocator.free(text);
     return parseSpec(allocator, text) catch null;
 }
 
 /// The cluster identity the module cache is keyed on: `${SYSTEMNAME:-$(hostname)}`,
 /// the same rule the generated activate scripts check. Caller owns the result.
-pub fn currentSystem(allocator: Allocator) ![]const u8 {
-    if (runtime.env("SYSTEMNAME")) |s| {
+pub fn currentSystem(allocator: Allocator, io: Io, env: *const std.process.Environ.Map) ![]const u8 {
+    if (env.get("SYSTEMNAME")) |s| {
         if (s.len > 0) return allocator.dupe(u8, s);
     }
-    return host.getHostnameFromSyscall(allocator);
+    return host.getHostnameFromSyscall(allocator, io);
 }
 
 /// Returns why `spec` cannot be applied directly (so the caller must source
@@ -344,31 +343,33 @@ pub fn apply(map: *std.process.Environ.Map, spec: *const Spec) !void {
 /// in `path_value` (an empty entry means the current directory; an unset PATH
 /// means `/usr/bin:/bin`, as execvp uses). Returns null when nothing matches.
 /// Caller owns the result.
-pub fn resolveCommand(allocator: Allocator, command: []const u8, path_value: ?[]const u8) !?[]u8 {
+///
+/// std has no equivalent: `std.process.spawn` resolves `argv[0]` against the
+/// PATH of the parent process only, never against the child's environment.
+pub fn resolveCommand(allocator: Allocator, io: Io, command: []const u8, path_value: ?[]const u8) !?[]u8 {
     if (command.len == 0) return null;
     if (std.mem.findScalar(u8, command, '/') != null) return try allocator.dupe(u8, command);
 
-    var dirs = std.mem.splitScalar(u8, path_value orelse "/usr/bin:/bin", ':');
+    var dirs = std.mem.splitScalar(u8, path_value orelse "/usr/bin:/bin", std.Io.Dir.path.delimiter);
     while (dirs.next()) |entry| {
         const dir = if (entry.len == 0) "." else entry;
-        const candidate = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir, command });
-        if (isExecutableFile(candidate)) return candidate;
+        const candidate = try std.Io.Dir.path.join(allocator, &.{ dir, command });
+        if (isExecutableFile(io, candidate)) return candidate;
         allocator.free(candidate);
     }
     return null;
 }
 
-pub fn isExecutableFile(path: []const u8) bool {
+pub fn isExecutableFile(io: Io, path: []const u8) bool {
     const cwd = std.Io.Dir.cwd();
-    const st = cwd.statFile(runtime.io, path, .{}) catch return false;
+    const st = cwd.statFile(io, path, .{}) catch return false;
     if (st.kind != .file) return false;
-    cwd.access(runtime.io, path, .{ .execute = true }) catch return false;
+    cwd.access(io, path, .{ .execute = true }) catch return false;
     return true;
 }
 
 // ============================ Tests ============================
 const testing = std.testing;
-const test_support = @import("../test_support.zig");
 
 test "venvOps mirrors bin/activate + activate.sh exports, in order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -404,10 +405,10 @@ test "build picks plainOps for a Python-free env" {
     defer arena.deinit();
     var cfg = EnvironmentConfig.init(arena.allocator());
     cfg.python = false;
-    const spec = try build(arena.allocator(), &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    const spec = try build(arena.allocator(), testing.io, &cfg, "demo", "/p/.zenv/demo", "/p", null);
     try testing.expectEqual(@as(usize, 2), spec.ops.len);
     cfg.python = true;
-    const with_python = try build(arena.allocator(), &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    const with_python = try build(arena.allocator(), testing.io, &cfg, "demo", "/p/.zenv/demo", "/p", null);
     try testing.expectEqualStrings("VIRTUAL_ENV", with_python.ops[0].name);
 }
 
@@ -425,7 +426,7 @@ test "build appends env entries after the venv ops, expanded" {
     var cfg = EnvironmentConfig.init(a);
     try cfg.env.append(a, .{ .name = "DATA", .value = "${ZENV_PROJECT_DIR}/data" });
     try cfg.env.append(a, .{ .name = "PATH", .value = "${ZENV_ENV_DIR}/tools", .kind = .prepend });
-    const spec = try build(a, &cfg, "demo", "/p/.zenv/demo", "/p", null);
+    const spec = try build(a, testing.io, &cfg, "demo", "/p/.zenv/demo", "/p", null);
     const n = spec.ops.len;
     try testing.expectEqualStrings("VIRTUAL_ENV", spec.ops[0].name);
     try testing.expectEqualStrings("DATA", spec.ops[n - 2].name);
@@ -503,6 +504,9 @@ test "spec survives a stringify/parse round trip" {
     try testing.expect(parsed.value.activate_script == null);
 
     try testing.expectError(error.UnsupportedFormat, parseSpec(testing.allocator, "{\"format\":99,\"name\":\"v\",\"venv\":\"/v\",\"ops\":[]}"));
+    // Names `apply` could not put into an environment map are refused.
+    try testing.expectError(error.InvalidVariableName, parseSpec(testing.allocator, "{\"format\":1,\"name\":\"v\",\"venv\":\"/v\",\"ops\":[{\"op\":\"set\",\"name\":\"A=B\"}]}"));
+    try testing.expectError(error.InvalidVariableName, parseSpec(testing.allocator, "{\"format\":1,\"name\":\"v\",\"venv\":\"/v\",\"ops\":[],\"module_cache\":{\"version\":2,\"system\":\"s\",\"untrusted\":false,\"ops\":[{\"op\":\"set\",\"name\":\"\"}]}}"));
 }
 
 test "directReason gates on hooks and module cache validity, never on purge" {
@@ -583,21 +587,21 @@ test "apply: module ops first, prepend joins non-empty values, unset removes" {
 }
 
 test "resolveCommand searches PATH and passes paths through" {
-    test_support.setupRuntime();
     const a = testing.allocator;
+    const io = testing.io;
 
-    const sh = (try resolveCommand(a, "sh", "/nonexistent:/bin")).?;
+    const sh = (try resolveCommand(a, io, "sh", "/nonexistent:/bin")).?;
     defer a.free(sh);
     try testing.expectEqualStrings("/bin/sh", sh);
 
-    const given = (try resolveCommand(a, "./local/tool", "/bin")).?;
+    const given = (try resolveCommand(a, io, "./local/tool", "/bin")).?;
     defer a.free(given);
     try testing.expectEqualStrings("./local/tool", given);
 
-    try testing.expect((try resolveCommand(a, "zenv-no-such-command", "/bin")) == null);
-    const default_path = (try resolveCommand(a, "sh", null)).?; // unset PATH: /usr/bin:/bin
+    try testing.expect((try resolveCommand(a, io, "zenv-no-such-command", "/bin")) == null);
+    const default_path = (try resolveCommand(a, io, "sh", null)).?; // unset PATH: /usr/bin:/bin
     defer a.free(default_path);
     try testing.expect(std.mem.endsWith(u8, default_path, "/sh"));
     // A directory on PATH named like the command is skipped.
-    try testing.expect((try resolveCommand(a, "bin", "/")) == null);
+    try testing.expect((try resolveCommand(a, io, "bin", "/")) == null);
 }

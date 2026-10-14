@@ -3,26 +3,14 @@
 
 const std = @import("std");
 const runtime = @import("utils/runtime.zig");
-const output = @import("utils/output.zig");
 
-var threaded: std.Io.Threaded = undefined;
-var env_map: std.process.Environ.Map = undefined;
-var ready = false;
-
-/// Initializes the process-wide I/O context (`runtime.io` / `runtime.environ_map`)
-/// so tests can exercise code that logs, reads the clock, or queries the
-/// environment. Idempotent; safe to call from every test. Uses the page
-/// allocator for the process-lifetime backing state so it doesn't trip the
-/// testing allocator's leak checks.
-pub fn setupRuntime() void {
-    if (ready) return;
-    threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
-    runtime.io = threaded.io();
-    env_map = std.process.Environ.Map.init(std.heap.page_allocator);
-    runtime.environ_map = &env_map;
-    output.silent = true; // don't write to the test runner's stdout
-    ready = true;
+/// A context over `std.testing.io` with `env` as the environment.
+pub fn ctx(arena: std.mem.Allocator, env: *const std.process.Environ.Map) runtime.Ctx {
+    return .{ .arena = arena, .io = std.testing.io, .env = env };
 }
+
+/// An empty environment for tests that need none.
+pub const no_env: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.testing.failing_allocator };
 
 // --- Fake process-execution backend -----------------------------------------
 // Set the canned values, install with useFakeExec(), and restore the returned
@@ -35,7 +23,8 @@ pub var fake_run_stderr: []const u8 = "";
 pub var fake_run_exit: u8 = 0;
 pub var fake_exec_exit: u8 = 0;
 
-fn fakeRun(allocator: std.mem.Allocator, argv: []const []const u8, opts: runtime.RunOptions) anyerror!runtime.RunResult {
+fn fakeRun(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, opts: runtime.RunOptions) anyerror!runtime.RunResult {
+    _ = io;
     _ = argv;
     _ = opts;
     return .{
@@ -45,7 +34,8 @@ fn fakeRun(allocator: std.mem.Allocator, argv: []const []const u8, opts: runtime
     };
 }
 
-fn fakeExec(argv: []const []const u8, opts: runtime.ExecOptions) anyerror!runtime.Term {
+fn fakeExec(io: std.Io, argv: []const []const u8, opts: runtime.ExecOptions) anyerror!runtime.Term {
+    _ = io;
     _ = argv;
     _ = opts;
     return .{ .exited = fake_exec_exit };

@@ -1,7 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const ArrayList = std.ArrayList;
-const StringHashMap = std.StringHashMap;
+const Environ = std.process.Environ;
 const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
@@ -18,18 +19,12 @@ fn generateSHA1ID(
     project_dir: []const u8,
     target_machines_str: []const u8,
 ) ![]const u8 {
-    var sha1 = std.crypto.hash.Sha1.init(.{});
+    var sha1: std.crypto.hash.Sha1 = .init(.{});
     for ([_][]const u8{ env_name, project_dir, target_machines_str }) |part| {
         sha1.update(part);
         sha1.update("\x00");
     }
-
-    var hash: [20]u8 = undefined;
-    sha1.final(&hash);
-
-    // Efficient hex conversion (no intermediate format pass)
-    const hex = std.fmt.bytesToHex(hash, .lower);
-    return allocator.dupe(u8, &hex);
+    return allocator.dupe(u8, &std.fmt.bytesToHex(sha1.finalResult(), .lower));
 }
 
 // =======================
@@ -122,7 +117,7 @@ pub const EnvironmentConfig = struct {
 
 pub const ZenvConfig = struct {
     allocator: Allocator,
-    environments: StringHashMap(EnvironmentConfig),
+    environments: std.StringHashMapUnmanaged(EnvironmentConfig) = .empty,
     base_dir: []const u8,
 
     pub fn deinit(self: *ZenvConfig) void {
@@ -131,7 +126,7 @@ pub const ZenvConfig = struct {
             self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit();
         }
-        self.environments.deinit();
+        self.environments.deinit(self.allocator);
         self.allocator.free(self.base_dir);
     }
 
@@ -167,6 +162,19 @@ pub const RegistryEntry = struct {
         }
         self.aliases.deinit(allocator);
     }
+
+    /// Serialized as registry.json lists it (see `RegistryJSON`).
+    pub fn jsonStringify(self: RegistryEntry, jw: *json.Stringify) json.Stringify.Error!void {
+        try jw.write(RegistryJSON.RegistryEntryJSON{
+            .id = self.id,
+            .name = self.env_name,
+            .project_dir = self.project_dir,
+            .target_machine = self.target_machines_str,
+            .venv_path = self.venv_path,
+            .description = self.description,
+            .aliases = self.aliases.items,
+        });
+    }
 };
 
 // Fields extracted from a pyvenv.cfg body. Slices point INTO the input.
@@ -184,9 +192,9 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
-        const eq = std.mem.findScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..eq], " \t\r");
-        const val = std.mem.trim(u8, line[eq + 1 ..], " \t\r");
+        const raw_key, const raw_val = std.mem.cutScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, raw_key, " \t\r");
+        const val = std.mem.trim(u8, raw_val, " \t\r");
         if (std.mem.eql(u8, key, "version")) {
             version = val;
         } else if (std.mem.eql(u8, key, "executable")) {
@@ -214,11 +222,11 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
 // interpreter path, or its version when no path is recorded. Returns null if
 // the file is absent/unreadable (env not built) or has no `version`. Caller
 // owns the result.
-pub fn readVenvPython(allocator: Allocator, venv_path: []const u8) !?[]u8 {
-    const cfg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "pyvenv.cfg" });
+pub fn readVenvPython(allocator: Allocator, io: Io, venv_path: []const u8) !?[]u8 {
+    const cfg_path = try Io.Dir.path.join(allocator, &.{ venv_path, "pyvenv.cfg" });
     defer allocator.free(cfg_path);
 
-    const content = runtime.readFileAlloc(allocator, cfg_path, 64 * 1024) catch {
+    const content = Io.Dir.cwd().readFileAlloc(io, cfg_path, allocator, .limited(64 * 1024)) catch {
         // Missing or unreadable -> treat as "not built"; list output stays robust.
         return null;
     };
@@ -247,13 +255,14 @@ const RegistryJSON = struct {
 
 pub const EnvironmentRegistry = struct {
     allocator: Allocator,
-    entries: std.ArrayList(RegistryEntry),
+    io: Io,
+    /// zenv's environment: ZENV_DIR/HOME locate registry.json, and the host
+    /// identity breaks resolution ties.
+    env: *const Environ.Map,
+    entries: std.ArrayList(RegistryEntry) = .empty,
 
-    pub fn init(allocator: Allocator) EnvironmentRegistry {
-        return .{
-            .allocator = allocator,
-            .entries = .empty,
-        };
+    pub fn init(allocator: Allocator, io: Io, env: *const Environ.Map) EnvironmentRegistry {
+        return .{ .allocator = allocator, .io = io, .env = env };
     }
 
     pub fn deinit(self: *EnvironmentRegistry) void {
@@ -261,23 +270,23 @@ pub const EnvironmentRegistry = struct {
         self.entries.deinit(self.allocator);
     }
 
-    pub fn load(allocator: Allocator) !EnvironmentRegistry {
-        var registry = EnvironmentRegistry.init(allocator);
+    pub fn load(allocator: Allocator, io: Io, env: *const Environ.Map) !EnvironmentRegistry {
+        var registry = EnvironmentRegistry.init(allocator, io, env);
         errdefer registry.deinit();
 
         // Read first and only create ZENV_DIR when the registry is missing:
         // every command loads the registry, so the common path stays a single
         // file read instead of a mkdir round-trip per invocation.
-        const registry_path = try paths.zenvPath(allocator, "registry.json");
+        const registry_path = try paths.zenvPath(allocator, env, "registry.json");
         defer allocator.free(registry_path);
 
         // Read the registry file (creating an empty one if it does not exist yet)
-        const file_content = runtime.readFileAlloc(allocator, registry_path, 10 * 1024 * 1024) catch |err| {
+        const file_content = Io.Dir.cwd().readFileAlloc(io, registry_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
             if (err == error.FileNotFound) {
                 try registry.save(); // Creates ZENV_DIR and an empty registry
                 return registry;
             }
-            output.printError(allocator, "Failed to open registry file: {s}", .{@errorName(err)}) catch {};
+            output.printError(io, "Failed to open registry file: {t}", .{err});
             return err;
         };
         defer allocator.free(file_content);
@@ -307,7 +316,7 @@ pub const EnvironmentRegistry = struct {
             entry.target_machines_str = try allocator.dupe(u8, e.target_machine);
             if (e.description) |desc| entry.description = try allocator.dupe(u8, desc);
             entry.id = if (e.id) |id| try allocator.dupe(u8, id) else try generateSHA1ID(allocator, e.name, e.project_dir, e.target_machine);
-            entry.venv_path = if (e.venv_path) |p| try allocator.dupe(u8, p) else try std.Io.Dir.path.join(allocator, &[_][]const u8{ e.project_dir, "zenv", e.name });
+            entry.venv_path = if (e.venv_path) |p| try allocator.dupe(u8, p) else try Io.Dir.path.join(allocator, &.{ e.project_dir, "zenv", e.name });
             try entry.aliases.ensureTotalCapacityPrecise(allocator, e.aliases.len);
             for (e.aliases) |alias| entry.aliases.appendAssumeCapacity(try allocator.dupe(u8, alias));
             registry.entries.appendAssumeCapacity(entry);
@@ -322,24 +331,26 @@ pub const EnvironmentRegistry = struct {
     /// loaded when the command started (which may be minutes old after a
     /// setup). Entries, refs and borrowed strings from before are invalid
     /// afterwards. Finish with `endUpdate`.
-    fn beginUpdate(self: *EnvironmentRegistry) !std.Io.File {
-        const lock_path = try paths.ensureZenvPath(self.allocator, "registry.lock");
+    fn beginUpdate(self: *EnvironmentRegistry) !Io.File {
+        const zenv_dir = try paths.getZenvDir(self.allocator, self.env);
+        defer self.allocator.free(zenv_dir);
+        const lock_path = try Io.Dir.path.join(self.allocator, &.{ zenv_dir, "registry.lock" });
         defer self.allocator.free(lock_path);
 
-        var file = try runtime.createFile(lock_path, .{ .truncate = false });
-        errdefer file.close(runtime.io);
-        try file.lock(runtime.io, .exclusive);
-        errdefer file.unlock(runtime.io);
+        const cwd = Io.Dir.cwd();
+        try cwd.createDirPath(self.io, zenv_dir);
+        // flock(2); closing the file releases it.
+        const file = try cwd.createFile(self.io, lock_path, .{ .truncate = false, .lock = .exclusive });
+        errdefer file.close(self.io);
 
-        const fresh = try EnvironmentRegistry.load(self.allocator);
+        const fresh = try EnvironmentRegistry.load(self.allocator, self.io, self.env);
         self.deinit();
         self.* = fresh;
         return file;
     }
 
-    fn endUpdate(file: std.Io.File) void {
-        file.unlock(runtime.io);
-        file.close(runtime.io);
+    fn endUpdate(self: *const EnvironmentRegistry, file: Io.File) void {
+        file.close(self.io);
     }
 
     fn indexOfId(self: *const EnvironmentRegistry, id: []const u8) !usize {
@@ -350,39 +361,14 @@ pub const EnvironmentRegistry = struct {
     }
 
     pub fn save(self: *const EnvironmentRegistry) !void {
-        const registry_path = try paths.ensureZenvPath(self.allocator, "registry.json");
+        const zenv_dir = try paths.getZenvDir(self.allocator, self.env);
+        defer self.allocator.free(zenv_dir);
+        try Io.Dir.cwd().createDirPath(self.io, zenv_dir);
+        const registry_path = try Io.Dir.path.join(self.allocator, &.{ zenv_dir, "registry.json" });
         defer self.allocator.free(registry_path);
 
-        // Build a plain serializable view of the registry and let std.json
-        // stringify it directly (no manual Value-tree construction).
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        const entries = try a.alloc(RegistryJSON.RegistryEntryJSON, self.entries.items.len);
-        for (self.entries.items, 0..) |entry, i| {
-            entries[i] = .{
-                .id = entry.id,
-                .name = entry.env_name,
-                .project_dir = entry.project_dir,
-                .target_machine = entry.target_machines_str,
-                .venv_path = entry.venv_path,
-                .description = entry.description,
-                .aliases = entry.aliases.items,
-            };
-        }
-        const registry_json = RegistryJSON{ .environments = entries };
-
-        // Serialize to JSON text and write it out in one shot.
-        const json_text = try std.json.Stringify.valueAlloc(
-            self.allocator,
-            registry_json,
-            .{ .whitespace = .indent_2 },
-        );
-        defer self.allocator.free(json_text);
-
         // Atomic replace: a crash mid-save must never truncate the registry.
-        try runtime.writeFileAtomic(self.allocator, registry_path, json_text);
+        try runtime.writeJsonAtomic(self.io, registry_path, .{ .environments = self.entries.items }, false);
     }
 
     /// Adds (or updates) the entry for `env_name` and persists registry.json,
@@ -398,7 +384,7 @@ pub const EnvironmentRegistry = struct {
         target_machines: []const []const u8,
     ) !void {
         const lock = try self.beginUpdate();
-        defer endUpdate(lock);
+        defer self.endUpdate(lock);
         try self.upsert(env_name, project_dir, base_dir, description, target_machines);
         try self.save();
     }
@@ -445,7 +431,7 @@ pub const EnvironmentRegistry = struct {
         const id = try self.allocator.dupe(u8, self.entries.items[ref.idx].id);
         defer self.allocator.free(id);
         const lock = try self.beginUpdate();
-        defer endUpdate(lock);
+        defer self.endUpdate(lock);
 
         var removed = self.entries.orderedRemove(try self.indexOfId(id));
         errdefer removed.deinit(self.allocator);
@@ -545,7 +531,7 @@ pub const EnvironmentRegistry = struct {
     /// a hostname that can't be determined degrades gracefully to the ambiguity.
     pub fn resolve(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8) !EnvRef {
         if (!std.mem.eql(u8, identifier, ".")) return self.resolveWithHost(allocator, identifier, null);
-        const root = try dotProjectDir(allocator);
+        const root = try dotProjectDir(allocator, self.io);
         defer allocator.free(root);
         return self.resolveWithHost(allocator, identifier, root);
     }
@@ -553,10 +539,10 @@ pub const EnvironmentRegistry = struct {
     /// The project "." names: the nearest directory at or above the cwd that
     /// holds a zenv.json, as the cd hook finds it (`paths.findProjectRoot`).
     /// `ConfigFileNotFound` when there is none. Caller owns the result.
-    pub fn dotProjectDir(allocator: Allocator) ![]u8 {
-        const cwd = try runtime.cwdRealpath(allocator);
+    pub fn dotProjectDir(allocator: Allocator, io: Io) ![]u8 {
+        const cwd = try std.process.currentPathAlloc(io, allocator);
         defer allocator.free(cwd);
-        return try paths.findProjectRoot(allocator, cwd) orelse error.ConfigFileNotFound;
+        return try paths.findProjectRoot(allocator, io, cwd) orelse error.ConfigFileNotFound;
     }
 
     /// Resolves "." as if run from `dir`, a canonical project directory (as
@@ -568,7 +554,7 @@ pub const EnvironmentRegistry = struct {
     fn resolveWithHost(self: *const EnvironmentRegistry, allocator: Allocator, identifier: []const u8, cwd: ?[]const u8) !EnvRef {
         return self.resolveAgainstCwd(identifier, cwd, null) catch |e| {
             if (e != error.AmbiguousIdentifier) return e;
-            const hn = host.getSystemHostname(allocator) catch return e;
+            const hn = host.getSystemHostname(allocator, self.io, self.env) catch return e;
             defer allocator.free(hn);
             return self.resolveAgainstCwd(identifier, cwd, hn);
         };
@@ -597,7 +583,7 @@ pub const EnvironmentRegistry = struct {
         errdefer list.deinit(allocator);
 
         const dot = std.mem.eql(u8, identifier, ".");
-        const cwd = if (dot) dotProjectDir(allocator) catch return list.toOwnedSlice(allocator) else null;
+        const cwd = if (dot) dotProjectDir(allocator, self.io) catch return list.toOwnedSlice(allocator) else null;
         defer if (cwd) |dir| allocator.free(dir);
         // "." lists the envs of this project; anything else a shared alias's
         // holders, or failing that the ids a non-unique 7+ prefix matches.
@@ -622,7 +608,7 @@ pub const EnvironmentRegistry = struct {
         const env_name = try self.allocator.dupe(u8, env_name_in);
         defer self.allocator.free(env_name);
         const lock = try self.beginUpdate();
-        defer endUpdate(lock);
+        defer self.endUpdate(lock);
 
         try self.attachAlias(alias_name, env_name);
         try self.save();
@@ -658,7 +644,7 @@ pub const EnvironmentRegistry = struct {
     /// persists. Returns true if at least one occurrence was removed.
     pub fn removeAlias(self: *EnvironmentRegistry, alias_name: []const u8) !bool {
         const lock = try self.beginUpdate();
-        defer endUpdate(lock);
+        defer self.endUpdate(lock);
         const removed = self.detachAlias(alias_name);
         if (removed) try self.save();
         return removed;
@@ -700,7 +686,7 @@ pub const EnvironmentRegistry = struct {
         const id = try self.allocator.dupe(u8, self.entries.items[ref.idx].id);
         defer self.allocator.free(id);
         const lock = try self.beginUpdate();
-        defer endUpdate(lock);
+        defer self.endUpdate(lock);
         ref.* = .{ .idx = try self.indexOfId(id) };
         try self.renameAt(ref.*, new_name);
         try self.save();
@@ -722,13 +708,13 @@ pub const EnvironmentRegistry = struct {
         if (self.nameTaken(new_name)) return error.EnvironmentAlreadyExists;
         const a = self.allocator;
         const entry = &self.entries.items[ref.idx];
-        const parent_dir = std.Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
+        const parent_dir = Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
 
         // Built in full before anything is swapped; it ends up holding (and
         // freeing) the replaced strings.
         var new: RegistryEntry = .{};
         defer new.deinit(a);
-        new.venv_path = try std.Io.Dir.path.join(a, &[_][]const u8{ parent_dir, new_name });
+        new.venv_path = try Io.Dir.path.join(a, &.{ parent_dir, new_name });
         new.id = try generateSHA1ID(a, new_name, entry.project_dir, entry.target_machines_str);
         new.env_name = try a.dupe(u8, new_name);
         std.mem.swap([]const u8, &entry.venv_path, &new.venv_path);
@@ -742,8 +728,15 @@ pub const EnvironmentRegistry = struct {
 const testing = std.testing;
 const test_support = @import("../test_support.zig");
 
+/// An environment whose ZENV_DIR is `zdir`, so registry files go there.
+fn zenvDirEnv(a: Allocator, zdir: []const u8) !Environ.Map {
+    var env = Environ.Map.init(a);
+    errdefer env.deinit();
+    try env.put("ZENV_DIR", zdir);
+    return env;
+}
+
 test "generateSHA1ID returns 40-char lowercase hex" {
-    test_support.setupRuntime();
     const a = testing.allocator;
     const id = try generateSHA1ID(a, "env", "/proj", "*");
     defer a.free(id);
@@ -762,7 +755,7 @@ test "generateSHA1ID returns 40-char lowercase hex" {
 
 test "registry resolution by name, alias, and id prefix" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
 
     try reg.entries.append(a, .{
@@ -807,7 +800,7 @@ fn tAppendT(reg: *EnvironmentRegistry, id: []const u8, name: []const u8, dir: []
 
 test "resolveAgainstCwd: name, alias, exact id, unique prefix, not-found" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");
@@ -823,7 +816,7 @@ test "resolveAgainstCwd: name, alias, exact id, unique prefix, not-found" {
 
 test "resolveAgainstCwd: ambiguous id prefix is distinct from not-found" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppend(&reg, "abcdef0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "one", "/p/one");
     try tAppend(&reg, "abcdef0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "two", "/p/two");
@@ -833,7 +826,7 @@ test "resolveAgainstCwd: ambiguous id prefix is distinct from not-found" {
 
 test "resolveAgainstCwd: '.' matches by cwd, ambiguous when two share a project_dir" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppend(&reg, "id1aaaa0000000000000000000000000000000000", "web", "/proj");
 
@@ -858,7 +851,7 @@ fn tSharedAliasReg(reg: *EnvironmentRegistry) !void {
 
 test "resolveAgainstCwd: a shared alias is disambiguated by the current host" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
 
@@ -870,7 +863,7 @@ test "resolveAgainstCwd: a shared alias is disambiguated by the current host" {
 
 test "resolveAgainstCwd: a shared alias is ambiguous without a hostname" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
     try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, null));
@@ -878,7 +871,7 @@ test "resolveAgainstCwd: a shared alias is ambiguous without a hostname" {
 
 test "resolveAgainstCwd: a shared alias matching no host is ambiguous" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
     try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, "machine3"));
@@ -886,7 +879,7 @@ test "resolveAgainstCwd: a shared alias matching no host is ambiguous" {
 
 test "resolveAgainstCwd: a shared alias whose holders both target '*' is ambiguous" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_a", "/proj", "*");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_b", "/proj", "*");
@@ -898,7 +891,7 @@ test "resolveAgainstCwd: a shared alias whose holders both target '*' is ambiguo
 
 test "resolveAgainstCwd: a single-holder alias resolves regardless of host" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web", "machine1");
     try reg.attachAlias("w", "web");
@@ -910,7 +903,7 @@ test "resolveAgainstCwd: a single-holder alias resolves regardless of host" {
 
 test "resolveAgainstCwd: '.' is disambiguated by host when envs share a project_dir" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
@@ -924,7 +917,7 @@ test "resolveAgainstCwd: '.' is disambiguated by host when envs share a project_
 
 test "addAlias: shares an alias across entries, rejects same-entry dup and name-shadow" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tAppendT(&reg, "aaaaaaa1111111111111111111111111111111111", "env_m1", "/proj", "machine1");
     try tAppendT(&reg, "bbbbbbb2222222222222222222222222222222222", "env_m2", "/proj", "machine2");
@@ -939,7 +932,7 @@ test "addAlias: shares an alias across entries, rejects same-entry dup and name-
 
 test "removeAlias: drops a shared alias from every holder" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
     try testing.expect(reg.detachAlias("dev"));
@@ -950,7 +943,7 @@ test "removeAlias: drops a shared alias from every holder" {
 
 test "rename: rejects a new name equal to a shared (ambiguous) alias" {
     const a = testing.allocator;
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, testing.io, &test_support.no_env);
     defer reg.deinit();
     try tSharedAliasReg(&reg);
     const ref = try reg.resolveAgainstCwd("env_m1", null, null);
@@ -960,22 +953,24 @@ test "rename: rejects a new name equal to a shared (ambiguous) alias" {
 }
 
 test "registry save/load round-trips a shared alias" {
-    test_support.setupRuntime();
     const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
 
     const zdir = ".zig-cache/tmp/zenv-shared-alias-roundtrip";
-    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
-    runtime.deleteTree(zdir) catch {};
-    defer runtime.deleteTree(zdir) catch {};
+    var env = try zenvDirEnv(a, zdir);
+    defer env.deinit();
+    cwd.deleteTree(io, zdir) catch {};
+    defer cwd.deleteTree(io, zdir) catch {};
 
     {
-        var reg = EnvironmentRegistry.init(a);
+        var reg = EnvironmentRegistry.init(a, io, &env);
         defer reg.deinit();
         try tSharedAliasReg(&reg);
         try reg.save();
     }
     {
-        var reg2 = try EnvironmentRegistry.load(a);
+        var reg2 = try EnvironmentRegistry.load(a, io, &env);
         defer reg2.deinit();
         const r1 = try reg2.resolveAgainstCwd("dev", null, "machine1");
         try testing.expectEqualStrings("env_m1", reg2.get(r1).env_name);
@@ -985,29 +980,33 @@ test "registry save/load round-trips a shared alias" {
 }
 
 test "registry load rejects a non-object root instead of crashing" {
-    test_support.setupRuntime();
     const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
 
     const zdir = ".zig-cache/tmp/zenv-registry-bad-root";
-    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
-    runtime.deleteTree(zdir) catch {};
-    defer runtime.deleteTree(zdir) catch {};
-    try runtime.makePath(zdir);
-    try runtime.writeFile(zdir ++ "/registry.json", "[]");
+    var env = try zenvDirEnv(a, zdir);
+    defer env.deinit();
+    cwd.deleteTree(io, zdir) catch {};
+    defer cwd.deleteTree(io, zdir) catch {};
+    try cwd.createDirPath(io, zdir);
+    try cwd.writeFile(io, .{ .sub_path = zdir ++ "/registry.json", .data = "[]" });
 
-    try testing.expectError(error.InvalidRegistryFormat, EnvironmentRegistry.load(a));
+    try testing.expectError(error.InvalidRegistryFormat, EnvironmentRegistry.load(a, io, &env));
 }
 
 test "registry load rebuilds a missing id and venv_path and skips malformed entries" {
-    test_support.setupRuntime();
     const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
 
     const zdir = ".zig-cache/tmp/zenv-registry-legacy";
-    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
-    runtime.deleteTree(zdir) catch {};
-    defer runtime.deleteTree(zdir) catch {};
-    try runtime.makePath(zdir);
-    try runtime.writeFile(zdir ++ "/registry.json",
+    var env = try zenvDirEnv(a, zdir);
+    defer env.deinit();
+    cwd.deleteTree(io, zdir) catch {};
+    defer cwd.deleteTree(io, zdir) catch {};
+    try cwd.createDirPath(io, zdir);
+    try cwd.writeFile(io, .{ .sub_path = zdir ++ "/registry.json", .data =
         \\{ "environments": [
         \\  { "name": "old", "project_dir": "/p", "target_machine": "*", "extra": 1 },
         \\  { "name": "bad", "project_dir": 5, "target_machine": "*" },
@@ -1015,9 +1014,9 @@ test "registry load rebuilds a missing id and venv_path and skips malformed entr
         \\  { "id": "abc", "name": "new", "project_dir": "/q", "target_machine": "m1, m2",
         \\    "venv_path": "/q/.zenv/new", "description": null, "aliases": ["n"] }
         \\] }
-    );
+    });
 
-    var reg = try EnvironmentRegistry.load(a);
+    var reg = try EnvironmentRegistry.load(a, io, &env);
     defer reg.deinit();
     try testing.expectEqual(@as(usize, 2), reg.entries.items.len);
     const old = reg.entries.items[0];
@@ -1033,18 +1032,20 @@ test "registry load rebuilds a missing id and venv_path and skips malformed entr
 }
 
 test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {
-    test_support.setupRuntime();
     const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
 
     // Point ZENV_DIR at a scratch dir so the folded save() writes there, not ~/.zenv.
     // (Map.put copies the strings.) The testing allocator then leak-checks the
     // entries' own allocations — catching any double-free/leak in the mutators.
     const zdir = ".zig-cache/tmp/zenv-registry-test";
-    runtime.environ_map.put("ZENV_DIR", zdir) catch unreachable;
-    runtime.deleteTree(zdir) catch {};
-    defer runtime.deleteTree(zdir) catch {};
+    var env = try zenvDirEnv(a, zdir);
+    defer env.deinit();
+    cwd.deleteTree(io, zdir) catch {};
+    defer cwd.deleteTree(io, zdir) catch {};
 
-    var reg = EnvironmentRegistry.init(a);
+    var reg = EnvironmentRegistry.init(a, io, &env);
     defer reg.deinit();
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try tAppend(&reg, "bbbbbbb2222222222222222222222222222222222", "api", "/p/api");

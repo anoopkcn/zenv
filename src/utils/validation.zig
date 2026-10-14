@@ -1,11 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
 const config_module = @import("config.zig");
 const envspec = @import("envspec.zig");
-const runtime = @import("runtime.zig");
 
 /// Represents an error found during validation
 pub const ValidationError = struct {
@@ -47,19 +47,18 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
-    // Strings may borrow from `content` (it outlives `parsed`); every built
-    // field is duped below.
-    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{
-        .allocate = .alloc_if_needed,
-    }) catch |err| {
-        try errors.append(allocator, ValidationError{
-            .line = diag.getLine(),
-            .column = diag.getColumn(),
-            .message = try allocator.print("Invalid JSON syntax: {s}", .{@errorName(err)}),
-            .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
-            // field_path left null: a syntax error has no schema path.
-        });
-        return .{ .errors = errors };
+    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            try errors.append(allocator, ValidationError{
+                .line = diag.getLine(),
+                .column = diag.getColumn(),
+                .message = try allocator.print("Invalid JSON syntax: {t}", .{err}),
+                .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
+                // field_path left null: a syntax error has no schema path.
+            });
+            return .{ .errors = errors };
+        },
     };
     // Every built field is duped, so the tree is not needed beyond this walk.
     defer parsed.deinit();
@@ -75,7 +74,6 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
 
     var config = config_module.ZenvConfig{
         .allocator = allocator,
-        .environments = std.StringHashMap(config_module.EnvironmentConfig).init(allocator),
         .base_dir = try allocator.dupe(u8, ".zenv"), // safe default; always deinit-able
     };
     errdefer config.deinit();
@@ -117,7 +115,7 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
             errdefer env.deinit();
             const env_key = try allocator.dupe(u8, key);
             errdefer allocator.free(env_key);
-            try config.environments.put(env_key, env);
+            try config.environments.put(allocator, env_key, env);
         }
     }
 
@@ -347,11 +345,9 @@ fn buildEnvVars(
         });
         return;
     }
-    var it = v.object.iterator();
-    while (it.next()) |e| {
-        const name = e.key_ptr.*;
+    for (v.object.keys(), v.object.values()) |name, entry| {
         var kind: config_module.EnvVar.Kind = .set;
-        const text: ?[]const u8 = switch (e.value_ptr.*) {
+        const text: ?[]const u8 = switch (entry) {
             .string => |s| s,
             .object => |o| blk: {
                 if (o.count() != 1) break :blk null;
@@ -430,8 +426,8 @@ const Position = struct {
 /// string key "" is the document root. Positions come from the parser's own
 /// `Diagnostics`, so they are exact and repeat-proof. Nothing is freed
 /// individually: `allocator` is an arena.
-fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMap(Position) {
-    var map = std.StringHashMap(Position).init(allocator);
+fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMapUnmanaged(Position) {
+    var map: std.StringHashMapUnmanaged(Position) = .empty;
     var scanner = json.Scanner.initCompleteInput(allocator, content);
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
@@ -442,8 +438,10 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
     var path: std.ArrayList(u8) = .empty;
 
     while (true) {
-        // Captured before consuming the token, this sits at the token's start
-        // (Diagnostics otherwise reports the end of the just-consumed token).
+        // Peeking skips the whitespace, ',' and ':' before the next token, so
+        // the position is the token's start (Diagnostics otherwise reports the
+        // end of the token just consumed).
+        _ = try scanner.peekNextTokenType();
         const before = Position{ .line = diag.getLine(), .column = diag.getColumn() };
         const tok = try scanner.nextAlloc(allocator, .alloc_if_needed);
         switch (tok) {
@@ -456,8 +454,7 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
         }
 
         // Point `path` at this value (the root's is ""), or take an object key.
-        if (frames.items.len > 0) {
-            const top = &frames.items[frames.items.len - 1];
+        if (frames.lastPtr()) |top| {
             if (top.expecting_key) {
                 path.shrinkRetainingCapacity(top.base_len);
                 if (top.base_len > 0) try path.append(allocator, '.');
@@ -476,7 +473,7 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
                 top.index += 1;
             }
         }
-        try map.put(try allocator.dupe(u8, path.items), before);
+        try map.put(allocator, try allocator.dupe(u8, path.items), before);
 
         switch (tok) {
             .object_begin, .array_begin => try frames.append(allocator, .{
@@ -521,31 +518,24 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
 }
 
 /// Prints validation errors to stderr
-pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(ValidationError)) void {
-    for (errors.items, 0..) |err, i| {
-        if (i > 0) {
-            output.printError(allocator, "", .{}) catch {};
-        }
+pub fn printValidationErrors(io: Io, errors: []const ValidationError) void {
+    for (errors, 0..) |err, i| {
+        if (i > 0) output.printError(io, "", .{});
 
         if (err.line > 0) {
-            output.printError(allocator, "at line {d}, column {d}: {s}", .{ err.line, err.column, err.message }) catch {};
+            output.printError(io, "at line {d}, column {d}: {s}", .{ err.line, err.column, err.message });
         } else {
-            output.printError(allocator, "{s}", .{err.message}) catch {};
+            output.printError(io, "{s}", .{err.message});
         }
 
         if (err.field_path) |path| {
-            if (path.len > 0) {
-                output.printError(allocator, "In field: {s}", .{path}) catch {};
-            }
+            if (path.len > 0) output.printError(io, "In field: {s}", .{path});
         }
 
         if (err.context) |ctx| {
-            output.printError(allocator, "Context: {s}", .{ctx}) catch {};
-
+            output.printError(io, "Context: {s}", .{ctx});
             // A '^' under the column ("" padded to the column with spaces).
-            if (err.column > 0) {
-                output.printError(allocator, "         {s:[1]}^", .{ "", @min(err.column - 1, ctx.len) }) catch {};
-            }
+            if (err.column > 0) output.printError(io, "         {s:[1]}^", .{ "", @min(err.column - 1, ctx.len) });
         }
     }
 }
@@ -553,11 +543,11 @@ pub fn printValidationErrors(allocator: Allocator, errors: std.ArrayList(Validat
 /// Reads `config_path` and returns the built `ZenvConfig`, or prints positioned
 /// errors and fails. The production parse path (setup/register): a single call
 /// to the parse-and-validate seam — one read, one parse, one walk.
-pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_module.ZenvConfig {
-    const content = runtime.readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch |err| {
+pub fn validateAndParse(allocator: Allocator, io: Io, config_path: []const u8) !config_module.ZenvConfig {
+    const content = Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
         if (err == error.FileNotFound) {
-            output.printError(allocator, "Configuration file not found", .{}) catch {};
-            output.printError(allocator, "Context: {s}", .{config_path}) catch {};
+            output.printError(io, "Configuration file not found", .{});
+            output.printError(io, "Context: {s}", .{config_path});
             return error.InvalidFormat;
         }
         return err;
@@ -568,7 +558,7 @@ pub fn validateAndParse(allocator: Allocator, config_path: []const u8) !config_m
         .errors => |errs| {
             var e = errs;
             defer freeErrors(allocator, &e);
-            printValidationErrors(allocator, e);
+            printValidationErrors(io, e.items);
             return error.InvalidFormat;
         },
         .config => |c| return c,
@@ -758,6 +748,32 @@ test "validateJsonContent: wrong-typed field gives exact path and line (repeat-p
     // Must point at line 4 (the "bad" env), not the identical ["*"] on line 3
     // that the old indexOf search would have matched.
     try testing.expectEqual(@as(usize, 4), e.line);
+}
+
+test "validateJsonContent: a value is located at its own line and column, not the separator before it" {
+    const a = testing.allocator;
+    const content =
+        \\{
+        \\  "base_dir": "zenv",
+        \\  "e": {
+        \\    "target_machines": ["*"],
+        \\    "modules": [
+        \\      "a",
+        \\      5
+        \\    ],
+        \\    "module_cache":
+        \\      "yes"
+        \\  }
+        \\}
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expectEqual(@as(usize, 2), errs.items.len);
+    try testing.expectEqualStrings("e.modules[1]", errs.items[0].field_path.?);
+    try testing.expectEqual(@as(usize, 7), errs.items[0].line);
+    try testing.expectEqual(@as(usize, 7), errs.items[0].column);
+    try testing.expectEqualStrings("e.module_cache", errs.items[1].field_path.?);
+    try testing.expectEqual(@as(usize, 10), errs.items[1].line);
 }
 
 test "validateJsonContent: module_cache must be boolean" {

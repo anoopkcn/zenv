@@ -106,6 +106,6 @@ const bash =
 test "forShell knows zsh and bash" {
     try std.testing.expect(forShell("fish") == null);
     for ([_][]const u8{ "zsh", "bash" }) |name| {
-        try std.testing.expect(std.mem.indexOf(u8, forShell(name).?, "zenv activate --auto") != null);
+        try std.testing.expect(std.mem.find(u8, forShell(name).?, "zenv activate --auto") != null);
     }
 }

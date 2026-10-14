@@ -1,5 +1,21 @@
 const std = @import("std");
 
+/// Every `--flag` zenv takes. The commands list the ones they accept as enum
+/// literals, so a misspelt flag in such a list is a compile error.
+pub const Flag = enum {
+    @"--force",
+    @"--no-host",
+    @"--python",
+    @"--dev",
+    @"--uv",
+    @"--init",
+    @"--no-cache",
+    @"--jupyter",
+    @"--zenv",
+    @"--reuse-module-cache",
+    @"--no-python",
+};
+
 pub const CommandFlags = struct {
     force_deps: bool = false, // Whether to force install dependencies even if provided by modules
     skip_hostname_check: bool = false, // Whether to skip hostname validation
@@ -13,21 +29,26 @@ pub const CommandFlags = struct {
     no_python: bool = false, // (zenv init, setup --init) Write the new env with "python": false
     reuse_module_cache: bool = false, // (setup) Replay the module cache instead of re-capturing it when the module set is unchanged
 
-    /// Each flag's spelling and the field it sets.
-    const spellings = .{
-        .{ "--force", "force_deps" },          .{ "--no-host", "skip_hostname_check" },
-        .{ "--python", "use_default_python" }, .{ "--dev", "dev_mode" },
-        .{ "--uv", "use_uv" },                 .{ "--init", "init_mode" },
-        .{ "--no-cache", "no_cache" },         .{ "--jupyter", "create_jupyter_kernel" },
-        .{ "--zenv", "zenv_only" },            .{ "--reuse-module-cache", "reuse_module_cache" },
-        .{ "--no-python", "no_python" },
+    /// The field each flag sets.
+    const fields: std.enums.EnumFieldStruct(Flag, []const u8, null) = .{
+        .@"--force" = "force_deps",
+        .@"--no-host" = "skip_hostname_check",
+        .@"--python" = "use_default_python",
+        .@"--dev" = "dev_mode",
+        .@"--uv" = "use_uv",
+        .@"--init" = "init_mode",
+        .@"--no-cache" = "no_cache",
+        .@"--jupyter" = "create_jupyter_kernel",
+        .@"--zenv" = "zenv_only",
+        .@"--reuse-module-cache" = "reuse_module_cache",
+        .@"--no-python" = "no_python",
     };
 
     /// Parse command-line args to extract flags
     pub fn fromArgs(args: []const []const u8) CommandFlags {
         var flags: CommandFlags = .{};
-        for (args) |arg| inline for (spellings) |s| {
-            if (std.mem.eql(u8, arg, s[0])) @field(flags, s[1]) = true;
+        for (args) |arg| switch (std.meta.stringToEnum(Flag, arg) orelse continue) {
+            inline else => |flag| @field(flags, @field(fields, @tagName(flag))) = true,
         };
         return flags;
     }
@@ -35,20 +56,21 @@ pub const CommandFlags = struct {
 
 /// The first `-`/`--` argument after the command that is not in `allowed`, so
 /// a mistyped flag (`--no-cach`) is refused instead of silently ignored.
-pub fn unknownFlag(args: []const []const u8, allowed: []const []const u8) ?[]const u8 {
+pub fn unknownFlag(args: []const []const u8, allowed: []const Flag) ?[]const u8 {
     if (args.len <= 2) return null;
-    next: for (args[2..]) |arg| {
+    for (args[2..]) |arg| {
         if (!std.mem.startsWith(u8, arg, "-")) continue;
-        for (allowed) |known| if (std.mem.eql(u8, arg, known)) continue :next;
-        return arg;
+        const flag = std.meta.stringToEnum(Flag, arg) orelse return arg;
+        if (std.mem.findScalar(Flag, allowed, flag) == null) return arg;
     }
     return null;
 }
 
 test "unknownFlag finds the first flag a command does not take" {
-    const allowed = [_][]const u8{ "--uv", "--dev" };
+    const allowed = [_]Flag{ .@"--uv", .@"--dev" };
     try std.testing.expect(unknownFlag(&.{ "zenv", "add", "e", "pkg", "--uv" }, &allowed) == null);
     try std.testing.expectEqualStrings("--no-cach", unknownFlag(&.{ "zenv", "setup", "--uv", "e", "--no-cach" }, &allowed).?);
+    try std.testing.expectEqualStrings("--force", unknownFlag(&.{ "zenv", "add", "e", "--force" }, &allowed).?);
     try std.testing.expect(unknownFlag(&.{"zenv"}, &allowed) == null);
 }
 

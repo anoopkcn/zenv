@@ -163,8 +163,9 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         }),
     });
-    // test_root.zig imports utils/parse_deps.zig, which imports "toml"
+    // utils/parse_deps.zig imports "toml"; utils/venv.zig imports "options".
     unit_tests.root_module.addImport("toml", toml_dep.module("toml"));
+    unit_tests.root_module.addImport("options", options_module.createModule());
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
