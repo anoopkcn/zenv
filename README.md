@@ -2,6 +2,8 @@
 
 Project environments, defined in one file
 
+![Horizontal bar chart of mean times on an Apple Silicon Mac and an HPC system: the shell hook's call to zenv takes 1.9 and 2.5 ms, close to an empty process; activating an environment with modules in a login shell takes 525 ms with zenv and 1,586 ms by hand, against 495 ms for the shell alone](.github/assets/fig-speed.svg)
+
 `zenv` builds and activates the environment a project needs, as described in a `zenv.json` next to its code: environment variables, HPC modules, setup and activation hooks, and a Python virtual environment with its packages. Each part is optional. A C++ project can use zenv for its compilers and variables alone, and a Python project on a laptop for nothing but its venv.
 
 Environments are registered globally, so you can activate one, run a command in it, or `cd` to its project by name from any directory, or have it activate when you enter the project. The same `zenv.json` works on a laptop and on an HPC cluster, where it can hold a separate environment for each machine and where zenv caches the slow `module load`. zenv is a single binary written in Zig and does not need Python to run.
