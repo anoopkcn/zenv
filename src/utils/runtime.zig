@@ -223,6 +223,17 @@ pub fn exec(argv: []const []const u8, opts: ExecOptions) !Term {
     return exec_backend.exec(argv, opts);
 }
 
+/// Replaces this process with `argv` (exec); returns only on failure. Not in
+/// `exec_backend`: a test that reached it would replace the test runner.
+pub fn replace(argv: []const []const u8, opts: ExecOptions) anyerror {
+    return std.process.replace(io, .{
+        .exe = if (opts.exe_path) |p| .{ .explicit = .{ .dir = Dir.cwd(), .path = p } } else .detect,
+        .argv = argv,
+        .cwd = toCwd(opts.cwd),
+        .environ_map = opts.environ_map,
+    });
+}
+
 fn toCwd(cwd: ?[]const u8) std.process.Child.Cwd {
     return if (cwd) |c| .{ .path = c } else .inherit;
 }

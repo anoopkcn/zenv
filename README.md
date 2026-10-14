@@ -237,7 +237,7 @@ zenv run test vim
 # zenv run test code -n .
 ```
 
-`zenv run` exits with the command's exit status (128 + the signal number if a signal ended it), so it works in scripts and CI. It starts the command directly with the environment's variables applied, without a shell; environments with `activate` hooks, or with modules but no module cache usable on this machine (for example `"module_cache": false`), are run by sourcing `activate.sh` in bash instead. `ZENV_RUN_SHELL=1` forces that bash path, which helps tell whether the direct launch is the cause of a difference.
+`zenv run` replaces itself with the command (exec), so the command's exit status and signals reach the caller exactly as if it ran directly: it works in scripts and CI, and an interrupt sent to it (Ctrl-C, a Jupyter kernel interrupt) goes to the command. It starts the command directly with the environment's variables applied, without a shell; environments with `activate` hooks, or with modules but no module cache usable on this machine (for example `"module_cache": false`), are run by sourcing `activate.sh` in bash instead. `ZENV_RUN_SHELL=1` forces that bash path, which helps tell whether the direct launch is the cause of a difference.
 
 ### Adding packages to an environment
 

@@ -912,27 +912,17 @@ pub fn handleRunCommand(
     try autosetup.ensureUpToDate(allocator, registry.get(ref));
     const venv_path = registry.get(ref).venv_path;
 
-    const term = execInEnv(allocator, venv_path, command, command_args) catch |err| {
+    // The command replaces zenv (exec), so its exit status and signals reach
+    // the caller as if it ran directly, and a signal sent to this pid (e.g. a
+    // Jupyter kernel interrupt) reaches the command instead of ending zenv
+    // under it. execInEnv returns only when the command was not found.
+    const term = execInEnv(allocator, venv_path, command, command_args, .replace) catch |err| {
         output.printError(allocator, "Failed to run command: {s}", .{@errorName(err)}) catch {};
         return err;
     };
-
-    // Propagate the child's exit status as zenv's own, so callers (CI, scripts)
-    // see the real result instead of a flattened 0/1. A signalled child maps to
-    // the conventional 128 + signo.
     switch (term) {
         .exited => |code| std.process.exit(code),
-        .signal, .stopped => |sig| {
-            // Saturate rather than truncate: an out-of-range signo must not
-            // wrap into a small (success-looking) exit code.
-            const signo: u8 = std.math.cast(u8, @backingInt(sig)) orelse 255;
-            output.printError(allocator, "Command terminated by signal {d}", .{signo}) catch {};
-            std.process.exit(128 +| signo);
-        },
-        .unknown => |status| {
-            output.printError(allocator, "Command terminated abnormally (status {d})", .{status}) catch {};
-            std.process.exit(1);
-        },
+        else => std.process.exit(1),
     }
 }
 
@@ -1073,14 +1063,18 @@ fn noPython(allocator: Allocator, env_name: []const u8, why: []const u8) error{N
 /// Installs `package` into the activated environment via pip (or uv when
 /// `use_uv`). A non-zero installer exit maps to error.ProcessError.
 fn installPackage(allocator: Allocator, venv_path: []const u8, package: []const u8, use_uv: bool) !void {
-    const command: []const u8 = if (use_uv) "uv" else "python";
+    // The uv on zenv's own PATH, as setup uses: an activate.sh launch purges
+    // modules, which would drop a uv that a module provides.
+    const uv = if (use_uv) try envspec.resolveCommand(allocator, "uv", runtime.env("PATH")) else null;
+    defer if (uv) |path| allocator.free(path);
+    const command: []const u8 = if (use_uv) uv orelse "uv" else "python";
     const cmd_args: []const []const u8 = if (use_uv)
         &[_][]const u8{ "pip", "install", package }
     else
         &[_][]const u8{ "-m", "pip", "install", package };
 
     output.print(allocator, "Installing '{s}'...", .{package}) catch {};
-    const term = execInEnv(allocator, venv_path, command, cmd_args) catch |err| {
+    const term = execInEnv(allocator, venv_path, command, cmd_args, .wait) catch |err| {
         output.printError(allocator, "Failed to run installer: {s}", .{@errorName(err)}) catch {};
         return err;
     };
@@ -1137,24 +1131,36 @@ fn persistAddedPackage(
     }
 }
 
-/// Runs `command` inside the environment at `venv_path` with inherited stdio
-/// and returns its `Term`. Uses the direct launch when `zenv-env.json` can
-/// reproduce activation, else sources activate.sh through bash.
-fn execInEnv(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8) !runtime.Term {
-    if (try execDirect(allocator, venv_path, command, command_args)) |term| return term;
+/// How execInEnv starts the command: as a child it waits for, or in place of
+/// zenv (exec), in which case it returns only if the command did not start.
+const Launch = enum { wait, replace };
+
+/// Starts `command` inside the environment at `venv_path` with inherited stdio,
+/// as `launch` says; with `.wait` it returns the command's `Term`. Uses the
+/// direct launch when `zenv-env.json` can reproduce activation, else sources
+/// activate.sh through bash.
+fn execInEnv(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8, launch: Launch) !runtime.Term {
+    if (try execDirect(allocator, venv_path, command, command_args, launch)) |term| return term;
 
     const activate_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ venv_path, "activate.sh" });
     defer allocator.free(activate_path);
     const argv = try buildRunArgv(allocator, activate_path, command, command_args);
     defer allocator.free(argv);
-    return runtime.exec(argv, .{});
+    return startCommand(argv, .{}, launch);
+}
+
+fn startCommand(argv: []const []const u8, opts: runtime.ExecOptions, launch: Launch) !runtime.Term {
+    return switch (launch) {
+        .wait => runtime.exec(argv, opts),
+        .replace => runtime.replace(argv, opts),
+    };
 }
 
 /// Direct launch: copy this process's environment, apply `zenv-env.json`,
-/// resolve `command` against the resulting PATH and spawn it, no shell
+/// resolve `command` against the resulting PATH and start it, no shell
 /// involved. Returns null (caller falls back to bash) when the spec is missing
 /// or `envspec.directReason` reports a blocker, or when ZENV_RUN_SHELL=1.
-fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8) !?runtime.Term {
+fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, command_args: []const []const u8, launch: Launch) !?runtime.Term {
     if (runtime.env("ZENV_RUN_SHELL")) |v| {
         if (std.mem.eql(u8, v, "1")) {
             zerrors.debugLog(allocator, "run: ZENV_RUN_SHELL=1, using activate.sh", .{});
@@ -1193,7 +1199,7 @@ fn execDirect(allocator: Allocator, venv_path: []const u8, command: []const u8, 
     defer argv.deinit(allocator);
     try argv.append(allocator, command);
     try argv.appendSlice(allocator, command_args);
-    return try runtime.exec(argv.items, .{ .environ_map = &child_env, .exe_path = exe });
+    return try startCommand(argv.items, .{ .environ_map = &child_env, .exe_path = exe }, launch);
 }
 
 /// Shell snippet passed to `bash -c`. It sources the activation script (passed

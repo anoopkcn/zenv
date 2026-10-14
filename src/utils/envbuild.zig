@@ -39,6 +39,10 @@ pub const Options = struct {
     /// The project's requires-python, checked against the venv's interpreter
     /// before the venv is made. Null: no check.
     requires_python: ?RequiresPython = null,
+    /// Path of the uv that installs run; null: pip. `run` sets it
+    /// from zenv's own PATH for --uv, before modules are purged and loaded:
+    /// a uv from a module the env does not load would be gone by then.
+    uv: ?[]const u8 = null,
 };
 
 pub const RequiresPython = struct {
@@ -50,10 +54,11 @@ pub const RequiresPython = struct {
 
 /// Builds the venv for `opts`. Failures are reported before returning
 /// error.ProcessError (or a specific error `errors.report` explains).
-pub fn run(allocator: Allocator, opts: Options) !void {
+pub fn run(allocator: Allocator, options: Options) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    var opts = options;
     const flags = opts.flags;
     const join = std.Io.Dir.path.join;
 
@@ -76,6 +81,7 @@ pub fn run(allocator: Allocator, opts: Options) !void {
         const uv = try findExecutable(a, "uv", runtime.env("PATH")) orelse
             return fail(a, "'uv' command not found, but --uv was specified. Install uv or run without --uv.", .{});
         info(a, "Using {s}", .{std.mem.trim(u8, capture(a, &.{ uv, "--version" }, null) orelse "uv (version unknown)", " \n")});
+        opts.uv = uv;
     }
 
     const fallback = try fallbackPython(a, opts.env_config, flags);
@@ -120,9 +126,12 @@ pub fn run(allocator: Allocator, opts: Options) !void {
     _ = uv_env.orderedRemove("PYTHONPATH");
     const install_env = if (flags.use_uv) &uv_env else &env;
 
-    info(a, "Ensuring pip is up to date in the venv", .{});
-    const upgrade_pip: []const []const u8 = if (flags.use_uv) &.{ "--upgrade", "pip" } else &.{ "--ignore-installed", "--no-build-isolation", "--upgrade", "pip" };
-    try install(a, opts, venv_python, install_env, upgrade_pip, "upgrading pip");
+    // uv installs pip only when it is missing (a new venv still gets the
+    // current one): `--upgrade` would make uv ask the index for the newest pip
+    // on every setup, about 0.1 s.
+    info(a, "Ensuring pip is {s} the venv", .{if (flags.use_uv) "in" else "up to date in"});
+    const pip_args: []const []const u8 = if (flags.use_uv) &.{"pip"} else &.{ "--ignore-installed", "--no-build-isolation", "--upgrade", "pip" };
+    try install(a, opts, venv_python, install_env, pip_args, "installing pip");
 
     const plan = try planInstall(a, deps, module_pkgs, flags.force_deps);
     try installRequirements(a, opts, venv_python, install_env, plan);
@@ -822,12 +831,12 @@ fn seedPip(a: Allocator, env: *const Map, venv_python: []const u8, chosen: Chose
 // Installs
 // ---------------------------------------------------------------------------
 
-/// The installer argv: `uv pip install [--no-cache] --link-mode=copy ARGS` or
-/// `<venv python> -m pip install [--no-cache-dir] ARGS`.
-pub fn installerArgv(a: Allocator, venv_python: []const u8, use_uv: bool, no_cache: bool, args: []const []const u8) ![]const []const u8 {
+/// The installer argv: `<uv> pip install [--no-cache] --link-mode=copy ARGS`
+/// with `uv`, else `<venv python> -m pip install [--no-cache-dir] ARGS`.
+pub fn installerArgv(a: Allocator, venv_python: []const u8, uv: ?[]const u8, no_cache: bool, args: []const []const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
-    if (use_uv) {
-        try argv.appendSlice(a, &.{ "uv", "pip", "install" });
+    if (uv) |exe| {
+        try argv.appendSlice(a, &.{ exe, "pip", "install" });
         if (no_cache) try argv.append(a, "--no-cache");
         try argv.append(a, "--link-mode=copy");
     } else {
@@ -839,7 +848,7 @@ pub fn installerArgv(a: Allocator, venv_python: []const u8, use_uv: bool, no_cac
 }
 
 fn install(a: Allocator, opts: Options, venv_python: []const u8, env: *const Map, args: []const []const u8, what: []const u8) !void {
-    const argv = try installerArgv(a, venv_python, opts.flags.use_uv, opts.flags.no_cache, args);
+    const argv = try installerArgv(a, venv_python, opts.uv, opts.flags.no_cache, args);
     const t = try runStep(a, argv, env, opts.project_dir);
     if (!runtime.exitedOk(t)) return fail(a, "Installation failed while {s}.", .{what});
 }
@@ -928,7 +937,7 @@ fn installEditable(a: Allocator, opts: Options, venv_python: []const u8, env: *c
         return;
     }
     const args: []const []const u8 = if (opts.flags.use_uv) &.{ "--editable", ".", "--no-deps" } else &.{ "--no-build-isolation", "--editable", ".", "--no-deps" };
-    const argv = try installerArgv(a, venv_python, opts.flags.use_uv, opts.flags.no_cache, args);
+    const argv = try installerArgv(a, venv_python, opts.uv, opts.flags.no_cache, args);
     const t = try runStep(a, argv, env, opts.project_dir);
     if (runtime.exitedOk(t)) {
         info(a, "Installed the project as an editable package", .{});
@@ -1156,12 +1165,12 @@ test "installerArgv for uv and pip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const uv = try installerArgv(a, "/v/bin/python", true, true, &.{ "-r", "f" });
-    const want_uv = [_][]const u8{ "uv", "pip", "install", "--no-cache", "--link-mode=copy", "-r", "f" };
+    const uv = try installerArgv(a, "/v/bin/python", "/opt/uv/bin/uv", true, &.{ "-r", "f" });
+    const want_uv = [_][]const u8{ "/opt/uv/bin/uv", "pip", "install", "--no-cache", "--link-mode=copy", "-r", "f" };
     try testing.expectEqual(want_uv.len, uv.len);
     for (want_uv, uv) |w, g| try testing.expectEqualStrings(w, g);
 
-    const pip = try installerArgv(a, "/v/bin/python", false, false, &.{ "--upgrade", "pip" });
+    const pip = try installerArgv(a, "/v/bin/python", null, false, &.{ "--upgrade", "pip" });
     const want_pip = [_][]const u8{ "/v/bin/python", "-m", "pip", "install", "--upgrade", "pip" };
     try testing.expectEqual(want_pip.len, pip.len);
     for (want_pip, pip) |w, g| try testing.expectEqualStrings(w, g);

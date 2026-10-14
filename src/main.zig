@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const process = std.process;
 const Allocator = std.mem.Allocator;
 
@@ -230,15 +231,28 @@ fn printUsage() void {
     std.Io.File.stdout().writeStreamingAll(runtime.io, usage) catch {};
 }
 
-pub fn main(app: std.process.Init) anyerror!void {
+pub fn main(init: std.process.Init.Minimal) anyerror!void {
+    // One arena for the whole run; the process exits when the command ends.
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // What std.process.Init sets up, except that the environment is copied
+    // into the arena. Init copies it with its general-purpose allocator, which
+    // on Linux without libc is the SmpAllocator; on a many-core node that maps
+    // a fresh 64 KB slab for most of the small copies (~170 mmaps, ~1 ms per
+    // command on a 256-CPU login node).
+    const gpa = if (builtin.link_libc) std.heap.c_allocator else std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{ .argv0 = .init(init.args), .environ = init.environ });
+    defer threaded.deinit();
+    var environ_map = try init.environ.createMap(allocator);
+
     // Establish the process-wide I/O context for the whole program.
-    runtime.io = app.io;
-    runtime.environ_map = app.environ_map;
+    runtime.io = threaded.io();
+    runtime.environ_map = &environ_map;
     runtime.version = options.version;
 
-    // One arena for the whole run; the process exits when the command ends.
-    const allocator = app.arena.allocator();
-    const args = try app.minimal.args.toSlice(allocator);
+    const args = try init.args.toSlice(allocator);
 
     // Tag names ARE the command spellings (including @"-v" etc.).
     const command: Command = if (args.len < 2) .help else std.meta.stringToEnum(Command, args[1]) orelse .unknown;
