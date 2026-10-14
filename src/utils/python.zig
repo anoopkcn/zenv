@@ -238,7 +238,7 @@ pub fn installPython(ctx: Ctx, version: ?[]const u8) !void {
     io.random(&nonce);
     const build_dir = try a.print("{s}/zenv-python-build-{s}", .{ runtime.tempDir(ctx.env), &std.fmt.bytesToHex(nonce, .lower) });
     const cwd = Io.Dir.cwd();
-    var source = cwd.createDirPathOpen(io, build_dir, .{}) catch |err| {
+    var source = cwd.createDirPathOpen(io, build_dir, .{ .open_options = .{ .iterate = true } }) catch |err| {
         output.printError(io, "Failed to create build directory: {t}", .{err});
         return err;
     };
@@ -424,7 +424,7 @@ test "unpackTarGz extracts without the top directory and checks the gzip trailer
         try testing.expectError(error.CorruptDownload, unpackTarGz(io, &in, dest));
     }
 
-    var dest = try cwd.createDirPathOpen(io, root ++ "/good", .{});
+    var dest = try cwd.createDirPathOpen(io, root ++ "/good", .{ .open_options = .{ .iterate = true } });
     defer dest.close(io);
     var in: Io.Reader = .fixed(tgz);
     try unpackTarGz(io, &in, dest);
