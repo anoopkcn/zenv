@@ -1,57 +1,59 @@
-<?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 406" width="760" height="406" role="img" aria-label="Mean time per command on a Mac and an HPC system: the shell hook's call to zenv takes 1.9 and 2.5 ms, close to an empty process; activating an environment with modules in a login shell takes 525 ms with zenv and 1,586 ms by hand, against 495 ms for the shell alone">
-  <title>Mean time per command on a Mac and an HPC system: the shell hook's call to zenv takes 1.9 and 2.5 ms, close to an empty process; activating an environment with modules in a login shell takes 525 ms with zenv and 1,586 ms by hand, against 495 ms for the shell alone</title>
-  <rect width="760" height="406" rx="8" fill="#22252a"/>
-  <g font-family="ZedSans, Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#b9bdc6">
-    <text x="24.0" y="34.0" font-size="13" fill="#d7dae0" font-weight="600" style="white-space: pre;">Mean time per command, in milliseconds</text>
-    <rect x="500" y="24" width="10" height="10" rx="2" fill="#3987e5"/>
-    <text x="516.0" y="34.0" font-size="12" fill="#b9bdc6" style="white-space: pre;">Apple Silicon Mac</text>
-    <rect x="646" y="24" width="10" height="10" rx="2" fill="#d95926"/>
-    <text x="662.0" y="34.0" font-size="12" fill="#b9bdc6" style="white-space: pre;">HPC system</text>
-    <text x="24.0" y="70.0" font-size="12" fill="#7f8590" style="white-space: pre;">Using an environment</text>
-    <line x1="252.0" y1="80" x2="252.0" y2="160" stroke="#3a3e46" stroke-width="1"/>
-    <text x="252.0" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">0</text>
-    <line x1="388.7" y1="80" x2="388.7" y2="160" stroke="#3a3e46" stroke-width="1"/>
-    <text x="388.7" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1</text>
-    <line x1="525.3" y1="80" x2="525.3" y2="160" stroke="#3a3e46" stroke-width="1"/>
-    <text x="525.3" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">2</text>
-    <line x1="662.0" y1="80" x2="662.0" y2="160" stroke="#3a3e46" stroke-width="1"/>
-    <text x="662.0" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">3 ms</text>
-    <text x="24.0" y="97.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">true</text>
-    <text x="24.0" y="112.0" font-size="11" fill="#7f8590" style="white-space: pre;">an empty process, for reference</text>
-    <path d="M252.0,88.0 H398.3 A4,4 0 0 1 402.3,92.0 V95.0 A4,4 0 0 1 398.3,99.0 H252.0 Z" fill="#3987e5"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="408.3" y="97.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1.1</text>
-    <path d="M252.0,101.0 H589.7 A4,4 0 0 1 593.7,105.0 V108.0 A4,4 0 0 1 589.7,112.0 H252.0 Z" fill="#d95926"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="599.7" y="110.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">2.5</text>
-    <text x="24.0" y="135.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">zenv activate --auto .</text>
-    <text x="24.0" y="150.0" font-size="11" fill="#7f8590" style="white-space: pre;">what the shell hook runs on cd</text>
-    <path d="M252.0,126.0 H507.7 A4,4 0 0 1 511.7,130.0 V133.0 A4,4 0 0 1 507.7,137.0 H252.0 Z" fill="#3987e5"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="517.7" y="135.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1.9</text>
-    <path d="M252.0,139.0 H589.7 A4,4 0 0 1 593.7,143.0 V146.0 A4,4 0 0 1 589.7,150.0 H252.0 Z" fill="#d95926"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="599.7" y="148.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">2.5</text>
-    <text x="24.0" y="216.0" font-size="12" fill="#7f8590" style="white-space: pre;">Activating an environment with modules in a login shell, HPC system only</text>
-    <line x1="252.0" y1="226" x2="252.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
-    <text x="252.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">0</text>
-    <line x1="354.5" y1="226" x2="354.5" y2="344" stroke="#3a3e46" stroke-width="1"/>
-    <text x="354.5" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">500</text>
-    <line x1="457.0" y1="226" x2="457.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
-    <text x="457.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1,000</text>
-    <line x1="559.5" y1="226" x2="559.5" y2="344" stroke="#3a3e46" stroke-width="1"/>
-    <text x="559.5" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1,500</text>
-    <line x1="662.0" y1="226" x2="662.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
-    <text x="662.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">2,000 ms</text>
-    <text x="24.0" y="243.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">bash -l</text>
-    <text x="24.0" y="258.0" font-size="11" fill="#7f8590" style="white-space: pre;">a login shell alone, for reference</text>
-    <path d="M252.0,240.5 H349.5 A4,4 0 0 1 353.5,244.5 V247.5 A4,4 0 0 1 349.5,251.5 H252.0 Z" fill="#d95926"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="359.5" y="250.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">495</text>
-    <text x="24.0" y="281.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">source $(zenv activate &lt;env&gt;)</text>
-    <text x="24.0" y="296.0" font-size="11" fill="#7f8590" style="white-space: pre;">with the module cache</text>
-    <path d="M252.0,278.5 H355.6 A4,4 0 0 1 359.6,282.5 V285.5 A4,4 0 0 1 355.6,289.5 H252.0 Z" fill="#d95926"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="365.6" y="288.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">525</text>
-    <text x="24.0" y="319.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">module load …</text>
-    <text x="24.0" y="334.0" font-size="11" fill="#7f8590" style="white-space: pre;">then source .venv/bin/activate, by hand</text>
-    <path d="M252.0,316.5 H573.1 A4,4 0 0 1 577.1,320.5 V323.5 A4,4 0 0 1 573.1,327.5 H252.0 Z" fill="#d95926"/>
-    <text stroke="#22252a" stroke-width="4" paint-order="stroke" x="583.1" y="326.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace" style="white-space: pre;">1,586</text>
-    <text x="24.0" y="390.0" font-size="11" fill="#7f8590" style="white-space: pre;">hyperfine means, zenv v0.28.8,  HPC system: a shared JURECA login node, 256 CPUs, project on GPFS.</text>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 384" width="760" height="384" role="img" aria-label="Mean time per command on a Mac and an HPC system: the shell hook's call to zenv takes 1.9 and 2.5 ms, close to an empty process; activating an environment with modules in a login shell takes 525 ms with zenv and 1,586 ms by hand, against 495 ms for the shell alone">
+<title>Mean time per command on a Mac and an HPC system: the shell hook's call to zenv takes 1.9 and 2.5 ms, close to an empty process; activating an environment with modules in a login shell takes 525 ms with zenv and 1,586 ms by hand, against 495 ms for the shell alone</title>
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b9bdc6"/></marker>
+  <marker id="ahA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#769dce"/></marker>
+</defs>
+<rect width="760" height="384" rx="8" fill="#22252a"/>
+<g font-family="ZedSans, Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#b9bdc6">
+<text x="24.0" y="34.0" font-size="13" fill="#d7dae0" font-weight="600">Mean time per command, in milliseconds</text>
+<rect x="500" y="24" width="10" height="10" rx="2" fill="#3987e5"/>
+<text x="516.0" y="34.0" font-size="12" fill="#b9bdc6">Apple Silicon Mac</text>
+<rect x="646" y="24" width="10" height="10" rx="2" fill="#d95926"/>
+<text x="662.0" y="34.0" font-size="12" fill="#b9bdc6">HPC system</text>
+<text x="24.0" y="70.0" font-size="12" fill="#7f8590">Using an environment</text>
+<line x1="252.0" y1="80" x2="252.0" y2="160" stroke="#3a3e46" stroke-width="1"/>
+<text x="252.0" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">0</text>
+<line x1="388.7" y1="80" x2="388.7" y2="160" stroke="#3a3e46" stroke-width="1"/>
+<text x="388.7" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1</text>
+<line x1="525.3" y1="80" x2="525.3" y2="160" stroke="#3a3e46" stroke-width="1"/>
+<text x="525.3" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">2</text>
+<line x1="662.0" y1="80" x2="662.0" y2="160" stroke="#3a3e46" stroke-width="1"/>
+<text x="662.0" y="176.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">3 ms</text>
+<text x="24.0" y="97.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">true</text>
+<text x="24.0" y="112.0" font-size="11" fill="#7f8590">an empty process, for reference</text>
+<path d="M252.0,88.0 H398.3 A4,4 0 0 1 402.3,92.0 V95.0 A4,4 0 0 1 398.3,99.0 H252.0 Z" fill="#3987e5"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="408.3" y="97.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1.1</text>
+<path d="M252.0,101.0 H589.7 A4,4 0 0 1 593.7,105.0 V108.0 A4,4 0 0 1 589.7,112.0 H252.0 Z" fill="#d95926"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="599.7" y="110.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">2.5</text>
+<text x="24.0" y="135.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">zenv activate --auto .</text>
+<text x="24.0" y="150.0" font-size="11" fill="#7f8590">what the shell hook runs on cd</text>
+<path d="M252.0,126.0 H507.7 A4,4 0 0 1 511.7,130.0 V133.0 A4,4 0 0 1 507.7,137.0 H252.0 Z" fill="#3987e5"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="517.7" y="135.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1.9</text>
+<path d="M252.0,139.0 H589.7 A4,4 0 0 1 593.7,143.0 V146.0 A4,4 0 0 1 589.7,150.0 H252.0 Z" fill="#d95926"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="599.7" y="148.5" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">2.5</text>
+<text x="24.0" y="216.0" font-size="12" fill="#7f8590">Activating an environment with modules in a login shell, HPC system only</text>
+<line x1="252.0" y1="226" x2="252.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
+<text x="252.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">0</text>
+<line x1="354.5" y1="226" x2="354.5" y2="344" stroke="#3a3e46" stroke-width="1"/>
+<text x="354.5" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">500</text>
+<line x1="457.0" y1="226" x2="457.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
+<text x="457.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1,000</text>
+<line x1="559.5" y1="226" x2="559.5" y2="344" stroke="#3a3e46" stroke-width="1"/>
+<text x="559.5" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1,500</text>
+<line x1="662.0" y1="226" x2="662.0" y2="344" stroke="#3a3e46" stroke-width="1"/>
+<text x="662.0" y="360.0" font-size="11" fill="#7f8590" text-anchor="middle" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">2,000 ms</text>
+<text x="24.0" y="243.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">bash -l</text>
+<text x="24.0" y="258.0" font-size="11" fill="#7f8590">a login shell alone, for reference</text>
+<path d="M252.0,240.5 H349.5 A4,4 0 0 1 353.5,244.5 V247.5 A4,4 0 0 1 349.5,251.5 H252.0 Z" fill="#d95926"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="359.5" y="250.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">495</text>
+<text x="24.0" y="281.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">source $(zenv activate &lt;env&gt;)</text>
+<text x="24.0" y="296.0" font-size="11" fill="#7f8590">with the module cache</text>
+<path d="M252.0,278.5 H355.6 A4,4 0 0 1 359.6,282.5 V285.5 A4,4 0 0 1 355.6,289.5 H252.0 Z" fill="#d95926"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="365.6" y="288.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">525</text>
+<text x="24.0" y="319.0" font-size="12" fill="#d7dae0" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">module load …</text>
+<text x="24.0" y="334.0" font-size="11" fill="#7f8590">then source .venv/bin/activate, by hand</text>
+<path d="M252.0,316.5 H573.1 A4,4 0 0 1 577.1,320.5 V323.5 A4,4 0 0 1 573.1,327.5 H252.0 Z" fill="#d95926"/>
+<text stroke="#22252a" stroke-width="4" paint-order="stroke" x="583.1" y="326.0" font-size="11" fill="#b9bdc6" font-family="ZedMono, 'SF Mono', Menlo, Consolas, monospace">1,586</text>
+</g>
 </svg>
