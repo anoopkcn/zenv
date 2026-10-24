@@ -58,14 +58,19 @@ pub const Command = enum {
 };
 
 /// The flags each command takes (see printUsage in main.zig).
-pub const SETUP_FLAGS = [_]Flag{ .@"--init", .@"--no-python", .@"--dev", .@"--uv", .@"--no-host", .@"--python", .@"--force", .@"--no-cache", .@"--jupyter", .@"--reuse-module-cache" };
+pub const SETUP_FLAGS = [_]Flag{ .@"--init", .@"--no-python", .@"--dev", .@"--uv", .@"--pip", .@"--no-host", .@"--python", .@"--force", .@"--no-cache", .@"--jupyter", .@"--reuse-module-cache" };
 const REGISTER_FLAGS = [_]Flag{.@"--no-host"};
-const ADD_FLAGS = [_]Flag{ .@"--dev", .@"--zenv", .@"--uv" };
+const ADD_FLAGS = [_]Flag{ .@"--dev", .@"--zenv", .@"--uv", .@"--pip" };
 
-/// Refuses a flag that `zenv <command>` does not take, naming the ones it does.
+/// Refuses a flag that `zenv <command>` does not take, naming the ones it
+/// does, and two flags that contradict each other.
 pub fn checkFlags(io: Io, args: []const []const u8, allowed: []const Flag) error{ArgsError}!void {
-    const bad = unknownFlag(args, allowed) orelse return;
-    output.printError(io, "Unknown option '{s}' for 'zenv {s}'. Options: {f}", .{ bad, args[1], joinedList(Flag, allowed) });
+    if (unknownFlag(args, allowed)) |bad| {
+        output.printError(io, "Unknown option '{s}' for 'zenv {s}'. Options: {f}", .{ bad, args[1], joinedList(Flag, allowed) });
+        return error.ArgsError;
+    }
+    const pair = flags_module.conflict(args) orelse return;
+    output.printError(io, "'{s}' and '{s}' cannot be used together.", .{ pair[0], pair[1] });
     return error.ArgsError;
 }
 
@@ -947,7 +952,7 @@ pub fn handleRunCommand(
     }
 }
 
-/// `zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]`
+/// `zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]`
 /// Installs `<package>` into the environment's venv and records it in the right
 /// manifest. Install happens FIRST; the manifest is only updated on success.
 pub fn handleAddCommand(
@@ -958,11 +963,11 @@ pub fn handleAddCommand(
     const io = ctx.io;
     const allocator = ctx.arena;
     const env_id = positional(args, 0) orelse {
-        output.printError(io, "Missing environment name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]", .{});
+        output.printError(io, "Missing environment name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]", .{});
         return error.ArgsError;
     };
     const package = positional(args, 1) orelse {
-        output.printError(io, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]", .{});
+        output.printError(io, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]", .{});
         return error.ArgsError;
     };
     try checkFlags(io, args, &ADD_FLAGS);
@@ -1016,7 +1021,8 @@ pub fn handleAddCommand(
     const was_fresh = !(autosetup.isStale(ctx, entry) catch true);
 
     // 1. Install into the venv (only persist below if this succeeds).
-    try installPackage(ctx, entry.venv_path, package, flags.use_uv);
+    const uv = try envbuild.resolveUv(ctx, addInstaller(allocator, io, flags, entry.venv_path));
+    try installPackage(ctx, entry.venv_path, package, uv);
 
     // 2. Persist to the appropriate manifest.
     persistAddedPackage(allocator, io, project_dir, zenv_json_path, env_name, info.dependency_file, package, flags.dev_mode, flags.zenv_only) catch |err| {
@@ -1082,15 +1088,25 @@ fn noPython(io: Io, env_name: []const u8, why: []const u8) error{NoPython} {
     return error.NoPython;
 }
 
-/// Installs `package` into the activated environment via pip (or uv when
-/// `use_uv`). A non-zero installer exit maps to error.ProcessError.
-fn installPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, use_uv: bool) !void {
+/// The installer `zenv add` asks for: its own --uv/--pip, else the one the
+/// env's last setup was given explicitly (a `--pip` env stays on pip), else
+/// auto.
+fn addInstaller(allocator: Allocator, io: Io, flags: CommandFlags, venv_path: []const u8) flags_module.Installer {
+    if (flags.installer() != .auto) return flags.installer();
+    const stamp = autosetup.readStamp(allocator, io, venv_path) orelse return .auto;
+    defer stamp.deinit();
+    return CommandFlags.fromArgs(stamp.value.flags).installer();
+}
+
+/// Installs `package` into the activated environment with `uv` (a path, from
+/// `envbuild.resolveUv`), or pip when null. A non-zero installer exit maps to
+/// error.ProcessError.
+fn installPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, uv: ?[]const u8) !void {
     const io = ctx.io;
-    // The uv on zenv's own PATH, as setup uses: an activate.sh launch purges
-    // modules, which would drop a uv that a module provides.
-    const uv = if (use_uv) try envspec.resolveCommand(ctx.arena, io, "uv", ctx.getEnv("PATH")) else null;
-    const command: []const u8 = if (use_uv) uv orelse "uv" else "python";
-    const cmd_args: []const []const u8 = if (use_uv)
+    // uv is resolved on zenv's own PATH, as setup does: an activate.sh launch
+    // purges modules, which would drop a uv that a module provides.
+    const command: []const u8 = uv orelse "python";
+    const cmd_args: []const []const u8 = if (uv != null)
         &.{ "pip", "install", package }
     else
         &.{ "-m", "pip", "install", package };

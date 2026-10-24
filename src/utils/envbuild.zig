@@ -24,7 +24,9 @@ const shell = @import("shell.zig");
 const python_mod = @import("python.zig");
 const parse_deps = @import("parse_deps.zig");
 const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
-const CommandFlags = @import("flags.zig").CommandFlags;
+const flags_mod = @import("flags.zig");
+const CommandFlags = flags_mod.CommandFlags;
+const Installer = flags_mod.Installer;
 
 pub const Options = struct {
     env_config: *const EnvironmentConfig,
@@ -42,8 +44,8 @@ pub const Options = struct {
     /// before the venv is made. Null: no check.
     requires_python: ?RequiresPython = null,
     /// Path of the uv that installs run; null: pip. `run` sets it
-    /// from zenv's own PATH for --uv, before modules are purged and loaded:
-    /// a uv from a module the env does not load would be gone by then.
+    /// (`resolveUv`) before modules are purged and loaded: a uv from a module
+    /// the env does not load would be gone by then.
     uv: ?[]const u8 = null,
 };
 
@@ -78,12 +80,13 @@ pub fn run(c: Ctx, options: Options) !void {
     if (flags.use_default_python) info(c, "--python: using only the zenv-pinned Python", .{});
     if (flags.dev_mode) info(c, "--dev: will install the project as an editable package", .{});
     if (flags.no_cache) info(c, "--no-cache: package caches are disabled", .{});
-    if (flags.use_uv) {
-        const uv = try findExecutable(c, "uv", c.getEnv("PATH")) orelse
-            return fail(c, "'uv' command not found, but --uv was specified. Install uv or run without --uv.", .{});
+    opts.uv = try resolveUv(c, flags.installer());
+    if (opts.uv) |uv| {
         info(c, "Using {s}", .{std.mem.trim(u8, capture(c, &.{ uv, "--version" }, null) orelse "uv (version unknown)", " \n")});
-        opts.uv = uv;
+    } else if (flags.use_pip) {
+        info(c, "--pip: installing with pip", .{});
     }
+    const use_uv = opts.uv != null;
 
     const fallback = try fallbackPython(c, opts.env_config, flags);
 
@@ -115,7 +118,7 @@ pub fn run(c: Ctx, options: Options) !void {
     // The env's own variables, so installs and hooks see what activation will.
     try applyUserEnv(a, opts, &env);
 
-    if (!flags.use_uv) try seedPip(c, &env, venv_python, chosen);
+    if (!use_uv) try seedPip(c, &env, venv_python, chosen);
 
     try env.put("PYTHONDONTWRITEBYTECODE", "1");
     // uv's build-isolation subprocesses would inherit the module stack's
@@ -125,13 +128,13 @@ pub fn run(c: Ctx, options: Options) !void {
     // it uses --no-build-isolation and relies on module-provided build deps.
     var uv_env = try env.clone(a);
     _ = uv_env.orderedRemove("PYTHONPATH");
-    const install_env = if (flags.use_uv) &uv_env else &env;
+    const install_env = if (use_uv) &uv_env else &env;
 
     // uv installs pip only when it is missing (a new venv still gets the
     // current one): `--upgrade` would make uv ask the index for the newest pip
     // on every setup, about 0.1 s.
-    info(c, "Ensuring pip is {s} the venv", .{if (flags.use_uv) "in" else "up to date in"});
-    const pip_args: []const []const u8 = if (flags.use_uv) &.{"pip"} else &.{ "--ignore-installed", "--no-build-isolation", "--upgrade", "pip" };
+    info(c, "Ensuring pip is {s} the venv", .{if (use_uv) "in" else "up to date in"});
+    const pip_args: []const []const u8 = if (use_uv) &.{"pip"} else &.{ "--ignore-installed", "--no-build-isolation", "--upgrade", "pip" };
     try install(c, opts, venv_python, install_env, pip_args, "installing pip");
 
     const plan = try planInstall(a, deps, module_pkgs, flags.force_deps);
@@ -797,7 +800,7 @@ fn checkRequiresPython(c: Ctx, opts: Options, env: *const Map, chosen: Chosen, c
 }
 
 /// Installs pip into a venv that has none (zenv-made venvs start without it).
-/// Only for pip mode; with --uv, the pip upgrade step installs it.
+/// Only for pip mode; with uv, the pip upgrade step installs it.
 fn seedPip(c: Ctx, env: *const Map, venv_python: []const u8, chosen: Chosen) !void {
     if (capture(c, &.{ venv_python, "-m", "pip", "--version" }, env) != null) return;
     info(c, "Installing pip into the venv", .{});
@@ -806,15 +809,26 @@ fn seedPip(c: Ctx, env: *const Map, venv_python: []const u8, chosen: Chosen) !vo
         if (!t.success()) return fail(c, "ensurepip failed to install pip into the venv.", .{});
     } else if (capture(c, &.{ chosen.path, "-m", "pip", "--version" }, env) != null) {
         const t = try runStep(c, &.{ chosen.path, "-m", "pip", "--python", venv_python, "install", "pip" }, env, null);
-        if (!t.success()) return fail(c, "Could not install pip with {s}'s pip (needs pip >= 22.3). Re-run with --uv.", .{chosen.description});
+        if (!t.success()) return fail(c, "Could not install pip with {s}'s pip (needs pip >= 22.3). With uv on PATH (and no --pip), zenv installs with uv instead.", .{chosen.description});
     } else {
-        return fail(c, "{s} has neither ensurepip nor pip, so pip cannot be installed into the venv. Re-run with --uv.", .{chosen.description});
+        return fail(c, "{s} has neither ensurepip nor pip, so pip cannot be installed into the venv. With uv on PATH (and no --pip), zenv installs with uv instead.", .{chosen.description});
     }
 }
 
 // ---------------------------------------------------------------------------
 // Installs
 // ---------------------------------------------------------------------------
+
+/// The uv that installs packages for `choice`, from zenv's own PATH; null
+/// means pip. `auto` takes uv when PATH has one and otherwise falls back to
+/// pip; `uv` fails without one.
+pub fn resolveUv(c: Ctx, choice: Installer) !?[]const u8 {
+    if (choice == .pip) return null;
+    if (try envspec.resolveCommand(c.arena, c.io, "uv", c.getEnv("PATH"))) |uv| return uv;
+    if (choice == .uv) return fail(c, "'uv' command not found, but --uv was specified. Install uv, or drop --uv to fall back to pip.", .{});
+    info(c, "'uv' not found on PATH; installing with pip", .{});
+    return null;
+}
 
 /// The installer argv: `<uv> pip install [--no-cache] --link-mode=copy ARGS`
 /// with `uv`, else `<venv python> -m pip install [--no-cache-dir] ARGS`.
@@ -925,7 +939,7 @@ fn installEditable(c: Ctx, opts: Options, venv_python: []const u8, env: *const M
         warn(c, "No setup.py or pyproject.toml found in {s}; skipping editable install.", .{opts.project_dir});
         return;
     }
-    const args: []const []const u8 = if (opts.flags.use_uv) &.{ "--editable", ".", "--no-deps" } else &.{ "--no-build-isolation", "--editable", ".", "--no-deps" };
+    const args: []const []const u8 = if (opts.uv != null) &.{ "--editable", ".", "--no-deps" } else &.{ "--no-build-isolation", "--editable", ".", "--no-deps" };
     const argv = try installerArgv(c.arena, venv_python, opts.uv, opts.flags.no_cache, args);
     const t = try runStep(c, argv, env, opts.project_dir);
     if (t.success()) {

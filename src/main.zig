@@ -57,7 +57,7 @@ fn printUsage(io: Io) void {
         \\                             <package> may include a version (e.g. 'flask>=2.0'); adding a
         \\                             package again updates its recorded version.
         \\                             Options: --dev (dev dependency), --zenv (record only in
-        \\                             zenv.json), --uv (use uv instead of pip).
+        \\                             zenv.json), --uv / --pip (installer; default: uv when found).
         \\                             Refused for environments with "python": false.
         \\
         \\  cd <name|id|.>             Outputs the project directory path for an environment.
@@ -122,8 +122,10 @@ fn printUsage(io: Io) void {
         \\  --dev                      Installs the current directory's project in editable mode.
         \\                             Equivalent to 'pip install --editable .' command.
         \\
-        \\  --uv                       Uses 'uv' instead of 'pip' for package operations.
-        \\                             Ensure 'uv' is installed and accessible.
+        \\  --uv                       Requires 'uv' for package operations; fails if it is not on PATH.
+        \\                             Without --uv or --pip, zenv uses uv when it is on PATH, else pip.
+        \\
+        \\  --pip                      Uses 'pip' even when 'uv' is available.
         \\
         \\  --no-host                  Bypasses hostname validation during setup.
         \\                             Equivalent to "target_machines": ["*"] in zenv.json.
@@ -154,7 +156,9 @@ fn printUsage(io: Io) void {
         \\  --zenv                     Records the package only in zenv.json, leaving requirements.txt
         \\                             and pyproject.toml untouched. The package is still installed.
         \\
-        \\  --uv                       Uses 'uv pip install' instead of 'python -m pip install'.
+        \\  --uv, --pip                Installs with 'uv pip install' or 'python -m pip install'.
+        \\                             Default: the --uv/--pip the env was set up with, else uv when
+        \\                             it is on PATH, else pip.
         \\
         \\[z] Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.

@@ -173,8 +173,9 @@ pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parse
 /// replayed on a future auto-setup. Excludes `--no-host` and
 /// `--reuse-module-cache` (the gate always re-adds them), `--init` and `--no-python` (one-time bootstrap: zenv.json
 /// then records the choice) and `--jupyter` (the kernel
-/// already targets the unchanged venv). Items are static literals — the caller
-/// frees only the returned slice.
+/// already targets the unchanged venv). `--uv`/`--pip` appear only when given:
+/// without either, each rebuild picks the installer again (uv when found).
+/// Items are static literals — the caller frees only the returned slice.
 pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
@@ -182,6 +183,7 @@ pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const 
     if (f.use_default_python) try list.append(allocator, "--python");
     if (f.dev_mode) try list.append(allocator, "--dev");
     if (f.use_uv) try list.append(allocator, "--uv");
+    if (f.use_pip) try list.append(allocator, "--pip");
     if (f.no_cache) try list.append(allocator, "--no-cache");
     return list.toOwnedSlice(allocator);
 }
@@ -552,6 +554,15 @@ test "flagTokens emits only build-affecting flags" {
     try testing.expectEqual(@as(usize, 2), toks.len);
     try testing.expectEqualStrings("--uv", toks[0]);
     try testing.expectEqualStrings("--no-cache", toks[1]);
+
+    const pip = try flagTokens(a, .{ .use_pip = true });
+    defer a.free(pip);
+    try testing.expectEqual(@as(usize, 1), pip.len);
+    try testing.expectEqualStrings("--pip", pip[0]);
+
+    const auto = try flagTokens(a, .{});
+    defer a.free(auto);
+    try testing.expectEqual(@as(usize, 0), auto.len);
 }
 
 test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {

@@ -8,6 +8,7 @@ pub const Flag = enum {
     @"--python",
     @"--dev",
     @"--uv",
+    @"--pip",
     @"--init",
     @"--no-cache",
     @"--jupyter",
@@ -21,7 +22,8 @@ pub const CommandFlags = struct {
     skip_hostname_check: bool = false, // Whether to skip hostname validation
     use_default_python: bool = false, // Whether to force using the default Python from ZENV_DIR/default-python
     dev_mode: bool = false, // Whether to install the current directory as an editable package
-    use_uv: bool = false, // Whether to use 'uv' instead of 'pip'
+    use_uv: bool = false, // Require 'uv' as the installer
+    use_pip: bool = false, // Use pip even when 'uv' is available
     init_mode: bool = false, // Whether to initialize the environment before setup
     no_cache: bool = false, // Whether to disable package cache when installing dependencies
     create_jupyter_kernel: bool = false, // Whether to create a Jupyter kernel after setup
@@ -36,6 +38,7 @@ pub const CommandFlags = struct {
         .@"--python" = "use_default_python",
         .@"--dev" = "dev_mode",
         .@"--uv" = "use_uv",
+        .@"--pip" = "use_pip",
         .@"--init" = "init_mode",
         .@"--no-cache" = "no_cache",
         .@"--jupyter" = "create_jupyter_kernel",
@@ -52,7 +55,25 @@ pub const CommandFlags = struct {
         };
         return flags;
     }
+
+    /// The package installer the flags ask for. `--uv` with `--pip` is
+    /// refused earlier, by `conflict`.
+    pub fn installer(f: CommandFlags) Installer {
+        if (f.use_uv) return .uv;
+        if (f.use_pip) return .pip;
+        return .auto;
+    }
 };
+
+/// Which tool installs packages: `auto` uses uv when it is on PATH, else pip.
+pub const Installer = enum { auto, uv, pip };
+
+/// Two flags in `args` that cannot be combined, or null.
+pub fn conflict(args: []const []const u8) ?[2][]const u8 {
+    const f = CommandFlags.fromArgs(args);
+    if (f.use_uv and f.use_pip) return .{ "--uv", "--pip" };
+    return null;
+}
 
 /// The first `-`/`--` argument after the command that is not in `allowed`, so
 /// a mistyped flag (`--no-cach`) is refused instead of silently ignored.
@@ -78,6 +99,14 @@ test "fromArgs sets the field of each flag it sees" {
     const f = CommandFlags.fromArgs(&.{ "zenv", "setup", "--uv", "e", "--no-host", "--no-python" });
     try std.testing.expect(f.use_uv and f.skip_hostname_check and f.no_python);
     try std.testing.expect(!f.force_deps and !f.dev_mode and !f.init_mode and !f.zenv_only);
+}
+
+test "installer: --uv, --pip, else auto; both conflict" {
+    try std.testing.expectEqual(Installer.auto, CommandFlags.fromArgs(&.{ "zenv", "setup", "e" }).installer());
+    try std.testing.expectEqual(Installer.uv, CommandFlags.fromArgs(&.{ "zenv", "setup", "e", "--uv" }).installer());
+    try std.testing.expectEqual(Installer.pip, CommandFlags.fromArgs(&.{ "zenv", "add", "e", "p", "--pip" }).installer());
+    try std.testing.expect(conflict(&.{ "zenv", "setup", "e", "--uv" }) == null);
+    try std.testing.expect(conflict(&.{ "zenv", "setup", "--pip", "e", "--uv" }) != null);
 }
 
 /// Returns the `idx`-th positional argument after the command (i.e. within

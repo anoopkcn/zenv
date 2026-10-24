@@ -12,7 +12,7 @@ Environments are registered globally, so you can activate one, run a command in 
 
 - **One file per project.** `zenv.json` holds one or more environments. `zenv init` writes a starting point from what it finds in the project, and `zenv validate` checks it.
 - **Variables and modules as data.** Environment variables and the result of `module load` are recorded rather than re-executed, so activation is fast on clusters and `deactivate` (or switching to another environment) restores the variables they changed.
-- **Python when the project needs it.** A venv built with pip or uv from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
+- **Python when the project needs it.** A venv built with uv when it is installed, else pip, from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
 - **Use it from anywhere.** Refer to an environment by name, id, alias, or `.` for the project you are in. `zenv run` runs a command in it without activating, `zenv cd` takes you to its project, and Jupyter kernels start through `zenv run` so they get the environment's modules.
 - **Activate on `cd`.** A zsh or bash hook activates a project's environment when you enter the project and deactivates it when you leave.
 - **Always current.** When `zenv.json` or a file it names changes, the next `zenv run`, `zenv activate` or `zenv cd` rebuilds the environment first.
@@ -95,6 +95,8 @@ zenv setup <name>
 `name` defaults to the project directory's name (characters an environment name cannot contain become `-`), and `description` to `[project].description` from `pyproject.toml` when there is one. If `zenv.json` already exists, `zenv init` adds the new environment to it (the file is rewritten with 2-space indentation) and refuses only when that name is already defined. `zenv setup <name> --init` does the same and then sets the environment up; if `zenv.json` already defines `<name>`, it just sets it up.
 
 For a project that is not a Python project, add `--no-python` (`zenv init <name> --no-python`, or `zenv setup <name> --init --no-python`) to get an environment without Python; see [Environments without Python](#environments-without-python).
+
+Packages are installed with [uv](https://docs.astral.sh/uv/) when `uv` is on `PATH`, and with pip otherwise. `--uv` makes uv required (setup fails without it), and `--pip` uses pip even when uv is available. An explicit `--uv` or `--pip` is kept for [automatic rebuilds](#automatic-rebuilds) and for `zenv add`; without one, each rebuild picks again. The two differ on HPC systems: pip builds packages with `--no-build-isolation` and the module stack's `PYTHONPATH`, so it can use build dependencies that modules provide, while uv builds in isolation without `PYTHONPATH`. Use `--pip` for a project that relies on module-provided build dependencies.
 
 **A small example of a `zenv.json` file**, with one environment for any machine and one for the JURECA cluster:
 
@@ -248,7 +250,7 @@ project's manifest, so the dependency persists and is reinstalled on the next se
 The package is installed first; the manifest is only updated if the install succeeds.
 
 ```bash
-zenv add <name|id|.> <package> [--dev] [--zenv] [--uv]
+zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]
 ```
 
 The `<package>` may include a version specifier (e.g. `flask>=2.0`). Re-adding a package
@@ -280,7 +282,9 @@ Flags:
 - `--zenv` — record the package **only** in `zenv.json` (under `dependencies`, or
   `dev_dependencies` with `--dev`), leaving `requirements.txt` / `pyproject.toml` untouched.
   The package is still installed into the environment.
-- `--uv` — use `uv pip install` instead of `python -m pip install`.
+- `--uv` / `--pip` — install with `uv pip install` or `python -m pip install`. Without either,
+  `zenv add` uses the installer the environment was set up with if `zenv setup` was given
+  `--uv` or `--pip`, and otherwise uv when it is on `PATH`, else pip.
 
 > Note: `--dev` is interpreted per-command — it means *editable install of the current
 > project* for `zenv setup`, but *development dependency* for `zenv add`.
@@ -291,7 +295,7 @@ The environment must already be built (`zenv setup <name>`); `zenv add` does not
 
 ### Automatic rebuilds
 
-`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), and the `dependency_file`, `modules_file` and `setup.script` that entry names. If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--dev`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
+`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), and the `dependency_file`, `modules_file` and `setup.script` that entry names. If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--pip`, `--dev`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
 
 A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` and a completion line). It is on stderr deliberately: `zenv activate` and `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. A routine command with no changes stays silent. If the rebuild fails, its errors are printed and the command stops, except `zenv cd`, which still prints the project directory so you can go fix `zenv.json`.
 
@@ -466,7 +470,7 @@ Activation and `zenv run` set `ZENV_ENV_DIR`, put `<env>/bin` on `PATH` and appl
 
 A Python-free environment cannot have `dependencies`, `dev_dependencies` or a `dependency_file` (`zenv validate` reports them), and `zenv add`, `zenv setup --dev`, `--jupyter` and `zenv jupyter create` refuse it with a message saying what to change.
 
-**Adding Python later.** Set `"python": true` (or remove the key) and run `zenv setup <name>`, or simply `zenv add <name> <pkg> --uv`: the environment is rebuilt with a venv in the same directory, keeping the modules, the hooks and any files you put in `bin/`.
+**Adding Python later.** Set `"python": true` (or remove the key) and run `zenv setup <name>`, or simply `zenv add <name> <pkg>`: the environment is rebuilt with a venv in the same directory, keeping the modules, the hooks and any files you put in `bin/`.
 
 **Removing Python.** Going the other way is not done in place, because a venv's `bin/` mixes installed entry points with your own files. Setup stops and asks you to run `zenv rm <name>` and then `zenv setup <name>`; the environment is rebuilt from `zenv.json`.
 
@@ -521,7 +525,7 @@ Commands:
                              <package> may include a version (e.g. 'flask>=2.0'); adding a
                              package again updates its recorded version.
                              Options: --dev (dev dependency), --zenv (record only in
-                             zenv.json), --uv (use uv instead of pip).
+                             zenv.json), --uv / --pip (installer; default: uv when found).
                              Refused for environments with "python": false.
 
   cd <name|id|.>             Outputs the project directory path for an environment.
@@ -586,8 +590,10 @@ Options for 'zenv setup <name>':
   --dev                      Installs the current directory's project in editable mode.
                              Equivalent to 'pip install --editable .' command.
 
-  --uv                       Uses 'uv' instead of 'pip' for package operations.
-                             Ensure 'uv' is installed and accessible.
+  --uv                       Requires 'uv' for package operations; fails if it is not on PATH.
+                             Without --uv or --pip, zenv uses uv when it is on PATH, else pip.
+
+  --pip                      Uses 'pip' even when 'uv' is available.
 
   --no-host                  Bypasses hostname validation during setup.
                              Equivalent to "target_machines": ["*"] in zenv.json.
@@ -618,7 +624,9 @@ Options for 'zenv add <name> <package>':
   --zenv                     Records the package only in zenv.json, leaving requirements.txt
                              and pyproject.toml untouched. The package is still installed.
 
-  --uv                       Uses 'uv pip install' instead of 'python -m pip install'.
+  --uv, --pip                Installs with 'uv pip install' or 'python -m pip install'.
+                             Default: the --uv/--pip the env was set up with, else uv when
+                             it is on PATH, else pip.
 
 [z] Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
