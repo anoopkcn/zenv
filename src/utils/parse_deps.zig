@@ -21,8 +21,12 @@ pub fn packageBaseName(spec: []const u8) []const u8 {
 /// case-insensitively, with any run of '-', '_' and '.' equal to one '-'
 /// (`Flask_Login` is `flask-login`). Allocation-free.
 pub fn samePackage(a: []const u8, b: []const u8) bool {
-    const x = packageBaseName(a);
-    const y = packageBaseName(b);
+    return sameName(packageBaseName(a), packageBaseName(b));
+}
+
+/// True when two project or dependency group names are equal once PEP 503
+/// normalizes them. Allocation-free.
+pub fn sameName(x: []const u8, y: []const u8) bool {
     var i: usize = 0;
     var j: usize = 0;
     while (true) {
@@ -117,6 +121,119 @@ pub fn parsePyprojectToml(
         output.print(io, "Processed pyproject.toml but found no valid dependencies", .{});
     }
     return count;
+}
+
+/// Appends the requirements of each PEP 735 dependency group in `names` from
+/// the `[dependency-groups]` table of pyproject.toml `content` (`file` names it
+/// in messages), following `{include-group = "..."}` entries. Names compare
+/// normalized, so `--group Dev` selects `dev = [...]`. Unlike the project
+/// dependencies, a group that is absent, malformed or includes itself is an
+/// error: it was asked for by name. Returns the number of requirements appended.
+pub fn parseDependencyGroups(
+    allocator: Allocator,
+    io: Io,
+    content: []const u8,
+    file: []const u8,
+    names: []const []const u8,
+    deps_list: *std.ArrayList([]const u8),
+) !usize {
+    var parser = toml.Parser(toml.Table).init(allocator);
+    defer parser.deinit();
+    var parsed = parser.parseString(content) catch |err| {
+        output.printError(io, "Failed to parse {s}: {t}", .{ file, err });
+        return error.InvalidDependencyGroup;
+    };
+    defer parsed.deinit();
+
+    const table: ?*const toml.Table = if (parsed.value.get("dependency-groups")) |v| switch (v) {
+        .table => |t| t,
+        else => null,
+    } else null;
+
+    var chain: std.ArrayList([]const u8) = .empty;
+    defer chain.deinit(allocator);
+    var count: usize = 0;
+    for (names) |name| {
+        output.print(io, "Reading dependency group '{s}' from {s}", .{ name, file });
+        count += try appendGroup(allocator, io, file, table, name, &chain, deps_list);
+    }
+    return count;
+}
+
+/// Appends group `name` and the groups it includes; `chain` holds the groups
+/// being expanded, to refuse an include cycle.
+fn appendGroup(
+    allocator: Allocator,
+    io: Io,
+    file: []const u8,
+    table: ?*const toml.Table,
+    name: []const u8,
+    chain: *std.ArrayList([]const u8),
+    deps_list: *std.ArrayList([]const u8),
+) !usize {
+    const key, const value = findGroup(table, name) orelse {
+        output.printError(io, "Dependency group '{s}' is not in [dependency-groups] of {s}.", .{ name, file });
+        if (table) |t| if (t.count() > 0) {
+            var keys: std.ArrayList([]const u8) = .empty;
+            defer keys.deinit(allocator);
+            var it = t.keyIterator();
+            while (it.next()) |k| try keys.append(allocator, k.*);
+            std.mem.sort([]const u8, keys.items, {}, lessThan);
+            const joined = try std.mem.join(allocator, ", ", keys.items);
+            defer allocator.free(joined);
+            output.printError(io, "Groups defined there: {s}", .{joined});
+        };
+        return error.DependencyGroupNotFound;
+    };
+    for (chain.items) |seen| if (sameName(seen, key)) {
+        output.printError(io, "Dependency group '{s}' in {s} includes itself.", .{ key, file });
+        return error.InvalidDependencyGroup;
+    };
+    const items = switch (value) {
+        .array => |arr| arr.items,
+        else => {
+            output.printError(io, "Dependency group '{s}' in {s} is not an array.", .{ key, file });
+            return error.InvalidDependencyGroup;
+        },
+    };
+
+    try chain.append(allocator, key);
+    defer _ = chain.pop();
+    var count: usize = 0;
+    for (items) |item| switch (item) {
+        .string => |spec| {
+            output.print(io, "  - Group dependency ({s}): {s}", .{ key, spec });
+            try deps_list.append(allocator, try allocator.dupe(u8, spec));
+            count += 1;
+        },
+        .table => |t| {
+            const include = if (t.get("include-group")) |v| switch (v) {
+                .string => |inc| inc,
+                else => null,
+            } else null;
+            const inc = include orelse {
+                output.printError(io, "Dependency group '{s}' in {s} has a table entry without include-group.", .{ key, file });
+                return error.InvalidDependencyGroup;
+            };
+            count += try appendGroup(allocator, io, file, table, inc, chain, deps_list);
+        },
+        else => {
+            output.printError(io, "Dependency group '{s}' in {s} has an entry that is neither a string nor an include-group table.", .{ key, file });
+            return error.InvalidDependencyGroup;
+        },
+    };
+    return count;
+}
+
+/// The key and value of the group in `table` whose name is `name` once normalized.
+fn findGroup(table: ?*const toml.Table, name: []const u8) ?struct { []const u8, toml.Value } {
+    var it = (table orelse return null).iterator();
+    while (it.next()) |e| if (sameName(e.key_ptr.*, name)) return .{ e.key_ptr.*, e.value_ptr.* };
+    return null;
+}
+
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 /// The string `[project].<key>` of the pyproject.toml `content` (e.g.
@@ -448,4 +565,50 @@ test "canonicalName normalises case and separator runs" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("zope-interface", try canonicalName(a, "Zope.Interface"));
     try std.testing.expectEqualStrings("a-b", try canonicalName(a, "A__.-b"));
+}
+
+test "parseDependencyGroups: named groups, normalized names, include-group" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const content =
+        \\[project]
+        \\name = "demo"
+        \\dependencies = ["requests"]
+        \\
+        \\[dependency-groups]
+        \\dev = ["pytest>=9"]
+        \\# notebooks
+        \\demo = [
+        \\    "openai>=1.50",
+        \\    "ipykernel>=6",
+        \\]
+        \\Docs_Build = [{include-group = "dev"}, "mkdocs"]
+    ;
+    var list: std.ArrayList([]const u8) = .empty;
+    const n = try parseDependencyGroups(a, testing.io, content, "pyproject.toml", &.{ "demo", "docs-build" }, &list);
+    try testing.expectEqual(@as(usize, 4), n);
+    try testing.expectEqualStrings("openai>=1.50", list.items[0]);
+    try testing.expectEqualStrings("ipykernel>=6", list.items[1]);
+    try testing.expectEqualStrings("pytest>=9", list.items[2]);
+    try testing.expectEqualStrings("mkdocs", list.items[3]);
+}
+
+test "parseDependencyGroups: missing group, missing table and cycles are errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var list: std.ArrayList([]const u8) = .empty;
+    const groups_toml =
+        \\[dependency-groups]
+        \\dev = ["pytest"]
+        \\a = [{include-group = "b"}]
+        \\b = [{include-group = "A"}]
+        \\bad = "pytest"
+    ;
+    try testing.expectError(error.DependencyGroupNotFound, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"test"}, &list));
+    try testing.expectError(error.DependencyGroupNotFound, parseDependencyGroups(a, testing.io, "[project]\nname = \"x\"\n", "pyproject.toml", &.{"dev"}, &list));
+    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"a"}, &list));
+    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"bad"}, &list));
+    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, "[dependency-groups\n", "pyproject.toml", &.{"dev"}, &list));
 }

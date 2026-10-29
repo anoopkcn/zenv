@@ -27,6 +27,7 @@ const config = @import("config.zig");
 const validation = @import("validation.zig");
 const output = @import("output.zig");
 const flags = @import("flags.zig");
+const deps = @import("parse_deps.zig");
 
 const STAMP_NAME = ".zenv.stamp";
 const STAMP_VERSION = 1;
@@ -175,8 +176,9 @@ pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parse
 /// then records the choice) and `--jupyter` (the kernel
 /// already targets the unchanged venv). `--uv`/`--pip` appear only when given:
 /// without either, each rebuild picks the installer again (uv when found).
-/// Items are static literals — the caller frees only the returned slice.
-pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const u8 {
+/// Each of `groups` becomes `--group <name>`. Items are static literals or
+/// borrowed from `groups` — the caller frees only the returned slice.
+pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags, groups: []const []const u8) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
     if (f.force_deps) try list.append(allocator, "--force");
@@ -185,7 +187,26 @@ pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags) ![]const []const 
     if (f.use_uv) try list.append(allocator, "--uv");
     if (f.use_pip) try list.append(allocator, "--pip");
     if (f.no_cache) try list.append(allocator, "--no-cache");
+    for (groups) |g| try list.appendSlice(allocator, &.{ "--group", g });
     return list.toOwnedSlice(allocator);
+}
+
+/// Adds `--group <group>` to the replay flags of the env's stamp, keeping its
+/// hash, so rebuilds install a group that `add` just recorded a package in.
+/// Returns false when the env has no stamp (its next rebuild replays nothing);
+/// true when the group was already replayed or has been added.
+pub fn addReplayGroup(allocator: Allocator, io: Io, venv_path: []const u8, group: []const u8) !bool {
+    const stamp = readStamp(allocator, io, venv_path) orelse return false;
+    defer stamp.deinit();
+    const old_flags = stamp.value.flags;
+    var i: usize = 0;
+    while (i + 1 < old_flags.len) : (i += 1) {
+        if (std.mem.eql(u8, old_flags[i], "--group") and deps.sameName(old_flags[i + 1], group)) return true;
+    }
+    const new_flags = try std.mem.concat(allocator, []const u8, &.{ stamp.value.flags, &.{ "--group", group } });
+    defer allocator.free(new_flags);
+    try writeStamp(allocator, io, venv_path, stamp.value.hash, new_flags);
+    return true;
 }
 
 // ===========================================================================
@@ -538,6 +559,30 @@ test "stamp round-trips and tolerates bad input" {
     try testing.expectEqual(@as(usize, 0), no_flags.value.flags.len);
 }
 
+test "addReplayGroup appends a group once and keeps the hash" {
+    const a = testing.allocator;
+    const dir = try testDir(a, "replaygroup");
+    defer cleanup(a, dir);
+
+    try testing.expect(!try addReplayGroup(a, testing.io, dir, "demo")); // no stamp yet
+    try writeStamp(a, testing.io, dir, "deadbeef", &.{ "--uv", "--group", "dev" });
+    try testing.expect(try addReplayGroup(a, testing.io, dir, "Dev")); // same group, normalized
+    try testing.expect(try addReplayGroup(a, testing.io, dir, "demo"));
+
+    const got = readStamp(a, testing.io, dir).?;
+    defer got.deinit();
+    try testing.expectEqualStrings("deadbeef", got.value.hash);
+    try testing.expectEqual(@as(usize, 5), got.value.flags.len);
+    try testing.expectEqualStrings("--group", got.value.flags[3]);
+    try testing.expectEqualStrings("demo", got.value.flags[4]);
+
+    try writeStamp(a, testing.io, dir, "deadbeef", &.{}); // a stamp without flags
+    try testing.expect(try addReplayGroup(a, testing.io, dir, "demo"));
+    const only = readStamp(a, testing.io, dir).?;
+    defer only.deinit();
+    try testing.expectEqual(@as(usize, 2), only.value.flags.len);
+}
+
 test "flagTokens emits only build-affecting flags" {
     const a = testing.allocator;
     const f = flags.CommandFlags{
@@ -549,18 +594,21 @@ test "flagTokens emits only build-affecting flags" {
         .no_python = true, // --no-python: excluded
         .reuse_module_cache = true, // --reuse-module-cache: excluded
     };
-    const toks = try flagTokens(a, f);
+    const toks = try flagTokens(a, f, &.{ "dev", "demo" });
     defer a.free(toks);
-    try testing.expectEqual(@as(usize, 2), toks.len);
+    try testing.expectEqual(@as(usize, 6), toks.len);
     try testing.expectEqualStrings("--uv", toks[0]);
     try testing.expectEqualStrings("--no-cache", toks[1]);
+    try testing.expectEqualStrings("--group", toks[2]);
+    try testing.expectEqualStrings("dev", toks[3]);
+    try testing.expectEqualStrings("demo", toks[5]);
 
-    const pip = try flagTokens(a, .{ .use_pip = true });
+    const pip = try flagTokens(a, .{ .use_pip = true }, &.{});
     defer a.free(pip);
     try testing.expectEqual(@as(usize, 1), pip.len);
     try testing.expectEqualStrings("--pip", pip[0]);
 
-    const auto = try flagTokens(a, .{});
+    const auto = try flagTokens(a, .{}, &.{});
     defer a.free(auto);
     try testing.expectEqual(@as(usize, 0), auto.len);
 }

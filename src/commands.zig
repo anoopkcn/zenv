@@ -58,15 +58,19 @@ pub const Command = enum {
 };
 
 /// The flags each command takes (see printUsage in main.zig).
-pub const SETUP_FLAGS = [_]Flag{ .@"--init", .@"--no-python", .@"--dev", .@"--uv", .@"--pip", .@"--no-host", .@"--python", .@"--force", .@"--no-cache", .@"--jupyter", .@"--reuse-module-cache" };
+pub const SETUP_FLAGS = [_]Flag{ .@"--init", .@"--no-python", .@"--dev", .@"--uv", .@"--pip", .@"--no-host", .@"--python", .@"--force", .@"--no-cache", .@"--jupyter", .@"--reuse-module-cache", .@"--group" };
 const REGISTER_FLAGS = [_]Flag{.@"--no-host"};
-const ADD_FLAGS = [_]Flag{ .@"--dev", .@"--zenv", .@"--uv", .@"--pip" };
+const ADD_FLAGS = [_]Flag{ .@"--dev", .@"--group", .@"--zenv", .@"--uv", .@"--pip" };
 
 /// Refuses a flag that `zenv <command>` does not take, naming the ones it
 /// does, and two flags that contradict each other.
 pub fn checkFlags(io: Io, args: []const []const u8, allowed: []const Flag) error{ArgsError}!void {
     if (unknownFlag(args, allowed)) |bad| {
         output.printError(io, "Unknown option '{s}' for 'zenv {s}'. Options: {f}", .{ bad, args[1], joinedList(Flag, allowed) });
+        return error.ArgsError;
+    }
+    if (flags_module.badGroup(args)) |bad| {
+        output.printError(io, "'--group' needs a dependency group name (letters and digits, with '.', '_' or '-' inside), got '{s}'.", .{bad});
         return error.ArgsError;
     }
     const pair = flags_module.conflict(args) orelse return;
@@ -332,9 +336,11 @@ pub fn handleSetupCommand(
     const env_config = try env.getAndValidateEnvironment(ctx, config, args, flags);
     // Non-null: getAndValidateEnvironment just errored otherwise.
     const env_name = positional(args, 0).?;
+    const groups = try flags_module.groups(allocator, args);
 
     if (!env_config.python) {
         if (flags.dev_mode) return noPython(io, env_name, "--dev installs the project into it");
+        if (groups.len > 0) return noPython(io, env_name, "--group installs packages into it");
         if (flags.create_jupyter_kernel) return noPython(io, env_name, "--jupyter needs Python");
     }
 
@@ -446,6 +452,18 @@ pub fn handleSetupCommand(
         output.print(io, "No requirements file specified in configuration.", .{});
     }
 
+    // Dependency groups named with --group (PEP 735).
+    if (groups.len > 0) {
+        const file = groupsFile(env_config.dependency_file);
+        const content = Io.Dir.cwd().readFileAlloc(io, file, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+            if (err != error.FileNotFound) return err;
+            output.printError(io, "--group reads [dependency-groups] from '{s}', which does not exist.", .{file});
+            return error.DependencyGroupNotFound;
+        };
+        const group_dep_count = try deps.parseDependencyGroups(allocator, io, content, file, groups, &all_required_deps);
+        output.print(io, "Added {d} dependencies from dependency groups in '{s}'", .{ group_dep_count, file });
+    }
+
     if (flags.dev_mode and env_config.python) {
         if (Io.Dir.cwd().readFileAlloc(io, "pyproject.toml", allocator, .limited(10 * 1024 * 1024))) |content| {
             if (try deps.pyprojectField(allocator, content, "requires-python")) |spec| requires_python = .{ .spec = spec, .file = "pyproject.toml" };
@@ -499,7 +517,7 @@ pub fn handleSetupCommand(
     // gated command to re-setup.
     if (autosetup.computeTrackedHash(allocator, io, setup_cwd, env_name, env_config) catch null) |tracked_hash| {
         defer allocator.free(tracked_hash);
-        const flag_tokens = autosetup.flagTokens(allocator, flags) catch &.{};
+        const flag_tokens = autosetup.flagTokens(allocator, flags, groups) catch &.{};
         defer allocator.free(flag_tokens);
         autosetup.writeStamp(allocator, io, env_dir_path, tracked_hash, flag_tokens) catch |err| {
             output.print(io, "Warning: could not write setup stamp: {t}", .{err});
@@ -952,7 +970,7 @@ pub fn handleRunCommand(
     }
 }
 
-/// `zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]`
+/// `zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]`
 /// Installs `<package>` into the environment's venv and records it in the right
 /// manifest. Install happens FIRST; the manifest is only updated on success.
 pub fn handleAddCommand(
@@ -963,15 +981,16 @@ pub fn handleAddCommand(
     const io = ctx.io;
     const allocator = ctx.arena;
     const env_id = positional(args, 0) orelse {
-        output.printError(io, "Missing environment name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]", .{});
+        output.printError(io, "Missing environment name. Usage: zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]", .{});
         return error.ArgsError;
     };
     const package = positional(args, 1) orelse {
-        output.printError(io, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]", .{});
+        output.printError(io, "Missing package name. Usage: zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]", .{});
         return error.ArgsError;
     };
     try checkFlags(io, args, &ADD_FLAGS);
     const flags = CommandFlags.fromArgs(args);
+    const group = try addGroup(allocator, io, args, flags);
 
     const ref = try resolve(ctx, registry, env_id);
     const entry = registry.get(ref);
@@ -1015,6 +1034,10 @@ pub fn handleAddCommand(
         }
     }
 
+    // Where the package will be recorded, settled before installing so a
+    // group that cannot be recorded installs nothing.
+    const record = try addRecord(allocator, io, project_dir, info.dependency_file, group, flags.zenv_only);
+
     // Recording the package changes a tracked manifest. If the env is up to
     // date now, the install below makes it up to date again, so the build
     // record is renewed rather than left to trigger a rebuild on the next run.
@@ -1025,9 +1048,15 @@ pub fn handleAddCommand(
     try installPackage(ctx, entry.venv_path, package, uv);
 
     // 2. Persist to the appropriate manifest.
-    persistAddedPackage(allocator, io, project_dir, zenv_json_path, env_name, info.dependency_file, package, flags.dev_mode, flags.zenv_only) catch |err| {
+    persistAddedPackage(allocator, io, zenv_json_path, env_name, record, package) catch |err| {
         output.printError(io, "'{s}' is installed in '{s}', but recording it failed: {t}. Add it to the manifest by hand.", .{ package, env_name, err });
         return err;
+    };
+    // A package in a dependency group survives rebuilds only if they install
+    // the group, so the build record now replays it.
+    if (record == .pyproject) if (record.pyproject.group) |g| {
+        if (autosetup.addReplayGroup(allocator, io, entry.venv_path, g) catch false)
+            output.print(io, "Rebuilds of '{s}' now install group '{s}'; a manual 'zenv setup' needs '--group {s}'.", .{ env_name, g, g });
     };
     if (was_fresh) autosetup.restamp(ctx, project_dir, env_name, entry.venv_path) catch {};
 
@@ -1123,50 +1152,111 @@ fn installPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, uv: ?[]c
     }
 }
 
-/// Records the installed `package` in the manifest selected by the flags and the
-/// env's `dep_file` (see the table in handleAddCommand's docs / the plan).
+/// The dependency group `zenv add` records into: the one `--group` names, else
+/// `dev` for `--dev`, else null (a runtime dependency). Refuses several groups,
+/// `--dev` with another group, and a dotted name, which is no bare TOML key.
+fn addGroup(allocator: Allocator, io: Io, args: []const []const u8, flags: CommandFlags) !?[]const u8 {
+    const groups = try flags_module.groups(allocator, args);
+    if (groups.len > 1) {
+        output.printError(io, "'zenv add' records a package in one dependency group; got {d}.", .{groups.len});
+        return error.ArgsError;
+    }
+    if (groups.len == 0) return if (flags.dev_mode) "dev" else null;
+    const group = groups[0];
+    if (flags.dev_mode and !deps.sameName(group, "dev")) {
+        output.printError(io, "'--dev' means '--group dev'; it cannot be combined with '--group {s}'.", .{group});
+        return error.ArgsError;
+    }
+    if (std.mem.findScalar(u8, group, '.') != null) {
+        output.printError(io, "'zenv add' cannot record into group '{s}': a '.' in the name would make a nested TOML key. Add it by hand.", .{group});
+        return error.ArgsError;
+    }
+    return group;
+}
+
+/// The pyproject.toml that holds an env's dependency groups, relative to the
+/// project directory: its `dependency_file` when that is a pyproject.toml,
+/// else `pyproject.toml`. `setup --group` reads the groups there.
+fn groupsFile(dep_file: ?[]const u8) []const u8 {
+    if (dep_file) |df| if (std.mem.endsWith(u8, df, ".toml")) return df;
+    return "pyproject.toml";
+}
+
+/// Where `zenv add` records a package.
+const AddRecord = union(enum) {
+    /// zenv.json `dependencies`, or `dev_dependencies` when true.
+    zenv_json: bool,
+    /// A requirements file (absolute path), for runtime dependencies.
+    requirements: struct { path: []const u8, label: []const u8 },
+    /// `[project].dependencies` when `group` is null, else that dependency group.
+    pyproject: struct { path: []const u8, label: []const u8, group: ?[]const u8 },
+};
+
+/// Picks the manifest for a package added to `group` (see `addGroup`):
+///
+/// | dependency_file   | runtime            | --dev                    | --group <other>      |
+/// |-------------------|--------------------|--------------------------|----------------------|
+/// | pyproject.toml    | [project]          | [dependency-groups].dev  | [dependency-groups]  |
+/// | requirements.txt  | requirements.txt   | zenv.json dev_deps       | ./pyproject.toml     |
+/// | none              | zenv.json deps     | zenv.json dev_deps       | ./pyproject.toml     |
+///
+/// `--zenv` sends runtime and dev packages to zenv.json and refuses another
+/// group, as does a project without the pyproject.toml it would go to.
+fn addRecord(allocator: Allocator, io: Io, project_dir: []const u8, dep_file: ?[]const u8, group: ?[]const u8, zenv_only: bool) !AddRecord {
+    const dev = if (group) |g| deps.sameName(g, "dev") else false;
+    const toml_dep_file = if (dep_file) |df| std.mem.endsWith(u8, df, ".toml") else false;
+
+    if (group != null and !dev) {
+        if (zenv_only) {
+            output.printError(io, "zenv.json has no dependency groups besides dev_dependencies, so '--zenv' cannot record into group '{s}'.", .{group.?});
+            return error.ArgsError;
+        }
+        const label = groupsFile(dep_file);
+        const path = try paths.resolvePath(allocator, project_dir, label);
+        if (!runtime.exists(io, path)) {
+            output.printError(io, "Dependency group '{s}' is recorded in pyproject.toml, but '{s}' does not exist.", .{ group.?, path });
+            return error.ArgsError;
+        }
+        return .{ .pyproject = .{ .path = path, .label = label, .group = group } };
+    }
+    if (zenv_only or dep_file == null) return .{ .zenv_json = dev };
+    const path = try paths.resolvePath(allocator, project_dir, dep_file.?);
+    if (toml_dep_file) return .{ .pyproject = .{ .path = path, .label = dep_file.?, .group = group } };
+    // requirements files have no dev concept; dev deps live in zenv.json.
+    if (dev) return .{ .zenv_json = true };
+    return .{ .requirements = .{ .path = path, .label = dep_file.? } };
+}
+
+/// Records the installed `package` where `record` says.
 fn persistAddedPackage(
     allocator: Allocator,
     io: Io,
-    project_dir: []const u8,
     zenv_json_path: []const u8,
     env_name: []const u8,
-    dep_file: ?[]const u8,
+    record: AddRecord,
     package: []const u8,
-    dev: bool,
-    zenv_only: bool,
 ) !void {
-    const kind: []const u8 = if (dev) "dev_dependencies" else "dependencies";
-
-    // --zenv (or no dependency_file at all) -> record in zenv.json.
-    if (zenv_only or dep_file == null) {
-        try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, dev);
-        output.print(io, "Recorded in zenv.json ({s}).", .{kind});
-        return;
-    }
-
-    const df = dep_file.?;
-    const df_path = try paths.resolvePath(allocator, project_dir, df);
-    defer allocator.free(df_path);
-
-    if (std.mem.endsWith(u8, df, ".toml")) {
-        // pyproject.toml: runtime -> [project].dependencies, dev -> [dependency-groups].dev.
-        const edited = try manifest.addToPyproject(allocator, io, df_path, package, dev);
-        if (edited) {
-            const tbl = if (dev) "[dependency-groups].dev" else "[project].dependencies";
-            output.print(io, "Recorded in {s} ({s}).", .{ df, tbl });
-        } else {
-            // Runtime case with no [project] table: fall back to zenv.json.
-            output.print(io, "Could not locate [project] in {s}; recording in zenv.json instead.", .{df});
+    switch (record) {
+        .zenv_json => |dev| {
             try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, dev);
-        }
-    } else if (dev) {
-        // requirements files have no dev concept; dev deps live in zenv.json.
-        try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, true);
-        output.print(io, "Recorded dev dependency in zenv.json.", .{});
-    } else {
-        try manifest.addToRequirementsTxt(allocator, io, df_path, package);
-        output.print(io, "Recorded in {s}.", .{df});
+            output.print(io, "Recorded in zenv.json ({s}).", .{if (dev) "dev_dependencies" else "dependencies"});
+        },
+        .requirements => |r| {
+            try manifest.addToRequirementsTxt(allocator, io, r.path, package);
+            output.print(io, "Recorded in {s}.", .{r.label});
+        },
+        .pyproject => |p| {
+            if (try manifest.addToPyproject(allocator, io, p.path, package, p.group)) {
+                if (p.group) |g|
+                    output.print(io, "Recorded in {s} ([dependency-groups].{s}).", .{ p.label, g })
+                else
+                    output.print(io, "Recorded in {s} ([project].dependencies).", .{p.label});
+            } else {
+                // Runtime case with no [project] table: fall back to zenv.json.
+                output.print(io, "Could not locate [project] in {s}; recording in zenv.json instead.", .{p.label});
+                try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, false);
+            }
+        },
     }
 }
 

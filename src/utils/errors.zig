@@ -46,6 +46,8 @@ pub fn report(io: Io, err: anyerror) noreturn {
         error.KernelExists,
         error.KernelNotFound,
         error.MissingEnvSpec,
+        error.DependencyGroupNotFound,
+        error.InvalidDependencyGroup,
         => {},
         else => output.printError(io, "An unexpected error occurred: {t}", .{err}),
     }

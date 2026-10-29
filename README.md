@@ -250,7 +250,7 @@ project's manifest, so the dependency persists and is reinstalled on the next se
 The package is installed first; the manifest is only updated if the install succeeds.
 
 ```bash
-zenv add <name|id|.> <package> [--dev] [--zenv] [--uv|--pip]
+zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]
 ```
 
 The `<package>` may include a version specifier (e.g. `flask>=2.0`). Re-adding a package
@@ -266,19 +266,26 @@ zenv add test "numpy>=1.26,<2.0"
 
 # add a development dependency
 zenv add test pytest --dev
+
+# add to another PEP 735 dependency group in pyproject.toml
+zenv add test ipykernel --group demo
 ```
 
 **Where the package is recorded** depends on the environment's `dependency_file` and the flags:
 
-| Environment uses        | normal dependency               | `--dev` (development dependency)          |
-| ----------------------- | ------------------------------- | ----------------------------------------- |
-| `requirements.txt`      | appended to `requirements.txt`  | `dev_dependencies` in `zenv.json`         |
-| `pyproject.toml`        | `[project].dependencies`        | `[dependency-groups].dev` (PEP 735)       |
-| no `dependency_file`    | `dependencies` in `zenv.json`   | `dev_dependencies` in `zenv.json`         |
+| Environment uses        | normal dependency               | `--dev` (development dependency)          | `--group <name>`                            |
+| ----------------------- | ------------------------------- | ----------------------------------------- | ------------------------------------------- |
+| `requirements.txt`      | appended to `requirements.txt`  | `dev_dependencies` in `zenv.json`         | `[dependency-groups].<name>` of `./pyproject.toml` |
+| `pyproject.toml`        | `[project].dependencies`        | `[dependency-groups].dev` (PEP 735)       | `[dependency-groups].<name>` (PEP 735)      |
+| no `dependency_file`    | `dependencies` in `zenv.json`   | `dev_dependencies` in `zenv.json`         | `[dependency-groups].<name>` of `./pyproject.toml` |
 
 Flags:
 
-- `--dev` — record the package as a development dependency (see the table above).
+- `--dev` — record the package as a development dependency (see the table above). It is
+  `--group dev`, except that without a `pyproject.toml` `dependency_file` the package goes to
+  `dev_dependencies` in `zenv.json`.
+- `--group <name>` — record the package in that dependency group. A group other than `dev` lives
+  only in `pyproject.toml`, so `zenv add` refuses it when there is none (nothing is installed then).
 - `--zenv` — record the package **only** in `zenv.json` (under `dependencies`, or
   `dev_dependencies` with `--dev`), leaving `requirements.txt` / `pyproject.toml` untouched.
   The package is still installed into the environment.
@@ -289,13 +296,28 @@ Flags:
 > Note: `--dev` is interpreted per-command — it means *editable install of the current
 > project* for `zenv setup`, but *development dependency* for `zenv add`.
 
+**Dependency groups.** `zenv setup` installs `[project].dependencies` but no dependency group
+unless you name it, as `pip install --group` does:
+
+```bash
+zenv setup test --uv --group dev --group demo   # or --group=demo
+```
+
+Groups are read from the `pyproject.toml` `dependency_file`, else from `pyproject.toml` next to
+`zenv.json`; `{include-group = "..."}` entries are followed, and names compare normalized
+(`--group Docs_Build` selects `docs-build`). A group that does not exist stops setup and lists
+the groups that do. The chosen groups are part of the build record, so automatic rebuilds keep
+installing them. When `zenv add` records a package in a group (with `--group`, or `--dev` into
+`pyproject.toml`), it adds that group to the build record as well, so the package survives the
+next rebuild. A manual `zenv setup` uses only the groups you pass it.
+
 In `pyproject.toml` only the affected entry changes: the rest of the file, including comments, stays as it was. If the package installs but cannot be recorded, `zenv add` says so, and you add it to the manifest by hand. Recording the package does not make the next `zenv run` rebuild the environment (see [Automatic rebuilds](#automatic-rebuilds)).
 
 The environment must already be built (`zenv setup <name>`); `zenv add` does not create it. An environment with `"python": false` has nothing to install into, so `zenv add` refuses it and says how to turn Python on.
 
 ### Automatic rebuilds
 
-`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), and the `dependency_file`, `modules_file` and `setup.script` that entry names. If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--pip`, `--dev`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
+`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), and the `dependency_file`, `modules_file` and `setup.script` that entry names. If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--pip`, `--dev`, `--group`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
 
 A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` and a completion line). It is on stderr deliberately: `zenv activate` and `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. A routine command with no changes stays silent. If the rebuild fails, its errors are printed and the command stops, except `zenv cd`, which still prints the project directory so you can go fix `zenv.json`.
 
@@ -524,8 +546,9 @@ Commands:
                              project's manifest (requirements.txt / pyproject.toml / zenv.json).
                              <package> may include a version (e.g. 'flask>=2.0'); adding a
                              package again updates its recorded version.
-                             Options: --dev (dev dependency), --zenv (record only in
-                             zenv.json), --uv / --pip (installer; default: uv when found).
+                             Options: --dev (dev dependency), --group <name> (dependency
+                             group), --zenv (record only in zenv.json), --uv / --pip
+                             (installer; default: uv when found).
                              Refused for environments with "python": false.
 
   cd <name|id|.>             Outputs the project directory path for an environment.
@@ -590,6 +613,10 @@ Options for 'zenv setup <name>':
   --dev                      Installs the current directory's project in editable mode.
                              Equivalent to 'pip install --editable .' command.
 
+  --group <name>             Also installs [dependency-groups].<name> (PEP 735) from the
+                             pyproject.toml dependency_file, else ./pyproject.toml.
+                             Repeatable; like 'pip install --group <name>'.
+
   --uv                       Requires 'uv' for package operations; fails if it is not on PATH.
                              Without --uv or --pip, zenv uses uv when it is on PATH, else pip.
 
@@ -616,10 +643,14 @@ Options for 'zenv setup <name>':
                              Equivalent to running 'zenv jupyter create <name>' after setup.
 
 Options for 'zenv add <name> <package>':
-  --dev                      Records the package as a development dependency.
-                             pyproject.toml -> [dependency-groups].dev; otherwise zenv.json.
-                             (Note: --dev means editable install for 'setup', dev dependency
-                             for 'add' — its meaning is per-command.)
+  --dev                      Records the package as a development dependency: '--group dev',
+                             except that without a pyproject.toml dependency_file it goes to
+                             zenv.json's dev_dependencies. (Note: --dev means editable install
+                             for 'setup', dev dependency for 'add'.)
+
+  --group <name>             Records the package in [dependency-groups].<name> of the
+                             pyproject.toml dependency_file, else ./pyproject.toml, and makes
+                             rebuilds of the env install that group.
 
   --zenv                     Records the package only in zenv.json, leaving requirements.txt
                              and pyproject.toml untouched. The package is still installed.

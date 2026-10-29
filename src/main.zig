@@ -56,8 +56,9 @@ fn printUsage(io: Io) void {
         \\                             project's manifest (requirements.txt / pyproject.toml / zenv.json).
         \\                             <package> may include a version (e.g. 'flask>=2.0'); adding a
         \\                             package again updates its recorded version.
-        \\                             Options: --dev (dev dependency), --zenv (record only in
-        \\                             zenv.json), --uv / --pip (installer; default: uv when found).
+        \\                             Options: --dev (dev dependency), --group <name> (dependency
+        \\                             group), --zenv (record only in zenv.json), --uv / --pip
+        \\                             (installer; default: uv when found).
         \\                             Refused for environments with "python": false.
         \\
         \\  cd <name|id|.>             Outputs the project directory path for an environment.
@@ -122,6 +123,10 @@ fn printUsage(io: Io) void {
         \\  --dev                      Installs the current directory's project in editable mode.
         \\                             Equivalent to 'pip install --editable .' command.
         \\
+        \\  --group <name>             Also installs [dependency-groups].<name> (PEP 735) from the
+        \\                             pyproject.toml dependency_file, else ./pyproject.toml.
+        \\                             Repeatable; like 'pip install --group <name>'.
+        \\
         \\  --uv                       Requires 'uv' for package operations; fails if it is not on PATH.
         \\                             Without --uv or --pip, zenv uses uv when it is on PATH, else pip.
         \\
@@ -148,10 +153,14 @@ fn printUsage(io: Io) void {
         \\                             Equivalent to running 'zenv jupyter create <name>' after setup.
         \\
         \\Options for 'zenv add <name> <package>':
-        \\  --dev                      Records the package as a development dependency.
-        \\                             pyproject.toml -> [dependency-groups].dev; otherwise zenv.json.
-        \\                             (Note: --dev means editable install for 'setup', dev dependency
-        \\                             for 'add' — its meaning is per-command.)
+        \\  --dev                      Records the package as a development dependency: '--group dev',
+        \\                             except that without a pyproject.toml dependency_file it goes to
+        \\                             zenv.json's dev_dependencies. (Note: --dev means editable install
+        \\                             for 'setup', dev dependency for 'add'.)
+        \\
+        \\  --group <name>             Records the package in [dependency-groups].<name> of the
+        \\                             pyproject.toml dependency_file, else ./pyproject.toml, and makes
+        \\                             rebuilds of the env install that group.
         \\
         \\  --zenv                     Records the package only in zenv.json, leaving requirements.txt
         \\                             and pyproject.toml untouched. The package is still installed.

@@ -158,13 +158,14 @@ pub fn addEnvToZenvJson(allocator: Allocator, io: Io, path: []const u8, env_name
 // pyproject.toml
 // =======================================================================
 
-/// Records `spec` in pyproject.toml. Runtime deps go to `[project].dependencies`
-/// (PEP 621); dev deps (`dev = true`) go to `[dependency-groups].dev` (PEP 735).
+/// Records `spec` in pyproject.toml. Runtime deps (`group == null`) go to
+/// `[project].dependencies` (PEP 621); a named group to
+/// `[dependency-groups].<group>` (PEP 735), whose name must be a bare TOML key.
 /// Returns false when the runtime target can't be located/created (no `[project]`
-/// table) so the caller can fall back to zenv.json; dev targets are always
+/// table) so the caller can fall back to zenv.json; group targets are always
 /// created if missing. The edit is textual to preserve comments, key order, and
 /// unrelated tables (zig-toml has no serializer to round-trip through).
-pub fn addToPyproject(allocator: Allocator, io: Io, path: []const u8, spec: []const u8, dev: bool) !bool {
+pub fn addToPyproject(allocator: Allocator, io: Io, path: []const u8, spec: []const u8, group: ?[]const u8) !bool {
     const content = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_FILE)) catch |err| switch (err) {
         error.FileNotFound => try allocator.dupe(u8, ""),
         else => return err,
@@ -175,10 +176,10 @@ pub fn addToPyproject(allocator: Allocator, io: Io, path: []const u8, spec: []co
     defer arena.deinit();
     const a = arena.allocator();
 
-    const section: []const u8 = if (dev) "dependency-groups" else "project";
-    const key: []const u8 = if (dev) "dev" else "dependencies";
+    const section: []const u8 = if (group != null) "dependency-groups" else "project";
+    const key: []const u8 = group orelse "dependencies";
 
-    const new_content = (try editPyproject(a, content, section, key, spec, dev)) orelse return false;
+    const new_content = (try editPyproject(a, content, section, key, spec, group != null)) orelse return false;
     try runtime.writeFileAtomic(io, path, new_content, .{});
     return true;
 }
