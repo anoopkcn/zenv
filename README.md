@@ -14,6 +14,7 @@ Environments are registered globally, so you can activate one, run a command in 
 - **Variables and modules as data.** Environment variables and the result of `module load` are recorded rather than re-executed, so activation is fast on clusters and `deactivate` (or switching to another environment) restores the variables they changed.
 - **Python when the project needs it.** A venv built with uv when it is installed, else pip, from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
 - **Use it from anywhere.** Refer to an environment by name, id, alias, or `.` for the project you are in. `zenv run` runs a command in it without activating, `zenv cd` takes you to its project, and Jupyter kernels start through `zenv run` so they get the environment's modules.
+- **Containers.** With `container`, an environment runs in an Apptainer image: its venv sits on the image's Python and gets only the packages the image lacks, and `zenv run` starts commands in the image.
 - **Activate on `cd`.** A zsh or bash hook activates a project's environment when you enter the project and deactivates it when you leave.
 - **Always current.** When `zenv.json` or a file it names changes, the next `zenv run`, `zenv activate` or `zenv cd` rebuilds the environment first.
 - **One config, many machines.** `target_machines` ties each environment to the machines it is for, and on a shared filesystem one alias picks the environment that matches the machine you are on.
@@ -405,6 +406,11 @@ One can have multiple environment configurations in the same `zenv.json` file an
     "activate": {
       "commands": ["<list of shell commands which is run during activation>"],
       "script": "<path to a shell script which will be run during activation>"
+    },
+    "container": {
+      "image": "<path to an Apptainer image, or a URI like docker://...>",
+      "options": ["<extra 'apptainer exec' option, e.g. --nv>"],
+      "bind": ["<extra bind: src[:dest[:opts]]>"]
     }
   },
   "<another_name>": {
@@ -417,7 +423,7 @@ One can run `zenv validate` to validate the config file. If there are errors in 
 
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to match any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
-`python` (default `true`) says whether the environment has a Python venv; set it to `false` for a project that only needs modules, environment variables and settings (see [Environments without Python](#environments-without-python)). `env` sets environment variables (see [Environment variables](#environment-variables)).
+`python` (default `true`) says whether the environment has a Python venv; set it to `false` for a project that only needs modules, environment variables and settings (see [Environments without Python](#environments-without-python)). `env` sets environment variables (see [Environment variables](#environment-variables)). `container` runs the environment in an Apptainer image (see [Container images](#container-images-apptainer)).
 
 The `dependencies` and `dev_dependencies` arrays list packages that `zenv setup` installs into the environment in addition to anything from `dependency_file`. Both are usually populated for you by `zenv add` (see [Adding packages to an environment](#adding-packages-to-an-environment)) rather than edited by hand, but you can also add entries directly.
 
@@ -497,6 +503,37 @@ A Python-free environment cannot have `dependencies`, `dev_dependencies` or a `d
 **Adding Python later.** Set `"python": true` (or remove the key) and run `zenv setup <name>`, or simply `zenv add <name> <pkg>`: the environment is rebuilt with a venv in the same directory, keeping the modules, the hooks and any files you put in `bin/`.
 
 **Removing Python.** Going the other way is not done in place, because a venv's `bin/` mixes installed entry points with your own files. Setup stops and asks you to run `zenv rm <name>` and then `zenv setup <name>`; the environment is rebuilt from `zenv.json`.
+
+### Container images (Apptainer)
+
+`container` runs an environment inside an [Apptainer](https://apptainer.org) image, for a software stack that comes as a container (an NGC PyTorch image, say) rather than as modules:
+
+```json
+{
+  "train": {
+    "target_machines": ["jupiter"],
+    "container": {
+      "image": "/e/scratch/myproj/containers/pytorch.sif",
+      "options": ["--nv"],
+      "bind": ["/e/data/myproj:/data:ro"]
+    },
+    "dependency_file": "pyproject.toml",
+    "env": { "HF_HOME": "/e/scratch/myproj/hf" }
+  }
+}
+```
+
+- `image` is the path to the image, relative to `zenv.json` or absolute, or an Apptainer URI such as `docker://...`. zenv uses images but does not build or pull them; get one with `apptainer pull`.
+- `options` are extra `apptainer exec` options, such as `--nv` for NVIDIA GPUs.
+- `bind` lists extra binds, `src[:dest[:opts]]`. zenv binds what it needs itself: the project directory, the environment directory, the zenv binary, and uv with its cache. Apptainer binds `$HOME`, `/tmp` and the current directory by default.
+
+`zenv setup` runs inside the image. The venv is created on the image's Python with `include-system-site-packages = true`, so it sees the image's packages, and the dependencies are resolved against them the way they are against [module packages](#initialize-and-setup-an-environment): only what the image lacks goes into the venv. A requirement that needs a different version of a package the image has fails setup with uv's explanation; `--force` installs every dependency into the venv, where it takes precedence over the image's copy. uv runs with your uv settings from the host (`UV_*` variables and cache), not the ones an image sets for its own build.
+
+`zenv run <name> <command>` starts the command in the image with the environment applied, so Jupyter kernels, which start through `zenv run`, run there too. The host's `PYTHONPATH`, `BASH_ENV` and exported shell functions stay outside. For an interactive shell in the image: `zenv run <name> bash`.
+
+`zenv activate` refuses a container environment, since activation cannot put your shell inside a container, and the `cd` hook skips it. `zenv add` records the package and rebuilds the environment in the image; if the rebuild fails, the manifest is restored. When the image file changes (a new `apptainer pull` to the same path), the next `zenv run` rebuilds the environment; zenv compares the image's size and modification time.
+
+`modules`, `modules_file` and `fallback_python` cannot be combined with `container`, and `zenv setup --python` is refused. Setup hooks run with bash inside the image. With `"python": false`, the environment only sets its variables and runs its hooks in the image.
 
 ## Help
 
@@ -669,6 +706,8 @@ Options for 'zenv add <name> <package>':
   location.
   In an environment, "python": false builds it without a Python venv, and "env" sets
   environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
+  "container": {"image": "path.sif", "options": [...], "bind": [...]} runs it in an
+  Apptainer image: setup and 'zenv run' happen inside it, and activation is refused.
 
 [a] Registry (ZENV_DIR/registry.json):
   A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)

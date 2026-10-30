@@ -22,6 +22,7 @@ const output = @import("output.zig");
 const runtime = @import("runtime.zig");
 const envspec = @import("envspec.zig");
 const activation = @import("activation.zig");
+const container = @import("container.zig");
 const venv = @import("venv.zig");
 const hook = @import("hook.zig");
 const sh_quote = @import("shell.zig").sq;
@@ -54,6 +55,10 @@ pub const Command = enum {
     @"-V",
     @"--version",
     @"--help",
+    /// Internal, run inside an env's container (container.zig): setup's
+    /// build (`envbuild.runInside`) and a command in the env (`handleExecInside`).
+    __build,
+    __exec,
 };
 
 /// The flags each command takes (see printUsage in main.zig).
@@ -1120,7 +1125,16 @@ pub fn handleActivate(
     // is silent and any notice goes to stderr, so stdout stays just the
     // activate-script path that the shell sources.
     try autosetup.ensureUpToDate(ctx, registry.get(ref));
-    try printActivateScript(ctx, registry.get(ref), shell);
+    const entry = registry.get(ref);
+    if (containerOf(ctx, entry.venv_path) != null) {
+        output.printError(
+            io,
+            "'{s}' runs in a container image, which activation cannot enter. For a shell in it: zenv run {s} bash",
+            .{ entry.env_name, entry.env_name },
+        );
+        return error.ContainerEnv;
+    }
+    try printActivateScript(ctx, entry, shell);
 }
 
 /// `zenv activate --auto [dir]`, for the shell hook (`zenv hook`): prints the
@@ -1154,6 +1168,8 @@ fn activateAuto(
         },
     };
     const entry = registry.get(ref);
+    // A container env cannot be activated; on every cd, silence beats an error.
+    if (containerOf(ctx, entry.venv_path) != null) return;
     if (autosetup.isStale(ctx, entry) catch false) {
         output.rawErr(
             io,
@@ -1579,6 +1595,18 @@ pub fn handleAdd(
         );
         return error.NoPython;
     }
+    // A container env installs inside its image (its bin/python points there).
+    if (containerOf(ctx, entry.venv_path) != null) {
+        const record = try addRecord(
+            allocator,
+            io,
+            project_dir,
+            info.dependency_file,
+            group,
+            flags.zenv_only,
+        );
+        return addByRebuild(ctx, entry, zenv_json_path, record, package);
+    }
     // Python was just turned on for an env built without it: build the venv
     // first (zenv.json changed, so the gate rebuilds).
     if (!try venvHasPython(allocator, io, entry.venv_path)) {
@@ -1906,6 +1934,67 @@ fn addRecord(
     return .{ .requirements = .{ .path = path, .label = dep_file.? } };
 }
 
+/// `zenv add` for an env that runs in a container image, where the install has
+/// to happen: records the package first, then rebuilds the env in the image
+/// (`autosetup.ensureUpToDate`), which resolves it against the image's packages
+/// like any dependency. A failed rebuild restores the manifest and the build
+/// record, so the package is not left recorded.
+fn addByRebuild(
+    ctx: Ctx,
+    entry: *const Registry.Entry,
+    zenv_json_path: []const u8,
+    record: AddRecord,
+    package: []const u8,
+) !void {
+    const a = ctx.arena;
+    const io = ctx.io;
+    const cwd = Io.Dir.cwd();
+    // Every file the add may change (pyproject falls back to zenv.json), as it was.
+    var files: std.ArrayList([]const u8) = .empty;
+    try files.appendSlice(a, &.{ zenv_json_path, try autosetup.stampPath(a, entry.venv_path) });
+    switch (record) {
+        .zenv_json => {},
+        .requirements => |r| try files.append(a, r.path),
+        .pyproject => |p| try files.append(a, p.path),
+    }
+    const saved = try a.alloc(?[]const u8, files.items.len);
+    for (files.items, saved) |path, *s| {
+        s.* = cwd.readFileAlloc(io, path, a, .limited(64 * 1024 * 1024)) catch null;
+    }
+    const restore = struct {
+        fn all(io_: Io, paths_: []const []const u8, contents: []const ?[]const u8) void {
+            for (paths_, contents) |path, content| {
+                if (content) |data| {
+                    Io.Dir.cwd().writeFile(io_, .{ .sub_path = path, .data = data }) catch {};
+                } else Io.Dir.cwd().deleteFile(io_, path) catch {};
+            }
+        }
+    }.all;
+
+    persistAddedPackage(a, io, zenv_json_path, entry.env_name, record, package) catch |err| {
+        restore(io, files.items, saved);
+        output.printError(io, "Recording '{s}' failed: {t}.", .{ package, err });
+        return error.RecordFailed;
+    };
+    // The rebuild installs a dependency group only if it replays it.
+    switch (record) {
+        .pyproject => |p| if (p.group) |g| {
+            _ = autosetup.addReplayGroup(a, io, entry.venv_path, g) catch false;
+        },
+        else => {},
+    }
+    autosetup.ensureUpToDate(ctx, entry) catch |err| {
+        restore(io, files.items, saved);
+        output.printError(
+            io,
+            "Installing '{s}' in the container image failed; the manifest is unchanged.",
+            .{package},
+        );
+        return err;
+    };
+    output.print(io, "Added '{s}' to environment '{s}'.", .{ package, entry.env_name });
+}
+
 /// Records the installed `package` where `record` says.
 fn persistAddedPackage(
     allocator: Allocator,
@@ -1952,7 +2041,8 @@ fn persistAddedPackage(
 const Launch = enum { wait, replace };
 
 /// Starts `command` inside the environment at `venv_path` with inherited stdio,
-/// as `launch` says; with `.wait` it returns the command's `Term`. Uses the
+/// as `launch` says; with `.wait` it returns the command's `Term`. An env with
+/// a container is started in its image (`execInContainer`). Otherwise uses the
 /// direct launch when `zenv-env.json` can reproduce activation, else sources
 /// activate.sh through bash.
 fn execInEnv(
@@ -1962,6 +2052,9 @@ fn execInEnv(
     command_args: []const []const u8,
     launch: Launch,
 ) !runtime.Term {
+    if (!container.inside(ctx.env)) if (containerOf(ctx, venv_path)) |img| {
+        return execInContainer(ctx, img, venv_path, command, command_args, launch);
+    };
     if (try execDirect(ctx, venv_path, command, command_args, launch)) |term| return term;
 
     const activate_path = try Io.Dir.path.join(
@@ -1970,6 +2063,56 @@ fn execInEnv(
     );
     const argv = try buildRunArgv(ctx.arena, activate_path, command, command_args);
     return startCommand(ctx.io, argv, .{}, launch);
+}
+
+/// The container an env runs in, from its `zenv-env.json`; null for an env
+/// without one (or without a readable spec). Allocated in the arena.
+fn containerOf(ctx: Ctx, venv_path: []const u8) ?container.Image {
+    // Not deinit: the image's strings live on in the arena.
+    const parsed = envspec.read(ctx.arena, ctx.io, venv_path) orelse return null;
+    return parsed.value.container;
+}
+
+/// Starts `command` in the env's container: `zenv __exec` there applies the
+/// env to the container's environment and starts it (`handleExecInside`).
+/// The host's Python settings stay outside (`container.hostEnv`).
+fn execInContainer(
+    ctx: Ctx,
+    img: container.Image,
+    venv_path: []const u8,
+    command: []const u8,
+    command_args: []const []const u8,
+    launch: Launch,
+) !runtime.Term {
+    const a = ctx.arena;
+    const io = ctx.io;
+    const self_exe = try std.process.executablePathAlloc(io, a);
+    const inner = try std.mem.concat(a, []const u8, &.{
+        &.{ self_exe, "__exec", venv_path, command },
+        command_args,
+    });
+    const argv = try container.execArgv(a, io, img, &.{ img.project_dir, venv_path, self_exe }, inner);
+    var env = try container.hostEnv(a, ctx.env);
+    const exe = try envspec.resolveCommand(a, io, argv[0], env.get("PATH")) orelse {
+        output.printError(io, "apptainer: command not found (the environment runs in {s})", .{img.image});
+        return .{ .exited = 127 };
+    };
+    return startCommand(io, argv, .{ .environ_map = &env, .exe_path = exe }, launch);
+}
+
+/// `zenv __exec <venv> <command> [args...]`, run by `execInContainer` inside
+/// an env's container: starts the command with the env applied, as `zenv run`
+/// does outside one.
+pub fn handleExecInside(ctx: Ctx, args: []const []const u8) !void {
+    if (args.len < 4) return error.ArgsError;
+    const term = execInEnv(ctx, args[2], args[3], args[4..], .replace) catch |err| {
+        output.printError(ctx.io, "Failed to run command: {t}", .{err});
+        return err;
+    };
+    switch (term) {
+        .exited => |code| std.process.exit(code),
+        else => std.process.exit(1),
+    }
 }
 
 fn startCommand(

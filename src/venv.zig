@@ -127,20 +127,41 @@ fn linkNames(a: Allocator, info: *const Interpreter, exe_name: []const u8) ![]co
 
 /// The `pyvenv.cfg` contents. `home` is the base interpreter's directory,
 /// which is what the interpreter uses to find its standard library.
-fn pyvenvCfg(a: Allocator, info: *const Interpreter, zenv_version: []const u8) ![]u8 {
+/// `system_site` lets the venv import the base interpreter's packages.
+fn pyvenvCfg(
+    a: Allocator,
+    info: *const Interpreter,
+    zenv_version: []const u8,
+    system_site: bool,
+) ![]u8 {
     return a.print(
         \\home = {s}
-        \\include-system-site-packages = false
+        \\include-system-site-packages = {}
         \\version = {s}
         \\executable = {s}
         \\zenv = {s}
         \\
     , .{
         std.Io.Dir.path.dirname(info.base_executable) orelse "/",
+        system_site,
         info.version,
         info.real_executable,
         zenv_version,
     });
+}
+
+/// Whether the venv's pyvenv.cfg lets it import the base interpreter's
+/// packages. False when the file is missing or unreadable.
+pub fn includesSystemSite(a: Allocator, io: Io, venv_dir: []const u8) bool {
+    const path = Io.Dir.path.join(a, &.{ venv_dir, "pyvenv.cfg" }) catch return false;
+    const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 * 1024)) catch return false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const key, const value = std.mem.cutScalar(u8, line, '=') orelse continue;
+        if (!std.mem.eql(u8, std.mem.trim(u8, key, " \t\r"), "include-system-site-packages")) continue;
+        return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t\r"), "true");
+    }
+    return false;
 }
 
 /// Creates the link unless something (even a dangling link) is already there.
@@ -183,13 +204,15 @@ fn writeShims(a: Allocator, io: Io, scripts: []const u8, venv_dir: []const u8) !
 
 /// Creates the venv at `venv_dir` (absolute) for interpreter `python` (an
 /// absolute path), querying it in `env`. Idempotent: existing links are kept,
-/// pyvenv.cfg and the shims are rewritten. Allocates with `a` (use an arena).
+/// pyvenv.cfg and the shims are rewritten. `system_site` lets the venv import
+/// the interpreter's own packages. Allocates with `a` (use an arena).
 pub fn create(
     a: Allocator,
     io: Io,
     python: []const u8,
     venv_dir: []const u8,
     env: ?*const std.process.Environ.Map,
+    system_site: bool,
 ) !void {
     const cwd = Io.Dir.cwd();
     const join = Io.Dir.path.join;
@@ -228,7 +251,7 @@ pub fn create(
         io,
         .{
             .sub_path = try join(a, &.{ venv_dir, "pyvenv.cfg" }),
-            .data = try pyvenvCfg(a, &info, options.version),
+            .data = try pyvenvCfg(a, &info, options.version, system_site),
         },
     );
     try writeGitignore(a, io, venv_dir);
@@ -350,7 +373,7 @@ test "pyvenvCfg points home at the base interpreter's directory" {
     defer arena.deinit();
     const a = arena.allocator();
     const info = try parseQuery(a, sample);
-    const cfg = try pyvenvCfg(a, &info, "1.2.3");
+    const cfg = try pyvenvCfg(a, &info, "1.2.3", false);
     try testing.expectEqualStrings(
         \\home = /opt/py/bin
         \\include-system-site-packages = false
@@ -359,6 +382,32 @@ test "pyvenvCfg points home at the base interpreter's directory" {
         \\zenv = 1.2.3
         \\
     , cfg);
+    const shared = try pyvenvCfg(a, &info, "1.2.3", true);
+    try testing.expect(std.mem.find(u8, shared, "include-system-site-packages = true\n") != null);
+}
+
+test "includesSystemSite reads pyvenv.cfg" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
+    const root = ".zig-cache/tmp/zenv-system-site-test";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+
+    try testing.expect(!includesSystemSite(a, io, root));
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/pyvenv.cfg",
+        .data = "home = /usr/bin\ninclude-system-site-packages = True\n",
+    });
+    try testing.expect(includesSystemSite(a, io, root));
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/pyvenv.cfg",
+        .data = "include-system-site-packages = false\n",
+    });
+    try testing.expect(!includesSystemSite(a, io, root));
 }
 
 test "writeShims quote the venv path for each shell" {

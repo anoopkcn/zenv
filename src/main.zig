@@ -5,6 +5,7 @@ const Io = std.Io;
 
 const options = @import("options");
 const commands = @import("commands.zig");
+const envbuild = @import("envbuild.zig");
 const Command = commands.Command;
 const Registry = @import("Registry.zig");
 const output = @import("output.zig");
@@ -175,6 +176,8 @@ fn printUsage(io: Io) void {
         \\  location.
         \\  In an environment, "python": false builds it without a Python venv, and "env" sets
         \\  environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
+        \\  "container": {"image": "path.sif", "options": [...], "bind": [...]} runs it in an
+        \\  Apptainer image: setup and 'zenv run' happen inside it, and activation is refused.
         \\
         \\[a] Registry (ZENV_DIR/registry.json):
         \\  A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
@@ -280,6 +283,9 @@ fn dispatch(ctx: runtime.Ctx, command: Command, args: []const []const u8) !void 
         .add => try withRegistry(ctx, args, commands.handleAdd),
         .alias => try withRegistry(ctx, args, commands.handleAlias),
         .jupyter => try withRegistry(ctx, args, commands.handleJupyter),
+        // Internal: run by zenv itself inside an env's container.
+        .__build => try envbuild.runInside(ctx, if (args.len > 2) args[2] else return error.ArgsError),
+        .__exec => try commands.handleExecInside(ctx, args),
     }
 }
 

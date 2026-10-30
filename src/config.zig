@@ -28,6 +28,25 @@ pub const EnvVar = struct {
     pub const Kind = enum { set, prepend, append };
 };
 
+/// An env's `container`: the Apptainer image the env runs in (see
+/// container.zig).
+pub const Container = struct {
+    /// A path (relative to zenv.json) or an Apptainer URI (`docker://...`), as written.
+    image: []const u8,
+    /// Extra `apptainer exec` options, e.g. "--nv".
+    options: ArrayList([]const u8) = .empty,
+    /// Extra bind specs, `src[:dest[:opts]]`, beyond the paths zenv binds itself.
+    bind: ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *Container, allocator: Allocator) void {
+        allocator.free(self.image);
+        for (self.options.items) |item| allocator.free(item);
+        self.options.deinit(allocator);
+        for (self.bind.items) |item| allocator.free(item);
+        self.bind.deinit(allocator);
+    }
+};
+
 pub const Env = struct {
     /// Every owned string and list in this config is allocated with `allocator`.
     allocator: Allocator,
@@ -55,6 +74,9 @@ pub const Env = struct {
     /// `env` from zenv.json, in file order: variables activation sets and
     /// deactivate restores.
     env: ArrayList(EnvVar) = .empty,
+    /// When set, the env's Python, installs, hooks and commands run inside
+    /// this Apptainer image.
+    container: ?Container = null,
 
     pub fn init(allocator: Allocator) Env {
         return .{ .allocator = allocator };
@@ -85,6 +107,7 @@ pub const Env = struct {
             allocator.free(v.value);
         }
         self.env.deinit(allocator);
+        if (self.container) |*c| c.deinit(allocator);
     }
 };
 

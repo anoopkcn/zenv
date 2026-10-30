@@ -25,6 +25,9 @@ const python = @import("python.zig");
 const deps = @import("deps.zig");
 const config = @import("config.zig");
 const cli = @import("cli.zig");
+const container = @import("container.zig");
+const validation = @import("validation.zig");
+const autosetup = @import("autosetup.zig");
 const Flags = cli.Flags;
 const Installer = cli.Installer;
 
@@ -47,6 +50,13 @@ pub const Options = struct {
     /// (`resolveUv`) before modules are purged and loaded: a uv from a module
     /// the env does not load would be gone by then.
     uv: ?[]const u8 = null,
+    /// Set for the build `zenv __build` runs inside the env's container
+    /// (`runInside`): no modules, the image's Python as the base interpreter,
+    /// and the image's packages visible to the venv. `uv` is then set already.
+    inside_container: bool = false,
+    /// For a build inside a container: the host's uv settings (its UV_*
+    /// variables and cache directory), which replace the image's own.
+    uv_env: []const Entry = &.{},
 };
 
 pub const RequiresPython = struct {
@@ -65,6 +75,12 @@ pub fn run(c: Ctx, options: Options) !void {
     const flags = opts.flags;
     const join = Io.Dir.path.join;
 
+    if (opts.env_config.container) |*ct| {
+        if (!opts.inside_container) return runInContainer(c, opts, ct);
+    }
+    const in_image = opts.inside_container;
+    const source: Source = if (in_image) .image else .modules;
+
     info(c, "Setting up environment '{s}' in '{s}'...", .{ opts.env_name, opts.venv_dir });
     const reqs = (try deps.validateDependencies(a, c.io, opts.deps, opts.env_name)).items;
     // A Python-free env installs nothing, so it gets no requirements.txt.
@@ -80,7 +96,7 @@ pub fn run(c: Ctx, options: Options) !void {
     if (flags.use_default_python) info(c, "--python: using only the zenv-pinned Python", .{});
     if (flags.dev_mode) info(c, "--dev: will install the project as an editable package", .{});
     if (flags.no_cache) info(c, "--no-cache: package caches are disabled", .{});
-    opts.uv = try resolveUv(c, flags.installer());
+    if (!in_image) opts.uv = try resolveUv(c, flags.installer());
     if (opts.uv) |uv| {
         info(
             c,
@@ -92,20 +108,23 @@ pub fn run(c: Ctx, options: Options) !void {
     }
     const use_uv = opts.uv != null;
 
-    const fallback = try fallbackPython(c, opts.env_config, flags);
+    const fallback = if (in_image) null else try fallbackPython(c, opts.env_config, flags);
 
     // Every child runs in `env`: zenv's own environment, then the module env.
     var env = try c.env.clone(a);
+    if (in_image) try useHostUvSettings(a, &env, opts.uv_env);
     const modules_present = try loadModules(c, opts, &env);
 
+    // Packages the venv can use without installing them: the modules' or the
+    // image's.
     var module_python: ?Interpreter = null;
-    var module_pkgs: []const Package = &.{};
+    var provided_pkgs: []const Package = &.{};
     if (modules_present) {
         module_python = try workingPython(c, &env);
-        module_pkgs = try modulePackages(c, &env);
+        provided_pkgs = try modulePackages(c, &env);
     }
 
-    const chosen = try selectPython(
+    const chosen = if (in_image) try imagePython(c, &env) else try selectPython(
         c,
         &env,
         fallback,
@@ -113,6 +132,7 @@ pub fn run(c: Ctx, options: Options) !void {
         if (module_python) |m| m.path else null,
     );
     info(c, "Selected Python for venv: {s} ({s})", .{ chosen.description, chosen.path });
+    if (in_image) provided_pkgs = try imagePackages(c, &env, chosen.path);
     // The module Python's version was read when it was found.
     const chosen_version = if (chosen.source == .module) module_python.?.version else capture(
         c,
@@ -129,7 +149,7 @@ pub fn run(c: Ctx, options: Options) !void {
         rp,
     );
 
-    try ensureVenv(c, opts.venv_dir, chosen, &env);
+    try ensureVenv(c, opts.venv_dir, chosen, &env, in_image);
 
     // Activate for everything below.
     const venv_python = try join(a, &.{ opts.venv_dir, "bin", "python" });
@@ -172,9 +192,9 @@ pub fn run(c: Ctx, options: Options) !void {
     };
     try install(c, opts, venv_python, install_env, pip_args, "installing pip");
 
-    const plan = try planInstall(a, reqs, module_pkgs, flags.force_deps);
-    const provided: []const Package = if (flags.force_deps) &.{} else module_pkgs;
-    try installRequirements(c, opts, venv_python, install_env, plan, provided);
+    const plan = try planInstall(a, reqs, provided_pkgs, flags.force_deps);
+    const provided: []const Package = if (flags.force_deps) &.{} else provided_pkgs;
+    try installRequirements(c, opts, venv_python, install_env, plan, provided, source);
 
     if (flags.dev_mode) try installEditable(c, opts, venv_python, install_env);
 
@@ -184,12 +204,148 @@ pub fn run(c: Ctx, options: Options) !void {
     ) else _ = env.orderedRemove("PYTHONDONTWRITEBYTECODE");
     try runHooks(c, opts, &env, setup_hook);
 
-    // Resolving against the modules already reported the module packages used.
-    if (plan.overrides.len > 0 and !resolvesAgainstModules(opts.uv, provided)) {
-        try printOverrides(c, &env, venv_python, plan.overrides);
+    // Resolving against the provided packages already reported those used.
+    if (plan.overrides.len > 0 and !resolvesAgainstProvided(opts.uv, provided)) {
+        try printOverrides(c, &env, venv_python, plan.overrides, source);
     }
 
     banner(c, "completed");
+}
+
+/// What the host hands `zenv __build` in the container, as JSON in the venv
+/// directory: what `run` gets beyond the env's zenv.json entry, which the
+/// zenv inside reads itself.
+const BuildRequest = struct {
+    env_name: []const u8,
+    project_dir: []const u8,
+    venv_dir: []const u8,
+    deps: []const []const u8,
+    /// Setup flags as command-line tokens (`autosetup.flagTokens`).
+    flags: []const []const u8,
+    requires_python: ?RequiresPython = null,
+    /// The host's uv, bound into the container; null installs with pip.
+    uv: ?[]const u8 = null,
+    /// The host's uv settings (`Options.uv_env`).
+    uv_env: []const Entry = &.{},
+};
+
+/// Makes uv inside a container run with the host's settings `host`: an image
+/// sets UV_* for its own build (a read-only cache, overrides, bytecode
+/// compilation), which would change what zenv installs.
+fn useHostUvSettings(a: Allocator, env: *Map, host: []const Entry) !void {
+    var image_vars: std.ArrayList([]const u8) = .empty;
+    for (env.keys()) |name| {
+        if (std.mem.startsWith(u8, name, "UV_")) try image_vars.append(a, try a.dupe(u8, name));
+    }
+    for (image_vars.items) |name| _ = env.orderedRemove(name);
+    for (host) |e| try env.put(e.name, e.value);
+}
+
+/// The host's uv settings for a build in a container: its UV_* variables,
+/// and the cache directory uv uses when UV_CACHE_DIR is unset (the image may
+/// set its own). Also returns that cache directory, which must be bound.
+fn hostUvSettings(c: Ctx, uv: ?[]const u8, no_cache: bool) !struct { []const Entry, ?[]const u8 } {
+    var vars: std.ArrayList(Entry) = .empty;
+    for (c.env.keys()) |name| {
+        if (std.mem.startsWith(u8, name, "UV_")) try vars.append(c.arena, .{
+            .name = name,
+            .value = c.env.get(name).?,
+        });
+    }
+    var cache = c.env.get("UV_CACHE_DIR");
+    if (cache == null and !no_cache) if (uv) |exe| {
+        cache = capture(c, &.{ exe, "cache", "dir" }, c.env);
+        if (cache) |dir| try vars.append(c.arena, .{ .name = "UV_CACHE_DIR", .value = dir });
+    };
+    return .{ vars.items, cache };
+}
+
+/// Runs this setup inside the env's container: `zenv __build` there reads the
+/// request written to the venv directory and runs `run` with the image's
+/// Python (`runInside`). Its output reaches the terminal and the setup log
+/// through runStep.
+fn runInContainer(c: Ctx, opts: Options, ct: *const config.Container) !void {
+    const a = c.arena;
+    const join = Io.Dir.path.join;
+    if (opts.flags.use_default_python) return fail(
+        c,
+        "--python cannot be used for '{s}': its container image provides Python.",
+        .{opts.env_name},
+    );
+    const img = try container.fromConfig(a, ct, opts.project_dir);
+    info(c, "Building '{s}' inside the container image {s}", .{ opts.env_name, img.image });
+    // Resolved on the host, where uv is on PATH, and bound into the image.
+    const uv = if (opts.env_config.python) try resolveUv(c, opts.flags.installer()) else null;
+    const uv_env, const uv_cache = try hostUvSettings(c, uv, opts.flags.no_cache);
+    // Bound below, which needs it to exist.
+    if (uv_cache) |dir| Io.Dir.cwd().createDirPath(c.io, dir) catch {};
+
+    try Io.Dir.cwd().createDirPath(c.io, opts.venv_dir);
+    const request_path = try join(a, &.{ opts.venv_dir, ".zenv_build.json" });
+    const request: BuildRequest = .{
+        .env_name = opts.env_name,
+        .project_dir = opts.project_dir,
+        .venv_dir = opts.venv_dir,
+        .deps = opts.deps,
+        .flags = try autosetup.flagTokens(a, opts.flags, &.{}),
+        .requires_python = opts.requires_python,
+        .uv = uv,
+        .uv_env = uv_env,
+    };
+    try runtime.writeJsonAtomic(c.io, request_path, request, false);
+    defer Io.Dir.cwd().deleteFile(c.io, request_path) catch {};
+
+    const self_exe = std.process.executablePathAlloc(c.io, a) catch |err|
+        return fail(c, "Cannot locate the zenv binary to run in the container: {t}", .{err});
+    var paths: std.ArrayList([]const u8) = .empty;
+    try paths.appendSlice(a, &.{ opts.project_dir, opts.venv_dir, self_exe });
+    if (uv) |u| try paths.append(a, u);
+    if (uv_cache) |dir| try paths.append(a, dir);
+    if (opts.env_config.setup.script) |s| {
+        if (Io.Dir.path.isAbsolute(s)) try paths.append(a, Io.Dir.path.dirname(s) orelse s);
+    }
+    const argv = try container.execArgv(
+        a,
+        c.io,
+        img,
+        paths.items,
+        &.{ self_exe, "__build", request_path },
+    );
+    var env = try container.hostEnv(a, c.env);
+    var watch: ErrorWatch = .{};
+    const t = try runStepWatched(c, argv, &env, opts.project_dir, &watch);
+    if (!t.success()) {
+        if (watch.last) |why| return fail(c, "Setup inside the container image failed: {s}", .{why});
+        return fail(c, "Setup inside the container image failed ({f}); see the output above.", .{t});
+    }
+}
+
+/// `zenv __build <request>`, inside the env's container: loads the env from
+/// the project's zenv.json and runs `run` for it with the image's Python.
+pub fn runInside(c: Ctx, request_path: []const u8) !void {
+    const a = c.arena;
+    const text = Io.Dir.cwd().readFileAlloc(c.io, request_path, a, .limited(16 * 1024 * 1024)) catch |err|
+        return fail(c, "Cannot read the build request {s}: {t}", .{ request_path, err });
+    const req = std.json.parseFromSliceLeaky(BuildRequest, a, text, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch return fail(c, "The build request {s} is malformed.", .{request_path});
+    const config_path = try Io.Dir.path.join(a, &.{ req.project_dir, "zenv.json" });
+    const project = try validation.validateAndParse(a, c.io, config_path);
+    const env_config = project.getEnvironment(req.env_name) orelse
+        return fail(c, "Environment '{s}' is not in {s}.", .{ req.env_name, config_path });
+    try run(c, .{
+        .env_config = env_config,
+        .env_name = req.env_name,
+        .venv_dir = req.venv_dir,
+        .project_dir = req.project_dir,
+        .deps = req.deps,
+        .flags = Flags.parse(req.flags),
+        .requires_python = req.requires_python,
+        .uv = req.uv,
+        .inside_container = true,
+        .uv_env = req.uv_env,
+    });
 }
 
 /// Setup for an env with `"python": false`: modules, a bin/ for the project's
@@ -279,10 +435,43 @@ fn banner(c: Ctx, what: []const u8) void {
     });
 }
 
+/// The last "ERROR: " line in a child's merged output, kept across reads.
+/// zenv inside a container reports its failure that way; the host repeats it
+/// on stderr, where auto-setup looks for errors to show.
+const ErrorWatch = struct {
+    partial: std.ArrayList(u8) = .empty,
+    last: ?[]const u8 = null,
+
+    const prefix = "ERROR: ";
+
+    fn feed(w: *ErrorWatch, a: Allocator, bytes: []const u8) !void {
+        for (bytes) |b| {
+            if (b != '\n') {
+                if (w.partial.items.len < 4096) try w.partial.append(a, b);
+                continue;
+            }
+            const line = std.mem.trimEnd(u8, w.partial.items, "\r");
+            if (std.mem.startsWith(u8, line, prefix)) w.last = try a.dupe(u8, line[prefix.len..]);
+            w.partial.clearRetainingCapacity();
+        }
+    }
+};
+
 /// Runs `argv` in `env` (cwd `cwd`) with stdout and stderr merged into one
 /// pipe whose output goes to the terminal and the setup log. `argv[0]` is
 /// resolved against `env`'s PATH.
 fn runStep(c: Ctx, argv: []const []const u8, env: *const Map, cwd: ?[]const u8) !runtime.Term {
+    return runStepWatched(c, argv, env, cwd, null);
+}
+
+/// `runStep` that also feeds the output to `watch`.
+fn runStepWatched(
+    c: Ctx,
+    argv: []const []const u8,
+    env: *const Map,
+    cwd: ?[]const u8,
+    watch: ?*ErrorWatch,
+) !runtime.Term {
     const io = c.io;
     const exe = try findExecutable(c, argv[0], env.get("PATH")) orelse
         return fail(c, "{s}: command not found", .{argv[0]});
@@ -343,6 +532,7 @@ fn runStep(c: Ctx, argv: []const []const u8, env: *const Map, cwd: ?[]const u8) 
         // EndOfStream once every holder of the write end has closed it.
         const n = result.file_read_streaming catch break;
         output.passthrough(io, buf[0..n]);
+        if (watch) |w| try w.feed(c.arena, buf[0..n]);
     }
     return waiting.await(io);
 }
@@ -562,6 +752,9 @@ fn moduleSystemAvailable(env: *const Map) bool {
 /// an explicit `zenv setup` picks up modules changed by site maintenance. Returns false when there is no module system.
 fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
     const a = c.arena;
+    // The host's LMOD_CMD reaches the container, but its modules are no use
+    // to the image's Python.
+    if (opts.inside_container) return false;
     if (!moduleSystemAvailable(env)) {
         info(c, "Module command not found, skipping module operations", .{});
         return false;
@@ -834,9 +1027,37 @@ fn fallbackPython(c: Ctx, cfg: *const config.Env, flags: Flags) !?[]const u8 {
 const Chosen = struct {
     path: []const u8,
     description: []const u8,
-    /// Which step of selectPython found it.
-    source: enum { pinned, module, fallback, system },
+    /// Which step of selectPython found it, or `image` for imagePython.
+    source: enum { pinned, module, fallback, system, image },
 };
+
+/// The image's Python, for a build inside the env's container: python3, else
+/// python, on the image's PATH.
+fn imagePython(c: Ctx, env: *const Map) !Chosen {
+    for ([_][]const u8{ "python3", "python" }) |name| {
+        if (try findExecutable(c, name, env.get("PATH"))) |p| return .{
+            .path = p,
+            .description = "the container image's Python",
+            .source = .image,
+        };
+    }
+    return fail(c, "The container image has no python3 or python on its PATH.", .{});
+}
+
+/// Packages in the image Python's own site-packages, which the venv imports
+/// through include-system-site-packages.
+fn imagePackages(c: Ctx, env: *const Map, image_python: []const u8) ![]const Package {
+    info(c, "Checking Python packages the container image provides", .{});
+    const dirs = capture(c, &.{
+        image_python,
+        "-I",
+        "-c",
+        "import os, site; print(os.pathsep.join(site.getsitepackages()))",
+    }, env) orelse return fail(c, "Could not list the site-packages of {s}.", .{image_python});
+    const pkgs = try scanPythonPath(c.arena, c.io, dirs);
+    info(c, "Found {d} package(s) in the container image", .{pkgs.len});
+    return pkgs;
+}
 
 /// The interpreter for the venv, in zenv's documented priority: --python's
 /// pinned Python; the module Python; `fallback`; python3; python.
@@ -898,9 +1119,21 @@ fn venvUsable(c: Ctx, venv_dir: []const u8) !bool {
 }
 
 /// Keeps a working venv; otherwise clears any partial one and creates it.
-fn ensureVenv(c: Ctx, venv_dir: []const u8, chosen: Chosen, env: *const Map) !void {
+/// `system_site` (a container build) lets the venv import the base
+/// interpreter's packages; a kept venv that differs gets its pyvenv.cfg
+/// rewritten.
+fn ensureVenv(
+    c: Ctx,
+    venv_dir: []const u8,
+    chosen: Chosen,
+    env: *const Map,
+    system_site: bool,
+) !void {
     if (try venvUsable(c, venv_dir)) {
         info(c, "Using existing valid virtual environment {s}.", .{venv_dir});
+        if (venv.includesSystemSite(c.arena, c.io, venv_dir) == system_site) return;
+        venv.create(c.arena, c.io, chosen.path, venv_dir, env, system_site) catch |err|
+            return fail(c, "Failed to update the virtual environment: {t}", .{err});
         return;
     }
 
@@ -927,7 +1160,7 @@ fn ensureVenv(c: Ctx, venv_dir: []const u8, chosen: Chosen, env: *const Map) !vo
         "Creating virtual environment in {s} using {s} ({s})...",
         .{ venv_dir, chosen.description, chosen.path },
     );
-    venv.create(c.arena, c.io, chosen.path, venv_dir, env) catch |err|
+    venv.create(c.arena, c.io, chosen.path, venv_dir, env, system_site) catch |err|
         return fail(c, "Failed to create the virtual environment: {t}", .{err});
 }
 
@@ -1269,14 +1502,45 @@ fn compileArgv(
     return argv.items;
 }
 
-/// Whether installs resolve against the module packages
-/// (`installAgainstProvided`): with uv, when the modules provide any.
-fn resolvesAgainstModules(uv: ?[]const u8, provided: []const Package) bool {
+/// Where the packages the venv uses without installing them come from: the
+/// loaded modules (on PYTHONPATH) or the container image (its site-packages).
+const Source = enum {
+    modules,
+    image,
+
+    fn noun(s: Source) []const u8 {
+        return switch (s) {
+            .modules => "loaded modules",
+            .image => "container image",
+        };
+    }
+
+    fn provides(s: Source) []const u8 {
+        return switch (s) {
+            .modules => "the loaded modules provide",
+            .image => "the container image provides",
+        };
+    }
+
+    /// What --force gives, for the message on a failed resolution. A module
+    /// package on PYTHONPATH comes before the venv's own copy at runtime; the
+    /// image's site-packages come after the venv's.
+    fn forceNote(s: Source) []const u8 {
+        return switch (s) {
+            .modules => "--force installs every dependency into the venv, but the modules' copies on PYTHONPATH still come first at runtime.",
+            .image => "--force installs every dependency into the venv, where it takes precedence over the image's copy.",
+        };
+    }
+};
+
+/// Whether installs resolve against the provided packages
+/// (`installAgainstProvided`): with uv, when there are any.
+fn resolvesAgainstProvided(uv: ?[]const u8, provided: []const Package) bool {
     return uv != null and provided.len > 0;
 }
 
-/// The requirements the resolution against the module packages starts from:
-/// all of them, including those on module packages that `plan` keeps apart,
+/// The requirements the resolution against the provided packages starts from:
+/// all of them, including those on provided packages that `plan` keeps apart,
 /// so an incompatible one fails the resolution like any other conflict.
 fn resolveInput(a: Allocator, plan: Plan) ![]const []const u8 {
     const lines = try a.alloc([]const u8, plan.install.len + plan.overrides.len);
@@ -1292,15 +1556,16 @@ fn installRequirements(
     env: *const Map,
     plan: Plan,
     provided: []const Package,
+    source: Source,
 ) !void {
-    const resolves = resolvesAgainstModules(opts.uv, provided);
+    const resolves = resolvesAgainstProvided(opts.uv, provided);
     if (opts.flags.force_deps) {
         info(c, "Using --force: installing all specified dependencies", .{});
     } else if (!resolves) {
         for (plan.overrides) |o| info(
             c,
-            "Excluding '{s}' (provided by loaded modules as {s}=={s})",
-            .{ o.requirement, o.name, o.module_version },
+            "Excluding '{s}' (provided by the {s} as {s}=={s})",
+            .{ o.requirement, source.noun(), o.name, o.module_version },
         );
     }
     const lines = if (resolves) try resolveInput(c.arena, plan) else plan.install;
@@ -1315,22 +1580,22 @@ fn installRequirements(
     try cwd.writeFile(c.io, .{ .sub_path = path, .data = try linesOf(c.arena, lines) });
     defer cwd.deleteFile(c.io, path) catch {};
 
-    if (resolves) return installAgainstProvided(c, opts, venv_python, env, path, provided);
+    if (resolves) return installAgainstProvided(c, opts, venv_python, env, path, provided, source);
     info(
         c,
-        "Installing {d} package(s) ({d} provided by modules)",
-        .{ plan.install.len, plan.overrides.len },
+        "Installing {d} package(s) ({d} provided by the {s})",
+        .{ plan.install.len, plan.overrides.len, source.noun() },
     );
     try install(c, opts, venv_python, env, &.{ "-r", path }, "installing dependencies");
 }
 
-/// uv sees no packages outside the venv, so it would install a module package
-/// again when a requirement depends on it, resolved apart from the module copy
-/// that PYTHONPATH puts first at runtime. Instead the requirements are resolved
-/// with the module packages pinned as constraints (found as stub wheels, see
-/// `stub_script`), and the rest of the resolution is installed with --no-deps.
-/// A requirement that needs another version of a module package fails the
-/// resolution; --force installs it.
+/// uv sees no packages outside the venv, so it would install a module or image
+/// package again when a requirement depends on it (a module's copy on
+/// PYTHONPATH then still comes first at runtime). Instead the requirements are
+/// resolved with the provided packages pinned as constraints (found as stub
+/// wheels, see `stub_script`), and the rest of the resolution is installed
+/// with --no-deps. A requirement that needs another version of a provided
+/// package fails the resolution; --force installs it.
 fn installAgainstProvided(
     c: Ctx,
     opts: Options,
@@ -1338,6 +1603,7 @@ fn installAgainstProvided(
     env: *const Map,
     reqs_path: []const u8,
     provided: []const Package,
+    source: Source,
 ) !void {
     const a = c.arena;
     const cwd = Io.Dir.cwd();
@@ -1357,7 +1623,11 @@ fn installAgainstProvided(
     const resolved_path = try join(a, &.{ opts.venv_dir, "requirements.resolved.txt" });
     defer cwd.deleteFile(c.io, resolved_path) catch {};
 
-    info(c, "Resolving dependencies against {d} module-provided package(s)", .{provided.len});
+    info(
+        c,
+        "Resolving dependencies against {d} package(s) from the {s}",
+        .{ provided.len, source.noun() },
+    );
     const argv = try compileArgv(
         a,
         opts.uv.?,
@@ -1371,8 +1641,8 @@ fn installAgainstProvided(
     const t = try runStep(c, argv, env, opts.project_dir);
     if (!t.success()) return fail(
         c,
-        "The dependencies cannot be resolved with the package versions the loaded modules provide (uv's report above). Change the requirements or the modules. --force installs every dependency into the venv, but the modules' copies on PYTHONPATH still come first at runtime.",
-        .{},
+        "The dependencies cannot be resolved with the package versions {s} (uv's report above). Change the requirements or the {s}. {s}",
+        .{ source.provides(), source.noun(), source.forceNote() },
     );
     const text = cwd.readFileAlloc(c.io, resolved_path, a, .limited(16 * 1024 * 1024)) catch |err|
         return fail(c, "Could not read the resolved requirements: {t}", .{err});
@@ -1381,8 +1651,8 @@ fn installAgainstProvided(
     const r = try splitResolved(a, text, &map);
     if (r.reused.len > 0) info(
         c,
-        "Using {d} module package(s) the dependencies need: {s}",
-        .{ r.reused.len, try std.mem.join(a, ", ", r.reused) },
+        "Using {d} package(s) from the {s} that the dependencies need: {s}",
+        .{ r.reused.len, source.noun(), try std.mem.join(a, ", ", r.reused) },
     );
     if (r.install.len == 0) {
         info(c, "No dependencies to install.", .{});
@@ -1442,7 +1712,7 @@ pub fn addWithModules(
     };
     const plan = try planInstall(a, reqs.items, pkgs, false);
     const venv_python = try Io.Dir.path.join(a, &.{ venv_dir, "bin", "python" });
-    try installRequirements(c, opts, venv_python, &uv_env, plan, pkgs);
+    try installRequirements(c, opts, venv_python, &uv_env, plan, pkgs, .modules);
     return true;
 }
 
@@ -1618,8 +1888,9 @@ fn printOverrides(
     env: *const Map,
     venv_python: []const u8,
     overrides: []const Override,
+    source: Source,
 ) !void {
-    info(c, "Dependencies provided by loaded modules (used instead of your requirements):", .{});
+    info(c, "Dependencies provided by the {s} (used instead of your requirements):", .{source.noun()});
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(c.arena, &.{ venv_python, "-c", override_script });
     for (overrides) |o| try argv.appendSlice(
@@ -1634,9 +1905,18 @@ fn printOverrides(
             .{ o.name, o.requirement, o.module_version },
         );
     }
-    info(c, "STATUS 'CONFLICT' means the module version does not satisfy your requirement.", .{});
-    info(c, "You can keep using the module-provided package as-is. If you require the exact", .{});
-    info(c, "version, unload the corresponding module and re-run 'zenv setup' to install it.", .{});
+    info(c, "STATUS 'CONFLICT' means the provided version does not satisfy your requirement.", .{});
+    switch (source) {
+        .modules => {
+            info(c, "You can keep using the module-provided package as-is. If you require the exact", .{});
+            info(c, "version, unload the corresponding module and re-run 'zenv setup' to install it.", .{});
+        },
+        .image => info(
+            c,
+            "If you require the exact version, re-run 'zenv setup' with --force to install it into the venv.",
+            .{},
+        ),
+    }
 }
 
 // ============================ Tests ============================
@@ -1727,9 +2007,9 @@ test "planInstall excludes module-provided packages by normalised name" {
     const want = [_][]const u8{ "requests", "numpy>=1.26", "Scikit_Learn==1.5" };
     try testing.expectEqual(want.len, input.len);
     for (want, input) |w, g| try testing.expectEqualStrings(w, g);
-    try testing.expect(resolvesAgainstModules("/opt/uv", &mods));
-    try testing.expect(!resolvesAgainstModules(null, &mods));
-    try testing.expect(!resolvesAgainstModules("/opt/uv", &.{}));
+    try testing.expect(resolvesAgainstProvided("/opt/uv", &mods));
+    try testing.expect(!resolvesAgainstProvided(null, &mods));
+    try testing.expect(!resolvesAgainstProvided("/opt/uv", &.{}));
 }
 
 test "parseMetadata reads Name and Version from the headers only" {
@@ -1850,6 +2130,26 @@ test "splitResolved keeps provided packages out of the install list" {
     try testing.expectEqual(@as(usize, 2), r.reused.len);
     try testing.expectEqualStrings("charset-normalizer==3.3.2", r.reused[0]);
     try testing.expectEqualStrings("idna==3.6", r.reused[1]);
+}
+
+test "useHostUvSettings replaces the image's UV_* with the host's" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Map.init(a);
+    try env.put("UV_CACHE_DIR", "/opt/uv/cache");
+    try env.put("UV_OVERRIDE", "/etc/uv-overrides.txt");
+    try env.put("UV_COMPILE_BYTECODE", "1");
+    try env.put("HOME", "/home/me");
+    try useHostUvSettings(a, &env, &.{
+        .{ .name = "UV_CACHE_DIR", .value = "/scratch/me/uv" },
+        .{ .name = "UV_INDEX_URL", .value = "https://mirror/simple" },
+    });
+    try testing.expectEqualStrings("/scratch/me/uv", env.get("UV_CACHE_DIR").?);
+    try testing.expectEqualStrings("https://mirror/simple", env.get("UV_INDEX_URL").?);
+    try testing.expect(env.get("UV_OVERRIDE") == null);
+    try testing.expect(env.get("UV_COMPILE_BYTECODE") == null);
+    try testing.expectEqualStrings("/home/me", env.get("HOME").?);
 }
 
 test "recordAdded replaces the package's earlier line and keeps the rest" {

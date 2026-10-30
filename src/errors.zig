@@ -113,6 +113,7 @@ pub fn report(io: Io, err: anyerror) noreturn {
         error.DependencyGroupNotFound,
         error.InvalidDependencyGroup,
         error.RecordFailed,
+        error.ContainerEnv,
         => {},
         else => output.printError(io, "An unexpected error occurred: {t}", .{err}),
     }

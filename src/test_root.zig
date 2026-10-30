@@ -21,4 +21,5 @@ test {
     _ = @import("hook.zig");
     _ = @import("python.zig");
     _ = @import("commands.zig");
+    _ = @import("container.zig");
 }

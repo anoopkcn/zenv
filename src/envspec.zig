@@ -21,6 +21,7 @@ const json = std.json;
 const runtime = @import("runtime.zig");
 const host = @import("host.zig");
 const config = @import("config.zig");
+const container = @import("container.zig");
 
 pub const file_name = "zenv-env.json";
 
@@ -80,6 +81,8 @@ pub const Spec = struct {
     activate_commands: []const []const u8 = &.{},
     /// activate.script, copied into `<venv>/scripts/` at setup (sh code).
     activate_script: ?[]const u8 = null,
+    /// The Apptainer image the env runs in; commands are started inside it.
+    container: ?container.Image = null,
 
     pub fn hasActivateHooks(self: *const Spec) bool {
         return self.activate_commands.len > 0 or self.activate_script != null;
@@ -285,6 +288,11 @@ pub fn build(
         ),
         .activate_commands = env_config.activate.commands.items,
         .activate_script = activate_script,
+        .container = if (env_config.container) |*ct| try container.fromConfig(
+            allocator,
+            ct,
+            project_dir,
+        ) else null,
     };
 }
 

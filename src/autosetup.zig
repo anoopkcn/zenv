@@ -29,6 +29,7 @@ const validation = @import("validation.zig");
 const output = @import("output.zig");
 const cli = @import("cli.zig");
 const deps = @import("deps.zig");
+const container = @import("container.zig");
 
 const stamp_name = ".zenv.stamp";
 const stamp_version = 1;
@@ -148,6 +149,17 @@ fn hashTracked(
         defer allocator.free(p);
         foldFile(allocator, io, &sha, key, p);
     }
+    // A local image by size and modification time, so a re-pulled image
+    // rebuilds the env; hashing gigabytes on every run would be too slow.
+    // Folded only for container envs, so other envs keep their digest.
+    if (env_config.container) |ct| if (!container.isUri(ct.image)) {
+        sha.update("image\x00");
+        const p = try paths.resolvePath(allocator, anchor_dir, ct.image);
+        defer allocator.free(p);
+        const fp = try container.fingerprint(allocator, io, p);
+        defer if (fp) |f| allocator.free(f);
+        foldBytes(&sha, fp orelse "A");
+    };
 
     return std.fmt.bytesToHex(sha.finalResult(), .lower);
 }
@@ -168,7 +180,7 @@ pub const Stamp = struct {
     flags: []const []const u8 = &.{},
 };
 
-fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
+pub fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
     return Io.Dir.path.join(allocator, &.{ venv_dir, stamp_name });
 }
 
@@ -609,6 +621,31 @@ test "computeTrackedHash tracks dependency_file presence" {
     const h_present = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
 
     try testing.expect(!std.mem.eql(u8, h_absent, h_present));
+}
+
+test "computeTrackedHash tracks a container image file" {
+    const a = testing.allocator;
+    const dir = try testDir(a, "ch-image");
+    defer cleanup(a, dir);
+    try writeAt(a, dir, "zenv.json", test_config_a);
+
+    var env_cfg = config.Env.init(a);
+    defer env_cfg.deinit();
+    env_cfg.container = .{ .image = try a.dupe(u8, "py.sif") };
+
+    const h_absent = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
+    try writeAt(a, dir, "py.sif", "image v1");
+    const h_v1 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
+    try writeAt(a, dir, "py.sif", "image v2, re-pulled");
+    const h_v2 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
+
+    try testing.expect(!std.mem.eql(u8, h_absent, h_v1));
+    try testing.expect(!std.mem.eql(u8, h_v1, h_v2));
+    try testing.expectEqualSlices(
+        u8,
+        h_v2,
+        &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg),
+    );
 }
 
 test "computeTrackedHash format is stable" {

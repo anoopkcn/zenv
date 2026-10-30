@@ -242,12 +242,34 @@ fn buildEnv(
 
     env.setup = try buildHook(allocator, errors, value, env_name, "setup");
     env.activate = try buildHook(allocator, errors, value, env_name, "activate");
+    env.container = try buildContainer(allocator, errors, value, env_name);
+
+    // The image brings its own Python and libraries: host modules and a host
+    // interpreter mean nothing inside it.
+    if (env.container != null) {
+        const fields = [_]struct { name: []const u8, set: bool }{
+            .{ .name = "modules", .set = env.modules.items.len > 0 },
+            .{ .name = "modules_file", .set = env.modules_file != null },
+            .{ .name = "fallback_python", .set = env.fallback_python != null },
+        };
+        for (fields) |f| {
+            if (!f.set) continue;
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}' cannot be used with 'container': the image provides Python and its libraries.",
+                .{ env_name, f.name },
+                "{s}.{s}",
+                .{ env_name, f.name },
+            );
+        }
+    }
 
     // Whitelist: every other field is unrecognized.
     const allowed = [_][]const u8{
         "target_machines", "description",      "modules",         "modules_file", "dependencies",
         "dependency_file", "dev_dependencies", "fallback_python", "setup",        "activate",
-        "module_cache",    "python",           "env",
+        "module_cache",    "python",           "env",             "container",
     };
     for (value.object.keys()) |fname| {
         for (allowed) |a| {
@@ -490,6 +512,59 @@ fn buildHook(
     }
 
     return hook;
+}
+
+/// Validates+builds the optional `container` object: `image` (required string),
+/// `options` and `bind` (arrays of strings). Absent or null is no container.
+fn buildContainer(
+    allocator: Allocator,
+    errors: *ErrorList,
+    value: json.Value,
+    env_name: []const u8,
+) !?config.Container {
+    const v = value.object.get("container") orelse return null;
+    if (v == .null) return null;
+    if (v != .object) {
+        try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', 'container' must be an object or null",
+            .{env_name},
+            "{s}.container",
+            .{env_name},
+        );
+        return null;
+    }
+    const image = v.object.get("image");
+    if (image == null or image.? != .string or image.?.string.len == 0) {
+        try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', 'container.image' must be the image path or URI (a non-empty string)",
+            .{env_name},
+            "{s}.container{s}",
+            .{ env_name, if (image != null) ".image" else "" },
+        );
+        return null;
+    }
+
+    var ct: config.Container = .{ .image = try allocator.dupe(u8, image.?.string) };
+    errdefer ct.deinit(allocator);
+    try buildField(allocator, errors, v, env_name, "container.options", &ct.options);
+    try buildField(allocator, errors, v, env_name, "container.bind", &ct.bind);
+    for (v.object.keys()) |key| {
+        for ([_][]const u8{ "image", "options", "bind" }) |a| {
+            if (std.mem.eql(u8, key, a)) break;
+        } else try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', 'container.{s}' is not a recognized field (image, options, bind).",
+            .{ env_name, key },
+            "{s}.container.{s}",
+            .{ env_name, key },
+        );
+    }
+    return ct;
 }
 
 const Position = struct {
@@ -1016,4 +1091,74 @@ test "validateJsonContent: a missing base_dir is not a problem" {
         \\{ "e1": { "target_machines": ["*"] } }
     ;
     try testing.expect((try validateJsonContent(testing.allocator, content)) == null);
+}
+
+test "loadConfig: container builds image, options and bind" {
+    const a = testing.allocator;
+    const content =
+        \\{ "e": { "target_machines": ["*"], "container": {
+        \\  "image": "py.sif", "options": ["--nv"], "bind": ["/data:/data:ro"] } } }
+    ;
+    var result = try loadConfig(a, content);
+    switch (result) {
+        .errors => |*e| {
+            freeErrors(a, e);
+            return error.TestUnexpectedResult;
+        },
+        .config => |*cfg| {
+            defer cfg.deinit();
+            const ct = cfg.getEnvironment("e").?.container.?;
+            try testing.expectEqualStrings("py.sif", ct.image);
+            try testing.expectEqualStrings("--nv", ct.options.items[0]);
+            try testing.expectEqualStrings("/data:/data:ro", ct.bind.items[0]);
+        },
+    }
+}
+
+test "validateJsonContent: container needs an image and excludes modules and fallback_python" {
+    const cases = [_]struct { content: []const u8, needle: []const u8 }{
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "container": { "options": ["--nv"] } } }
+            ,
+            .needle = "'container.image' must be",
+        },
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "container": { "image": "a.sif", "binds": [] } } }
+            ,
+            .needle = "'container.binds' is not a recognized field",
+        },
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "modules": ["GCC"], "container": { "image": "a.sif" } } }
+            ,
+            .needle = "'modules' cannot be used with 'container'",
+        },
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "fallback_python": "/usr/bin/python3", "container": { "image": "a.sif" } } }
+            ,
+            .needle = "'fallback_python' cannot be used with 'container'",
+        },
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "container": "a.sif" } }
+            ,
+            .needle = "'container' must be an object or null",
+        },
+    };
+    for (cases) |case| {
+        var errs = (try validateJsonContent(testing.allocator, case.content)) orelse
+            return error.TestUnexpectedResult;
+        defer freeErrors(testing.allocator, &errs);
+        var found = false;
+        for (errs.items) |it| {
+            if (std.mem.find(u8, it.message, case.needle) != null) found = true;
+        }
+        testing.expect(found) catch |err| {
+            std.debug.print("missing '{s}' for {s}\n", .{ case.needle, case.content });
+            return err;
+        };
+    }
 }
