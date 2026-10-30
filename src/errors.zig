@@ -25,9 +25,11 @@ pub fn report(io: Io, err: anyerror) noreturn {
             "Environment name not found in configuration or argument missing",
             .{},
         ),
+        // validation.validateAndParse has printed why: the file is missing, its
+        // JSON is broken, or a field is wrong.
         error.InvalidFormat => output.printError(
             io,
-            "Invalid JSON format in 'zenv.json'. Check syntax for details above",
+            "Cannot use zenv.json; see the errors above.",
             .{},
         ),
         error.ConfigInvalid => output.printError(
