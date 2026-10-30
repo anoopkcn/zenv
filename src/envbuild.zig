@@ -184,7 +184,10 @@ pub fn run(c: Ctx, options: Options) !void {
     ) else _ = env.orderedRemove("PYTHONDONTWRITEBYTECODE");
     try runHooks(c, opts, &env, setup_hook);
 
-    if (plan.overrides.len > 0) try printOverrides(c, &env, venv_python, plan.overrides);
+    // Resolving against the modules already reported the module packages used.
+    if (plan.overrides.len > 0 and !resolvesAgainstModules(opts.uv, provided)) {
+        try printOverrides(c, &env, venv_python, plan.overrides);
+    }
 
     banner(c, "completed");
 }
@@ -1266,6 +1269,22 @@ fn compileArgv(
     return argv.items;
 }
 
+/// Whether installs resolve against the module packages
+/// (`installAgainstProvided`): with uv, when the modules provide any.
+fn resolvesAgainstModules(uv: ?[]const u8, provided: []const Package) bool {
+    return uv != null and provided.len > 0;
+}
+
+/// The requirements the resolution against the module packages starts from:
+/// all of them, including those on module packages that `plan` keeps apart,
+/// so an incompatible one fails the resolution like any other conflict.
+fn resolveInput(a: Allocator, plan: Plan) ![]const []const u8 {
+    const lines = try a.alloc([]const u8, plan.install.len + plan.overrides.len);
+    @memcpy(lines[0..plan.install.len], plan.install);
+    for (plan.overrides, lines[plan.install.len..]) |o, *line| line.* = o.requirement;
+    return lines;
+}
+
 fn installRequirements(
     c: Ctx,
     opts: Options,
@@ -1274,16 +1293,18 @@ fn installRequirements(
     plan: Plan,
     provided: []const Package,
 ) !void {
+    const resolves = resolvesAgainstModules(opts.uv, provided);
     if (opts.flags.force_deps) {
         info(c, "Using --force: installing all specified dependencies", .{});
-    } else {
+    } else if (!resolves) {
         for (plan.overrides) |o| info(
             c,
             "Excluding '{s}' (provided by loaded modules as {s}=={s})",
             .{ o.requirement, o.name, o.module_version },
         );
     }
-    if (plan.install.len == 0) {
+    const lines = if (resolves) try resolveInput(c.arena, plan) else plan.install;
+    if (lines.len == 0) {
         info(c, "No dependencies to install.", .{});
         return;
     }
@@ -1291,12 +1312,10 @@ fn installRequirements(
     // Passed as a file so requirement lines keep their exact syntax.
     const cwd = Io.Dir.cwd();
     const path = try Io.Dir.path.join(c.arena, &.{ opts.venv_dir, "requirements.install.txt" });
-    try cwd.writeFile(c.io, .{ .sub_path = path, .data = try linesOf(c.arena, plan.install) });
+    try cwd.writeFile(c.io, .{ .sub_path = path, .data = try linesOf(c.arena, lines) });
     defer cwd.deleteFile(c.io, path) catch {};
 
-    if (opts.uv != null and provided.len > 0) {
-        return installAgainstProvided(c, opts, venv_python, env, path, provided);
-    }
+    if (resolves) return installAgainstProvided(c, opts, venv_python, env, path, provided);
     info(
         c,
         "Installing {d} package(s) ({d} provided by modules)",
@@ -1352,7 +1371,7 @@ fn installAgainstProvided(
     const t = try runStep(c, argv, env, opts.project_dir);
     if (!t.success()) return fail(
         c,
-        "The dependencies cannot be resolved with the package versions the loaded modules provide (uv's report above). Change the requirements or the modules, or run 'zenv setup' with --force to install every dependency into the venv.",
+        "The dependencies cannot be resolved with the package versions the loaded modules provide (uv's report above). Change the requirements or the modules. --force installs every dependency into the venv, but the modules' copies on PYTHONPATH still come first at runtime.",
         .{},
     );
     const text = cwd.readFileAlloc(c.io, resolved_path, a, .limited(16 * 1024 * 1024)) catch |err|
@@ -1702,6 +1721,15 @@ test "planInstall excludes module-provided packages by normalised name" {
     const forced = try planInstall(a, &reqs, &mods, true);
     try testing.expectEqual(@as(usize, 3), forced.install.len);
     try testing.expectEqual(@as(usize, 0), forced.overrides.len);
+
+    // Resolving against the modules puts the excluded requirements back.
+    const input = try resolveInput(a, p);
+    const want = [_][]const u8{ "requests", "numpy>=1.26", "Scikit_Learn==1.5" };
+    try testing.expectEqual(want.len, input.len);
+    for (want, input) |w, g| try testing.expectEqualStrings(w, g);
+    try testing.expect(resolvesAgainstModules("/opt/uv", &mods));
+    try testing.expect(!resolvesAgainstModules(null, &mods));
+    try testing.expect(!resolvesAgainstModules("/opt/uv", &.{}));
 }
 
 test "parseMetadata reads Name and Version from the headers only" {

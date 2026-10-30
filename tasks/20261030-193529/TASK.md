@@ -54,3 +54,18 @@ Checked:
   sentence-transformers 6.2.0 with the module's torch.
 
 README: paragraph after the uv/pip comparison in the installer section.
+
+## Resolution, direct requirements (2026-10-30)
+
+Follow-up: a requirement written directly on a module package (`packaging>=25` with the module's
+24.0) was still left out before resolving (`planInstall`) and only reported as CONFLICT, while the
+same conflict through a dependency failed setup. With uv and module packages, the requirements on
+module packages now go into the resolution too (`resolveInput`, `resolvesAgainstModules`): a
+compatible one resolves to the module's version and is not installed, an incompatible one fails with
+uv's report. The CONFLICT table is printed only on the pip path, which is unchanged. The failure
+message no longer offers --force as a fix: the venv copy it installs is shadowed by the module's
+PYTHONPATH entry at runtime.
+
+Checked with the fake module: direct `packaging>=25` fails, `packaging>=23` resolves to the module's
+24.0 (not installed), the transitive conflict still fails, `--pip` still excludes and lists
+CONFLICT, and `zenv add 'packaging>=25'` fails and records nothing.
