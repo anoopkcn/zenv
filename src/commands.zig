@@ -1611,7 +1611,9 @@ pub fn handleAdd(
 
     // 1. Install into the venv (only persist below if this succeeds).
     const uv = try envbuild.resolveUv(ctx, addInstaller(allocator, io, flags, entry.venv_path));
-    try installPackage(ctx, entry.venv_path, package, uv);
+    try installPackage(ctx, entry.venv_path, project_dir, package, uv);
+    // The venv's record of its requirements; the next add resolves with it.
+    envbuild.recordAdded(allocator, io, entry.venv_path, package) catch {};
 
     // 2. Persist to the appropriate manifest.
     persistAddedPackage(allocator, io, zenv_json_path, env_name, record, package) catch |err| {
@@ -1743,11 +1745,44 @@ fn addInstaller(allocator: Allocator, io: Io, flags: Flags, venv_path: []const u
     return Flags.parse(stamp.value.flags).installer();
 }
 
+/// The flags of the env's last setup (`--force`, `--no-cache`), which `zenv
+/// add` installs under too. Defaults when there is no build record.
+fn setupFlags(allocator: Allocator, io: Io, venv_path: []const u8) Flags {
+    const stamp = autosetup.readStamp(allocator, io, venv_path) orelse return .{};
+    defer stamp.deinit();
+    return Flags.parse(stamp.value.flags);
+}
+
 /// Installs `package` into the activated environment with `uv` (a path, from
-/// `envbuild.resolveUv`), or pip when null. A non-zero installer exit maps to
+/// `envbuild.resolveUv`), or pip when null. With uv in an env whose modules
+/// provide Python packages, it is resolved against them as setup does
+/// (`envbuild.addWithModules`). A non-zero installer exit maps to
 /// error.ProcessError.
-fn installPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, uv: ?[]const u8) !void {
+fn installPackage(
+    ctx: Ctx,
+    venv_path: []const u8,
+    project_dir: []const u8,
+    package: []const u8,
+    uv: ?[]const u8,
+) !void {
     const io = ctx.io;
+    output.print(io, "Installing '{s}'...", .{package});
+    if (uv) |exe| if (try directEnv(ctx, venv_path)) |env| {
+        if (envbuild.addWithModules(
+            ctx,
+            exe,
+            venv_path,
+            project_dir,
+            &env,
+            package,
+            setupFlags(ctx.arena, io, venv_path),
+        )) |done| {
+            if (done) return;
+        } else |err| {
+            output.printError(io, "Package installation failed; nothing was recorded.", .{});
+            return err;
+        }
+    };
     // uv is resolved on zenv's own PATH, as setup does: an activate.sh launch
     // purges modules, which would drop a uv that a module provides.
     const command: []const u8 = uv orelse "python";
@@ -1756,7 +1791,6 @@ fn installPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, uv: ?[]c
     else
         &.{ "-m", "pip", "install", package };
 
-    output.print(io, "Installing '{s}'...", .{package});
     const term = execInEnv(ctx, venv_path, command, cmd_args, .wait) catch |err| {
         output.printError(io, "Failed to run installer: {t}", .{err});
         return err;
@@ -1969,7 +2003,25 @@ fn execDirect(
             return null;
         }
     }
+    var child_env = try directEnv(ctx, venv_path) orelse return null;
 
+    const exe = try envspec.resolveCommand(allocator, io, command, child_env.get("PATH")) orelse {
+        // Same status bash's `exec` gives for an unknown command.
+        output.printError(io, "{s}: command not found", .{command});
+        return .{ .exited = 127 };
+    };
+    output.debug(io, "run: direct launch of {s}", .{exe});
+
+    const argv = try std.mem.concat(allocator, []const u8, &.{ &.{command}, command_args });
+    return try startCommand(io, argv, .{ .environ_map = &child_env, .exe_path = exe }, launch);
+}
+
+/// This process's environment with `zenv-env.json` applied: what a direct
+/// launch in the env runs with. Null when the spec is missing or
+/// `envspec.directReason` reports a blocker (activate.sh is needed then).
+fn directEnv(ctx: Ctx, venv_path: []const u8) !?std.process.Environ.Map {
+    const io = ctx.io;
+    const allocator = ctx.arena;
     const parsed = envspec.read(allocator, io, venv_path) orelse {
         output.debug(io, "run: no usable {s}, using activate.sh", .{envspec.file_name});
         return null;
@@ -1988,18 +2040,9 @@ fn execDirect(
         return null;
     }
 
-    var child_env = try ctx.env.clone(allocator);
-    try envspec.apply(&child_env, spec);
-
-    const exe = try envspec.resolveCommand(allocator, io, command, child_env.get("PATH")) orelse {
-        // Same status bash's `exec` gives for an unknown command.
-        output.printError(io, "{s}: command not found", .{command});
-        return .{ .exited = 127 };
-    };
-    output.debug(io, "run: direct launch of {s}", .{exe});
-
-    const argv = try std.mem.concat(allocator, []const u8, &.{ &.{command}, command_args });
-    return try startCommand(io, argv, .{ .environ_map = &child_env, .exe_path = exe }, launch);
+    var env = try ctx.env.clone(allocator);
+    try envspec.apply(&env, spec);
+    return env;
 }
 
 /// Shell snippet passed to `bash -c`. It sources the activation script (passed

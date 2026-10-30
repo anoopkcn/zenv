@@ -98,6 +98,8 @@ For a project that is not a Python project, add `--no-python` (`zenv init <name>
 
 Packages are installed with [uv](https://docs.astral.sh/uv/) when `uv` is on `PATH`, and with pip otherwise. `--uv` makes uv required (setup fails without it), and `--pip` uses pip even when uv is available. An explicit `--uv` or `--pip` is kept for [automatic rebuilds](#automatic-rebuilds) and for `zenv add`; without one, each rebuild picks again. The two differ on HPC systems: pip builds packages with `--no-build-isolation` and the module stack's `PYTHONPATH`, so it can use build dependencies that modules provide, while uv builds in isolation without `PYTHONPATH`. Use `--pip` for a project that relies on module-provided build dependencies.
 
+uv does not see packages outside the venv, so with modules that put Python packages on `PYTHONPATH`, setup resolves the dependencies with those packages pinned to the module versions and installs the rest of the resolution with `--no-deps`. A module package that a dependency needs (torch from a PyTorch module, say, for `sentence-transformers`) is then used, not installed into the venv again. When a dependency needs a version of a module package that the module does not have, setup fails with uv's explanation; change the requirements or the modules, or pass `--force` to install every dependency into the venv. `zenv add` resolves the same way, together with the env's other requirements.
+
 **A small example of a `zenv.json` file**, with one environment for any machine and one for the JURECA cluster:
 
 ```json

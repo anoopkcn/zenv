@@ -173,7 +173,8 @@ pub fn run(c: Ctx, options: Options) !void {
     try install(c, opts, venv_python, install_env, pip_args, "installing pip");
 
     const plan = try planInstall(a, reqs, module_pkgs, flags.force_deps);
-    try installRequirements(c, opts, venv_python, install_env, plan);
+    const provided: []const Package = if (flags.force_deps) &.{} else module_pkgs;
+    try installRequirements(c, opts, venv_python, install_env, plan, provided);
 
     if (flags.dev_mode) try installEditable(c, opts, venv_python, install_env);
 
@@ -1142,8 +1143,7 @@ fn planInstall(
 ) !Plan {
     var to_install: std.ArrayList([]const u8) = .empty;
     var overrides: std.ArrayList(Override) = .empty;
-    var provided: std.StringHashMapUnmanaged([]const u8) = .empty; // canonical name -> version
-    for (module_pkgs) |p| try provided.put(a, try deps.canonicalName(a, p.name), p.version);
+    const provided = try providedMap(a, module_pkgs);
     for (reqs) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
@@ -1164,12 +1164,115 @@ fn planInstall(
     return .{ .install = to_install.items, .overrides = overrides.items };
 }
 
+/// `pkgs` by canonical name, mapped to their versions.
+fn providedMap(a: Allocator, pkgs: []const Package) !std.StringHashMapUnmanaged([]const u8) {
+    var provided: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (pkgs) |p| try provided.put(a, try deps.canonicalName(a, p.name), p.version);
+    return provided;
+}
+
+/// The packages of `pkgs` that can be pinned. A version that does not start
+/// with a digit is no PEP 440 release uv would accept, and one bad constraint
+/// fails the whole file, so such a package is left out.
+fn pinnable(a: Allocator, pkgs: []const Package) ![]const Package {
+    var pins: std.ArrayList(Package) = .empty;
+    for (pkgs) |p| {
+        if (p.version.len > 0 and std.ascii.isDigit(p.version[0])) try pins.append(a, p);
+    }
+    return pins.items;
+}
+
+/// Constraint lines pinning each of `pins` to its version (`numpy==1.26.4`).
+fn constraintLines(a: Allocator, pins: []const Package) ![]const []const u8 {
+    const lines = try a.alloc([]const u8, pins.len);
+    for (pins, lines) |p, *line| line.* = try std.fmt.allocPrint(a, "{s}=={s}", .{ p.name, p.version });
+    return lines;
+}
+
+/// Writes one stub wheel per (name, version) argument pair into the directory
+/// given first: core metadata with Name and Version only. Module packages are
+/// often built with local versions (torch 2.9.1+cu128) that no index has, so
+/// pinning them resolves only when uv finds these stubs with --find-links. They
+/// carry no Requires-Dist: a module package counts as complete as installed,
+/// as pip takes an installed package, and uv adds nothing the module's metadata
+/// names but the module does not ship. The stubs are never installed.
+const stub_script =
+    \\import os, re, sys, zipfile
+    \\out, args = sys.argv[1], sys.argv[2:]
+    \\for name, version in zip(args[::2], args[1::2]):
+    \\    stem = re.sub(r"[-_.]+", "_", name).lower() + "-" + version
+    \\    info = stem + ".dist-info/"
+    \\    with zipfile.ZipFile(os.path.join(out, stem + "-py3-none-any.whl"), "w") as z:
+    \\        z.writestr(info + "METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    \\        z.writestr(info + "WHEEL", "Wheel-Version: 1.0\nGenerator: zenv\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+    \\        z.writestr(info + "RECORD", "")
+;
+
+fn writeStubs(
+    c: Ctx,
+    venv_python: []const u8,
+    env: *const Map,
+    dir: []const u8,
+    pins: []const Package,
+) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(c.arena, &.{ venv_python, "-I", "-c", stub_script, dir });
+    for (pins) |p| try argv.appendSlice(c.arena, &.{ p.name, p.version });
+    const t = try runStep(c, argv.items, env, null);
+    if (!t.success()) return fail(c, "Could not write the module package stubs ({f}).", .{t});
+}
+
+/// `uv pip compile` output split into the lines to install and the pinned
+/// provided packages the resolution uses, which stay with the modules.
+const Resolved = struct { install: []const []const u8, reused: []const []const u8 };
+
+fn splitResolved(
+    a: Allocator,
+    text: []const u8,
+    provided: *const std.StringHashMapUnmanaged([]const u8),
+) !Resolved {
+    var to_install: std.ArrayList([]const u8) = .empty;
+    var reused: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const name = try deps.canonicalName(a, requirementName(line));
+        try (if (provided.contains(name)) &reused else &to_install).append(a, line);
+    }
+    return .{ .install = to_install.items, .reused = reused.items };
+}
+
+/// The argv that resolves `reqs` under `constraints` for the venv's Python,
+/// finding the pinned versions among the stub wheels in `stubs`, and writes
+/// the pinned result to `out`.
+fn compileArgv(
+    a: Allocator,
+    uv: []const u8,
+    venv_python: []const u8,
+    no_cache: bool,
+    reqs: []const u8,
+    constraints: []const u8,
+    stubs: []const u8,
+    out: []const u8,
+) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(a, &.{
+        uv,            "pip",           "compile", "--python", venv_python,
+        "--no-header", "--no-annotate", "--quiet",
+    });
+    if (no_cache) try argv.append(a, "--no-cache");
+    try argv.appendSlice(a, &.{ "-c", constraints, "--find-links", stubs, "-o", out, reqs });
+    return argv.items;
+}
+
 fn installRequirements(
     c: Ctx,
     opts: Options,
     venv_python: []const u8,
     env: *const Map,
     plan: Plan,
+    provided: []const Package,
 ) !void {
     if (opts.flags.force_deps) {
         info(c, "Using --force: installing all specified dependencies", .{});
@@ -1184,11 +1287,6 @@ fn installRequirements(
         info(c, "No dependencies to install.", .{});
         return;
     }
-    info(
-        c,
-        "Installing {d} package(s) ({d} provided by modules)",
-        .{ plan.install.len, plan.overrides.len },
-    );
 
     // Passed as a file so requirement lines keep their exact syntax.
     const cwd = Io.Dir.cwd();
@@ -1196,7 +1294,164 @@ fn installRequirements(
     try cwd.writeFile(c.io, .{ .sub_path = path, .data = try linesOf(c.arena, plan.install) });
     defer cwd.deleteFile(c.io, path) catch {};
 
+    if (opts.uv != null and provided.len > 0) {
+        return installAgainstProvided(c, opts, venv_python, env, path, provided);
+    }
+    info(
+        c,
+        "Installing {d} package(s) ({d} provided by modules)",
+        .{ plan.install.len, plan.overrides.len },
+    );
     try install(c, opts, venv_python, env, &.{ "-r", path }, "installing dependencies");
+}
+
+/// uv sees no packages outside the venv, so it would install a module package
+/// again when a requirement depends on it, resolved apart from the module copy
+/// that PYTHONPATH puts first at runtime. Instead the requirements are resolved
+/// with the module packages pinned as constraints (found as stub wheels, see
+/// `stub_script`), and the rest of the resolution is installed with --no-deps.
+/// A requirement that needs another version of a module package fails the
+/// resolution; --force installs it.
+fn installAgainstProvided(
+    c: Ctx,
+    opts: Options,
+    venv_python: []const u8,
+    env: *const Map,
+    reqs_path: []const u8,
+    provided: []const Package,
+) !void {
+    const a = c.arena;
+    const cwd = Io.Dir.cwd();
+    const join = Io.Dir.path.join;
+    const pins = try pinnable(a, provided);
+    const constraints = try join(a, &.{ opts.venv_dir, "constraints.modules.txt" });
+    try cwd.writeFile(
+        c.io,
+        .{ .sub_path = constraints, .data = try linesOf(a, try constraintLines(a, pins)) },
+    );
+    defer cwd.deleteFile(c.io, constraints) catch {};
+    const stubs = try join(a, &.{ opts.venv_dir, ".zenv_module_stubs" });
+    cwd.deleteTree(c.io, stubs) catch {};
+    try cwd.createDirPath(c.io, stubs);
+    defer cwd.deleteTree(c.io, stubs) catch {};
+    try writeStubs(c, venv_python, env, stubs, pins);
+    const resolved_path = try join(a, &.{ opts.venv_dir, "requirements.resolved.txt" });
+    defer cwd.deleteFile(c.io, resolved_path) catch {};
+
+    info(c, "Resolving dependencies against {d} module-provided package(s)", .{provided.len});
+    const argv = try compileArgv(
+        a,
+        opts.uv.?,
+        venv_python,
+        opts.flags.no_cache,
+        reqs_path,
+        constraints,
+        stubs,
+        resolved_path,
+    );
+    const t = try runStep(c, argv, env, opts.project_dir);
+    if (!t.success()) return fail(
+        c,
+        "The dependencies cannot be resolved with the package versions the loaded modules provide (uv's report above). Change the requirements or the modules, or run 'zenv setup' with --force to install every dependency into the venv.",
+        .{},
+    );
+    const text = cwd.readFileAlloc(c.io, resolved_path, a, .limited(16 * 1024 * 1024)) catch |err|
+        return fail(c, "Could not read the resolved requirements: {t}", .{err});
+
+    const map = try providedMap(a, provided);
+    const r = try splitResolved(a, text, &map);
+    if (r.reused.len > 0) info(
+        c,
+        "Using {d} module package(s) the dependencies need: {s}",
+        .{ r.reused.len, try std.mem.join(a, ", ", r.reused) },
+    );
+    if (r.install.len == 0) {
+        info(c, "No dependencies to install.", .{});
+        return;
+    }
+    info(c, "Installing {d} resolved package(s) with --no-deps", .{r.install.len});
+    try cwd.writeFile(c.io, .{ .sub_path = resolved_path, .data = try linesOf(a, r.install) });
+    try install(
+        c,
+        opts,
+        venv_python,
+        env,
+        &.{ "--no-deps", "-r", resolved_path },
+        "installing dependencies",
+    );
+}
+
+/// `zenv add` with uv in an env whose modules put Python packages on
+/// PYTHONPATH (in `env`, the activated environment): installs `package` as
+/// setup installs dependencies, resolved together with the env's recorded
+/// requirements against the module packages, so a module package it depends
+/// on is used rather than installed again. Returns false, having installed
+/// nothing, when PYTHONPATH provides no packages or `flags` has --force (the
+/// env's own setup flags): a plain `uv pip install` is right then.
+pub fn addWithModules(
+    c: Ctx,
+    uv: []const u8,
+    venv_dir: []const u8,
+    project_dir: []const u8,
+    env: *const Map,
+    package: []const u8,
+    flags: Flags,
+) !bool {
+    if (flags.force_deps) return false;
+    const a = c.arena;
+    const pkgs = try scanPythonPath(a, c.io, env.get("PYTHONPATH") orelse "");
+    if (pkgs.len == 0) return false;
+
+    var reqs: std.ArrayList([]const u8) = .empty;
+    for (try readRecord(a, c.io, venv_dir)) |line| {
+        if (!deps.samePackage(line, package)) try reqs.append(a, line);
+    }
+    try reqs.append(a, package);
+
+    // uv runs without PYTHONPATH, as in setup.
+    var uv_env = try env.clone(a);
+    _ = uv_env.orderedRemove("PYTHONPATH");
+    const cfg: config.Env = .{ .allocator = a };
+    const opts: Options = .{
+        .env_config = &cfg,
+        .env_name = "",
+        .venv_dir = venv_dir,
+        .project_dir = project_dir,
+        .deps = reqs.items,
+        .flags = flags,
+        .uv = uv,
+    };
+    const plan = try planInstall(a, reqs.items, pkgs, false);
+    const venv_python = try Io.Dir.path.join(a, &.{ venv_dir, "bin", "python" });
+    try installRequirements(c, opts, venv_python, &uv_env, plan, pkgs);
+    return true;
+}
+
+/// The requirement lines of `<venv_dir>/requirements.txt`, the record of
+/// what setup (and `zenv add` since) installed. Empty when there is none.
+fn readRecord(a: Allocator, io: Io, venv_dir: []const u8) ![]const []const u8 {
+    const path = try Io.Dir.path.join(a, &.{ venv_dir, "requirements.txt" });
+    const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) catch
+        return &.{};
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len > 0 and line[0] != '#') try lines.append(a, line);
+    }
+    return lines.items;
+}
+
+/// Records `package` in `<venv_dir>/requirements.txt`, replacing an earlier
+/// line for the same package, so the next `zenv add` resolves with it.
+pub fn recordAdded(a: Allocator, io: Io, venv_dir: []const u8, package: []const u8) !void {
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (try readRecord(a, io, venv_dir)) |line| {
+        if (!deps.samePackage(line, package)) try lines.append(a, line);
+    }
+    try lines.append(a, package);
+    const path = try Io.Dir.path.join(a, &.{ venv_dir, "requirements.txt" });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try linesOf(a, lines.items) });
 }
 
 /// `lines`, each ended by a newline.
@@ -1523,6 +1778,98 @@ test "installerArgv for uv and pip" {
     const want_pip = [_][]const u8{ "/v/bin/python", "-m", "pip", "install", "--upgrade", "pip" };
     try testing.expectEqual(want_pip.len, pip.len);
     for (want_pip, pip) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "constraintLines pins provided packages and skips versions uv would reject" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pkgs = [_]Package{
+        .{ .name = "numpy", .version = "1.26.4" },
+        .{ .name = "torch", .version = "2.9.1+cu130" },
+        .{ .name = "odd", .version = "unknown" },
+        .{ .name = "empty", .version = "" },
+    };
+    const lines = try constraintLines(a, try pinnable(a, &pkgs));
+    try testing.expectEqual(@as(usize, 2), lines.len);
+    try testing.expectEqualStrings("numpy==1.26.4", lines[0]);
+    try testing.expectEqualStrings("torch==2.9.1+cu130", lines[1]);
+}
+
+test "splitResolved keeps provided packages out of the install list" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pkgs = [_]Package{
+        .{ .name = "idna", .version = "3.6" },
+        .{ .name = "Charset_Normalizer", .version = "3.3.2" },
+    };
+    const map = try providedMap(a, &pkgs);
+    const text =
+        \\certifi==2026.10.23
+        \\charset-normalizer==3.3.2
+        \\    # via requests
+        \\idna==3.6
+        \\
+        \\mylib @ file:///src/mylib
+        \\requests==2.34.2
+        \\
+    ;
+    const r = try splitResolved(a, text, &map);
+    const want_install = [_][]const u8{ "certifi==2026.10.23", "mylib @ file:///src/mylib", "requests==2.34.2" };
+    try testing.expectEqual(want_install.len, r.install.len);
+    for (want_install, r.install) |w, g| try testing.expectEqualStrings(w, g);
+    try testing.expectEqual(@as(usize, 2), r.reused.len);
+    try testing.expectEqualStrings("charset-normalizer==3.3.2", r.reused[0]);
+    try testing.expectEqualStrings("idna==3.6", r.reused[1]);
+}
+
+test "recordAdded replaces the package's earlier line and keeps the rest" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
+    const root = ".zig-cache/tmp/zenv-record-added-test";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+
+    try testing.expectEqual(@as(usize, 0), (try readRecord(a, io, root)).len);
+    try recordAdded(a, io, root, "numpy");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/requirements.txt",
+        .data = "# comment\nnumpy>=1.26\n\nRequests==2.0\n",
+    });
+    try recordAdded(a, io, root, "requests>=2.30");
+    const lines = try readRecord(a, io, root);
+    try testing.expectEqual(@as(usize, 2), lines.len);
+    try testing.expectEqualStrings("numpy>=1.26", lines[0]);
+    try testing.expectEqualStrings("requests>=2.30", lines[1]);
+}
+
+test "compileArgv resolves for the venv's Python under the constraints" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const argv = try compileArgv(
+        a,
+        "/opt/uv",
+        "/v/bin/python",
+        true,
+        "reqs.txt",
+        "c.txt",
+        "stubs",
+        "out.txt",
+    );
+    const want = [_][]const u8{
+        "/opt/uv",     "pip",           "compile", "--python",   "/v/bin/python",
+        "--no-header", "--no-annotate", "--quiet", "--no-cache", "-c",
+        "c.txt",       "--find-links",  "stubs",   "-o",         "out.txt",
+        "reqs.txt",
+    };
+    try testing.expectEqual(want.len, argv.len);
+    for (want, argv) |w, g| try testing.expectEqualStrings(w, g);
 }
 
 test "hasPythonVenv: bin/ alone is a Python-free env, any venv part is not" {
