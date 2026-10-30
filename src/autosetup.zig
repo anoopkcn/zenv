@@ -24,14 +24,15 @@ const runtime = @import("runtime.zig");
 const Ctx = runtime.Ctx;
 const paths = @import("paths.zig");
 const config = @import("config.zig");
+const Registry = @import("Registry.zig");
 const validation = @import("validation.zig");
 const output = @import("output.zig");
-const flags = @import("flags.zig");
-const deps = @import("parse_deps.zig");
+const cli = @import("cli.zig");
+const deps = @import("deps.zig");
 
-const STAMP_NAME = ".zenv.stamp";
-const STAMP_VERSION = 1;
-const MAX_TRACKED_FILE = 10 * 1024 * 1024;
+const stamp_name = ".zenv.stamp";
+const stamp_version = 1;
+const max_tracked_file_size = 10 * 1024 * 1024;
 
 // ===========================================================================
 // Tracked-file checksum
@@ -42,10 +43,16 @@ const MAX_TRACKED_FILE = 10 * 1024 * 1024;
 /// content boundary shift between adjacent files, all change the digest. A
 /// missing or unreadable file is folded as a marker rather than erroring, so the
 /// hash stays well-defined even when e.g. a configured dependency_file is absent.
-fn foldFile(allocator: Allocator, io: Io, sha: *std.crypto.hash.Sha1, key: []const u8, path: []const u8) void {
+fn foldFile(
+    allocator: Allocator,
+    io: Io,
+    sha: *std.crypto.hash.Sha1,
+    key: []const u8,
+    path: []const u8,
+) void {
     sha.update(key);
     sha.update("\x00");
-    const content = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_TRACKED_FILE)) catch |err| {
+    const content = readTracked(allocator, io, path) catch |err| {
         sha.update(if (err == error.FileNotFound) "A\x00" else "E\x00");
         return;
     };
@@ -60,17 +67,27 @@ fn foldBytes(sha: *std.crypto.hash.Sha1, bytes: []const u8) void {
     sha.update("\x00");
 }
 
-/// Folds the part of zenv.json that concerns `env_name`: `base_dir` and the
-/// env's own object, re-serialized. Editing another env in the same file then
-/// leaves this env's hash alone. A file that does not parse is folded whole.
-fn foldEnvConfig(allocator: Allocator, io: Io, sha: *std.crypto.hash.Sha1, path: []const u8, env_name: []const u8) void {
+/// Folds the part of zenv.json (`zenv_json`, its content or why it could not
+/// be read) that concerns `env_name`: `base_dir` and the env's own object,
+/// re-serialized. Editing another env in the same file then leaves this env's
+/// hash alone. A file that does not parse is folded whole.
+fn foldEnvConfig(
+    allocator: Allocator,
+    sha: *std.crypto.hash.Sha1,
+    zenv_json: anyerror![]const u8,
+    env_name: []const u8,
+) void {
     sha.update("config\x00");
-    const content = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_TRACKED_FILE)) catch |err| {
+    const content = zenv_json catch |err| {
         sha.update(if (err == error.FileNotFound) "A\x00" else "E\x00");
         return;
     };
-    defer allocator.free(content);
-    const parsed = json.parseFromSlice(json.Value, allocator, content, .{}) catch return foldBytes(sha, content);
+    const parsed = json.parseFromSlice(
+        json.Value,
+        allocator,
+        content,
+        .{},
+    ) catch return foldBytes(sha, content);
     defer parsed.deinit();
     if (parsed.value != .object) return foldBytes(sha, content);
     for ([_][]const u8{ "base_dir", env_name }) |key| {
@@ -80,7 +97,11 @@ fn foldEnvConfig(allocator: Allocator, io: Io, sha: *std.crypto.hash.Sha1, path:
             sha.update("A\x00");
             continue;
         };
-        const text = json.Stringify.valueAlloc(allocator, value, .{}) catch return foldBytes(sha, content);
+        const text = json.Stringify.valueAlloc(
+            allocator,
+            value,
+            .{},
+        ) catch return foldBytes(sha, content);
         defer allocator.free(text);
         foldBytes(sha, text);
     }
@@ -90,26 +111,36 @@ fn foldEnvConfig(allocator: Allocator, io: Io, sha: *std.crypto.hash.Sha1, path:
 /// its part of zenv.json (always), then dependency_file, modules_file and
 /// setup.script when configured. `anchor_dir` is the setup cwd when recording the stamp and the
 /// entry's project_dir when checking — these are the same directory, which is
-/// what makes the two call sites agree. Caller owns the returned slice.
+/// what makes the two call sites agree.
 pub fn computeTrackedHash(
     allocator: Allocator,
     io: Io,
     anchor_dir: []const u8,
     env_name: []const u8,
-    env_config: *const config.EnvironmentConfig,
-) ![]u8 {
-    var sha: std.crypto.hash.Sha1 = .init(.{});
+    env_config: *const config.Env,
+) ![40]u8 {
+    const path = try Io.Dir.path.join(allocator, &.{ anchor_dir, "zenv.json" });
+    defer allocator.free(path);
+    const content = readTracked(allocator, io, path);
+    defer if (content) |c| allocator.free(c) else |_| {};
+    return hashTracked(allocator, io, anchor_dir, env_name, env_config, content);
+}
 
-    {
-        const p = try Io.Dir.path.join(allocator, &.{ anchor_dir, "zenv.json" });
-        defer allocator.free(p);
-        foldEnvConfig(allocator, io, &sha, p, env_name);
-    }
-    const setup_script = if (env_config.setup) |s| s.script else null;
+/// `computeTrackedHash` for zenv.json content the caller has already read.
+fn hashTracked(
+    allocator: Allocator,
+    io: Io,
+    anchor_dir: []const u8,
+    env_name: []const u8,
+    env_config: *const config.Env,
+    zenv_json: anyerror![]const u8,
+) ![40]u8 {
+    var sha: std.crypto.hash.Sha1 = .init(.{});
+    foldEnvConfig(allocator, &sha, zenv_json, env_name);
     const tracked = [_]struct { []const u8, ?[]const u8 }{
         .{ "deps", env_config.dependency_file },
         .{ "modules", env_config.modules_file },
-        .{ "setup_script", setup_script },
+        .{ "setup_script", env_config.setup.script },
     };
     for (tracked) |t| {
         const key, const configured = t;
@@ -118,7 +149,12 @@ pub fn computeTrackedHash(
         foldFile(allocator, io, &sha, key, p);
     }
 
-    return allocator.dupe(u8, &std.fmt.bytesToHex(sha.finalResult(), .lower));
+    return std.fmt.bytesToHex(sha.finalResult(), .lower);
+}
+
+/// The content of tracked file `path`; the caller frees it.
+fn readTracked(allocator: Allocator, io: Io, path: []const u8) ![]u8 {
+    return Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_tracked_file_size));
 }
 
 // ===========================================================================
@@ -133,15 +169,21 @@ pub const Stamp = struct {
 };
 
 fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
-    return Io.Dir.path.join(allocator, &.{ venv_dir, STAMP_NAME });
+    return Io.Dir.path.join(allocator, &.{ venv_dir, stamp_name });
 }
 
 /// Writes `<venv_dir>/.zenv.stamp` atomically. `flags` are the build-affecting
 /// setup flags to replay on a future auto-setup.
-pub fn writeStamp(allocator: Allocator, io: Io, venv_dir: []const u8, hash: []const u8, build_flags: []const []const u8) !void {
+pub fn writeStamp(
+    allocator: Allocator,
+    io: Io,
+    venv_dir: []const u8,
+    hash: []const u8,
+    build_flags: []const []const u8,
+) !void {
     const path = try stampPath(allocator, venv_dir);
     defer allocator.free(path);
-    const stamp: Stamp = .{ .version = STAMP_VERSION, .hash = hash, .flags = build_flags };
+    const stamp: Stamp = .{ .version = stamp_version, .hash = hash, .flags = build_flags };
     try runtime.writeJsonAtomic(io, path, stamp, false);
 }
 
@@ -152,14 +194,19 @@ pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parse
     const path = stampPath(allocator, venv_dir) catch return null;
     defer allocator.free(path);
 
-    const content = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch return null;
+    const content = Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(1024 * 1024),
+    ) catch return null;
     defer allocator.free(content);
 
     const parsed = json.parseFromSlice(Stamp, allocator, content, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     }) catch return null;
-    if (parsed.value.version != STAMP_VERSION) {
+    if (parsed.value.version != stamp_version) {
         parsed.deinit();
         return null;
     }
@@ -178,7 +225,11 @@ pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parse
 /// without either, each rebuild picks the installer again (uv when found).
 /// Each of `groups` becomes `--group <name>`. Items are static literals or
 /// borrowed from `groups` — the caller frees only the returned slice.
-pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags, groups: []const []const u8) ![]const []const u8 {
+pub fn flagTokens(
+    allocator: Allocator,
+    f: cli.Flags,
+    groups: []const []const u8,
+) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
     if (f.force_deps) try list.append(allocator, "--force");
@@ -195,15 +246,28 @@ pub fn flagTokens(allocator: Allocator, f: flags.CommandFlags, groups: []const [
 /// hash, so rebuilds install a group that `add` just recorded a package in.
 /// Returns false when the env has no stamp (its next rebuild replays nothing);
 /// true when the group was already replayed or has been added.
-pub fn addReplayGroup(allocator: Allocator, io: Io, venv_path: []const u8, group: []const u8) !bool {
+pub fn addReplayGroup(
+    allocator: Allocator,
+    io: Io,
+    venv_path: []const u8,
+    group: []const u8,
+) !bool {
     const stamp = readStamp(allocator, io, venv_path) orelse return false;
     defer stamp.deinit();
     const old_flags = stamp.value.flags;
     var i: usize = 0;
     while (i + 1 < old_flags.len) : (i += 1) {
-        if (std.mem.eql(u8, old_flags[i], "--group") and deps.sameName(old_flags[i + 1], group)) return true;
+        if (std.mem.eql(
+            u8,
+            old_flags[i],
+            "--group",
+        ) and deps.sameName(old_flags[i + 1], group)) return true;
     }
-    const new_flags = try std.mem.concat(allocator, []const u8, &.{ stamp.value.flags, &.{ "--group", group } });
+    const new_flags = try std.mem.concat(
+        allocator,
+        []const u8,
+        &.{ stamp.value.flags, &.{ "--group", group } },
+    );
     defer allocator.free(new_flags);
     try writeStamp(allocator, io, venv_path, stamp.value.hash, new_flags);
     return true;
@@ -216,15 +280,18 @@ pub fn addReplayGroup(allocator: Allocator, io: Io, venv_path: []const u8, group
 /// Re-invokes `zenv setup <env> --no-host --reuse-module-cache [replay_flags...]`
 /// as a captured subprocess with cwd set to the project dir. A rebuild keeps the
 /// module cache when the module set is unchanged; only an explicit `zenv setup`
-/// re-captures it. The child's stdout/stderr are captured (not inherited), so
-/// the rebuild itself is silent; we bracket it with a one-line `reason` notice
-/// and a completion notice on STDERR so the user knows a rebuild happened. stderr is used deliberately: `activate`/`cd` emit their
-/// shell-eval payload on stdout (which the shell captures), so a stderr notice is
-/// visible without corrupting `source $(zenv activate ...)`. Returns
+/// re-captures it. The child's output is captured, so the rebuild itself is
+/// silent; a one-line `reason` notice and a completion notice go to stderr
+/// (see the module comment). Returns
 /// `error.AutoSetupFailed` if the child cannot start or exits non-zero. A
 /// failure to locate the running binary is non-fatal: we warn and skip rather
 /// than break an otherwise-working command.
-fn runSetup(ctx: Ctx, entry: *const config.RegistryEntry, replay_flags: []const []const u8, reason: []const u8) !void {
+fn runSetup(
+    ctx: Ctx,
+    entry: *const Registry.Entry,
+    replay_flags: []const []const u8,
+    reason: []const u8,
+) !void {
     const allocator = ctx.arena;
     const io = ctx.io;
     const self_exe = std.process.executablePathAlloc(io, allocator) catch |err| {
@@ -233,16 +300,23 @@ fn runSetup(ctx: Ctx, entry: *const config.RegistryEntry, replay_flags: []const 
     };
     defer allocator.free(self_exe);
 
-    const argv = try std.mem.concat(allocator, []const u8, &.{ &.{ self_exe, "setup", entry.env_name, "--no-host", "--reuse-module-cache" }, replay_flags });
+    const argv = try std.mem.concat(
+        allocator,
+        []const u8,
+        &.{
+            &.{ self_exe, "setup", entry.env_name, "--no-host", "--reuse-module-cache" },
+            replay_flags,
+        },
+    );
     defer allocator.free(argv);
 
-    // Announce on STDERR before the (silent, possibly slow) rebuild. stderr is
-    // safe for every caller: `activate`/`cd` put their shell-eval payload on
-    // stdout, which the shell captures, while stderr flows to the terminal — so
-    // the user learns a rebuild happened without the notice corrupting
-    // `source $(zenv activate ...)`. The notice only fires on real drift, so a
-    // routine activation that changed nothing stays silent.
-    output.rawErr(io, "zenv: rebuilding environment '{s}' ({s}; auto-setup)...\n", .{ entry.env_name, reason });
+    // Announced before the (silent, possibly slow) rebuild; only real drift
+    // gets here, so a routine activation stays silent.
+    output.rawErr(
+        io,
+        "zenv: rebuilding environment '{s}' ({s}; auto-setup)...\n",
+        .{ entry.env_name, reason },
+    );
 
     const res = runtime.run(allocator, io, argv, .{ .cwd = entry.project_dir }) catch |err| {
         output.rawErr(io, "ERROR: auto-setup failed to start: {t}\n", .{err});
@@ -274,20 +348,31 @@ const Drift = union(enum) {
     unstamped,
 };
 
+/// A project's zenv.json: its text, and what it builds.
+const Loaded = struct {
+    content: []u8,
+    project: config.Project,
+
+    fn deinit(self: *Loaded, allocator: Allocator) void {
+        self.project.deinit();
+        allocator.free(self.content);
+    }
+};
+
 /// The zenv.json in `project_dir`, parsed and validated WITHOUT printing the
 /// validation errors: the gate runs before commands that must keep working
 /// while zenv.json is missing or mid-edit. Null when the file is absent;
 /// error.ConfigInvalid when it does not validate.
-fn loadConfigQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?config.ZenvConfig {
+fn loadConfigQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?Loaded {
     const config_path = try Io.Dir.path.join(allocator, &.{ project_dir, "zenv.json" });
     defer allocator.free(config_path);
-    const content = Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(MAX_TRACKED_FILE)) catch |err| {
+    const content = readTracked(allocator, io, config_path) catch |err| {
         if (err == error.FileNotFound) return null;
         return err;
     };
-    defer allocator.free(content);
+    errdefer allocator.free(content);
     switch (try validation.loadConfig(allocator, content)) {
-        .config => |c| return c,
+        .config => |c| return .{ .content = content, .project = c },
         .errors => |errs| {
             var list = errs;
             validation.freeErrors(allocator, &list);
@@ -298,26 +383,36 @@ fn loadConfigQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?conf
 
 /// A removed/broken config, or an env it no longer defines, counts as no drift:
 /// it must not block a working venv. A broken one gets a one-line notice.
-fn drift(ctx: Ctx, entry: *const config.RegistryEntry) !Drift {
+fn drift(ctx: Ctx, entry: *const Registry.Entry) !Drift {
     const allocator = ctx.arena;
     const io = ctx.io;
-    var cfg = (loadConfigQuiet(allocator, io, entry.project_dir) catch |err| {
+    var loaded = (loadConfigQuiet(allocator, io, entry.project_dir) catch |err| {
         if (err == error.ConfigInvalid) {
-            output.rawErr(io, "zenv: {s}/zenv.json is invalid ('zenv validate' shows why); using '{s}' as last built.\n", .{ entry.project_dir, entry.env_name });
+            output.rawErr(
+                io,
+                "zenv: {s}/zenv.json is invalid ('zenv validate' shows why); using '{s}' as last built.\n",
+                .{ entry.project_dir, entry.env_name },
+            );
         }
         return .none;
     }) orelse return .none;
-    defer cfg.deinit();
+    defer loaded.deinit(allocator);
 
-    const env_cfg = cfg.getEnvironment(entry.env_name) orelse return .none;
+    const env_cfg = loaded.project.getEnvironment(entry.env_name) orelse return .none;
 
     // Stamp first: without one, the hash would be computed for nothing.
     const stamp = readStamp(allocator, io, entry.venv_path) orelse return .unstamped;
     errdefer stamp.deinit();
-    const current = try computeTrackedHash(allocator, io, entry.project_dir, entry.env_name, env_cfg);
-    defer allocator.free(current);
+    const current = try hashTracked(
+        allocator,
+        io,
+        entry.project_dir,
+        entry.env_name,
+        env_cfg,
+        loaded.content,
+    );
 
-    if (std.mem.eql(u8, stamp.value.hash, current)) {
+    if (std.mem.eql(u8, stamp.value.hash, &current)) {
         stamp.deinit();
         return .none;
     }
@@ -328,14 +423,19 @@ fn drift(ctx: Ctx, entry: *const config.RegistryEntry) !Drift {
 /// venv. If the env's tracked files differ from the recorded stamp (or no stamp
 /// exists yet), silently re-runs setup first. Bypassed entirely when
 /// ZENV_NO_AUTO_SETUP is set. Never recurses: `setup` does not go through here.
-pub fn ensureUpToDate(ctx: Ctx, entry: *const config.RegistryEntry) !void {
+pub fn ensureUpToDate(ctx: Ctx, entry: *const Registry.Entry) !void {
     if (ctx.getEnv("ZENV_NO_AUTO_SETUP")) |_| return;
 
     switch (try drift(ctx, entry)) {
         .none => {},
         .changed => |stamp| {
             defer stamp.deinit();
-            try runSetup(ctx, entry, stamp.value.flags, "configuration or dependency files changed");
+            try runSetup(
+                ctx,
+                entry,
+                stamp.value.flags,
+                "configuration or dependency files changed",
+            );
         },
         // Force a one-time re-setup with no replayed flags.
         .unstamped => try runSetup(ctx, entry, &.{}, "no build record found"),
@@ -347,23 +447,27 @@ pub fn ensureUpToDate(ctx: Ctx, entry: *const config.RegistryEntry) !void {
 /// `rename` renaming the env), so the next gated command does not rebuild what
 /// is already done. Keeps the stamp's replay flags. Does nothing when the env
 /// has no stamp, or zenv.json is missing, invalid or lacks the env.
-pub fn restamp(ctx: Ctx, project_dir: []const u8, env_name: []const u8, venv_path: []const u8) !void {
+pub fn restamp(
+    ctx: Ctx,
+    project_dir: []const u8,
+    env_name: []const u8,
+    venv_path: []const u8,
+) !void {
     const allocator = ctx.arena;
     const io = ctx.io;
-    var cfg = (loadConfigQuiet(allocator, io, project_dir) catch return) orelse return;
-    defer cfg.deinit();
-    const env_cfg = cfg.getEnvironment(env_name) orelse return;
+    var loaded = (loadConfigQuiet(allocator, io, project_dir) catch return) orelse return;
+    defer loaded.deinit(allocator);
+    const env_cfg = loaded.project.getEnvironment(env_name) orelse return;
     const stamp = readStamp(allocator, io, venv_path) orelse return;
     defer stamp.deinit();
 
-    const hash = try computeTrackedHash(allocator, io, project_dir, env_name, env_cfg);
-    defer allocator.free(hash);
-    try writeStamp(allocator, io, venv_path, hash, stamp.value.flags);
+    const hash = try hashTracked(allocator, io, project_dir, env_name, env_cfg, loaded.content);
+    try writeStamp(allocator, io, venv_path, &hash, stamp.value.flags);
 }
 
 /// True when the gate would rebuild the env. Never builds: for callers that
 /// must stay fast and side-effect free, like `activate --auto` on every cd.
-pub fn isStale(ctx: Ctx, entry: *const config.RegistryEntry) !bool {
+pub fn isStale(ctx: Ctx, entry: *const Registry.Entry) !bool {
     switch (try drift(ctx, entry)) {
         .none => return false,
         .changed => |stamp| {
@@ -379,7 +483,7 @@ pub fn isStale(ctx: Ctx, entry: *const config.RegistryEntry) !bool {
 // ===========================================================================
 
 const testing = std.testing;
-const test_support = @import("../test_support.zig");
+const test_support = @import("test_support.zig");
 
 const test_config_a =
     \\{
@@ -394,17 +498,20 @@ const test_config_b =
     \\}
 ;
 
-// Recording fake backend for gate tests: notes whether a subprocess was spawned,
-// whether it asked setup to reuse the module cache, and what exit code to report.
+/// Recording fake backend for gate tests: notes whether a subprocess was spawned,
+/// whether it asked setup to reuse the module cache, and what exit code to report.
 var test_spawned: bool = false;
 var test_reuse_module_cache: bool = false;
 var test_run_exit: u8 = 0;
 
-fn recordingRun(allocator: Allocator, io: Io, argv: []const []const u8, opts: runtime.RunOptions) anyerror!runtime.RunResult {
-    _ = io;
-    _ = opts;
+fn recordingRun(
+    allocator: Allocator,
+    _: Io,
+    argv: []const []const u8,
+    _: runtime.RunOptions,
+) anyerror!runtime.RunResult {
     test_spawned = true;
-    test_reuse_module_cache = flags.CommandFlags.fromArgs(argv).reuse_module_cache;
+    test_reuse_module_cache = cli.Flags.parse(argv).reuse_module_cache;
     return .{
         .term = .{ .exited = test_run_exit },
         .stdout = try allocator.dupe(u8, ""),
@@ -412,10 +519,7 @@ fn recordingRun(allocator: Allocator, io: Io, argv: []const []const u8, opts: ru
     };
 }
 
-fn recordingExec(io: Io, argv: []const []const u8, opts: runtime.ExecOptions) anyerror!runtime.Term {
-    _ = io;
-    _ = argv;
-    _ = opts;
+fn recordingExec(_: Io, _: []const []const u8, _: runtime.ExecOptions) anyerror!runtime.Term {
     return .{ .exited = 0 };
 }
 
@@ -442,8 +546,13 @@ fn writeAt(allocator: Allocator, dir: []const u8, name: []const u8, content: []c
     try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = content });
 }
 
-fn makeEntry(allocator: Allocator, name: []const u8, project_dir: []const u8, venv_path: []const u8) !config.RegistryEntry {
-    return config.RegistryEntry{
+fn makeEntry(
+    allocator: Allocator,
+    name: []const u8,
+    project_dir: []const u8,
+    venv_path: []const u8,
+) !Registry.Entry {
+    return Registry.Entry{
         .id = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
         .env_name = try allocator.dupe(u8, name),
         .project_dir = try allocator.dupe(u8, project_dir),
@@ -460,19 +569,16 @@ test "computeTrackedHash is deterministic and content-sensitive" {
     defer cleanup(a, dir);
     try writeAt(a, dir, "zenv.json", test_config_a);
 
-    var env_cfg = config.EnvironmentConfig.init(a);
+    var env_cfg = config.Env.init(a);
     defer env_cfg.deinit();
 
-    const h1 = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h1);
-    const h2 = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h2);
+    const h1 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
+    const h2 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
     try testing.expectEqualStrings(h1, h2); // deterministic (no timestamp)
     try testing.expectEqual(@as(usize, 40), h1.len);
 
     try writeAt(a, dir, "zenv.json", test_config_b);
-    const h3 = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h3);
+    const h3 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
     try testing.expect(!std.mem.eql(u8, h1, h3)); // content change flips the hash
 
     // Adding or editing a different env in the same file leaves it alone.
@@ -483,8 +589,7 @@ test "computeTrackedHash is deterministic and content-sensitive" {
         \\  "other": { "target_machines": ["*"], "modules": ["gcc"] }
         \\}
     );
-    const h4 = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h4);
+    const h4 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
     try testing.expectEqualStrings(h3, h4);
 }
 
@@ -494,16 +599,14 @@ test "computeTrackedHash tracks dependency_file presence" {
     defer cleanup(a, dir);
     try writeAt(a, dir, "zenv.json", test_config_a);
 
-    var env_cfg = config.EnvironmentConfig.init(a);
+    var env_cfg = config.Env.init(a);
     defer env_cfg.deinit();
     env_cfg.dependency_file = try a.dupe(u8, "requirements.txt");
 
-    const h_absent = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h_absent);
+    const h_absent = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
 
     try writeAt(a, dir, "requirements.txt", "numpy\n");
-    const h_present = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h_present);
+    const h_present = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
 
     try testing.expect(!std.mem.eql(u8, h_absent, h_present));
 }
@@ -517,14 +620,13 @@ test "computeTrackedHash format is stable" {
     try writeAt(a, dir, "requirements.txt", "numpy\n");
     try writeAt(a, dir, "setup.sh", "echo hi\n");
 
-    var env_cfg = config.EnvironmentConfig.init(a);
+    var env_cfg = config.Env.init(a);
     defer env_cfg.deinit();
     env_cfg.dependency_file = try a.dupe(u8, "requirements.txt");
     env_cfg.modules_file = try a.dupe(u8, "modules.txt"); // absent
     env_cfg.setup = .{ .script = try Io.Dir.path.join(a, &.{ dir, "setup.sh" }) }; // absolute
 
-    const h = try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
-    defer a.free(h);
+    const h = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
     try testing.expectEqualStrings("ad1f98e6f973b6566a7791da680347e8d7a499d0", h);
 }
 
@@ -547,13 +649,13 @@ test "stamp round-trips and tolerates bad input" {
     defer cleanup(a, empty);
     try testing.expect(readStamp(a, testing.io, empty) == null); // absent
 
-    try writeAt(a, empty, STAMP_NAME, "not json {");
+    try writeAt(a, empty, stamp_name, "not json {");
     try testing.expect(readStamp(a, testing.io, empty) == null); // malformed
 
-    try writeAt(a, empty, STAMP_NAME, "{\"version\":999,\"hash\":\"x\",\"flags\":[]}");
+    try writeAt(a, empty, stamp_name, "{\"version\":999,\"hash\":\"x\",\"flags\":[]}");
     try testing.expect(readStamp(a, testing.io, empty) == null); // wrong version
 
-    try writeAt(a, empty, STAMP_NAME, "{\"version\":1,\"hash\":\"x\"}");
+    try writeAt(a, empty, stamp_name, "{\"version\":1,\"hash\":\"x\"}");
     const no_flags = readStamp(a, testing.io, empty).?; // flags are optional
     defer no_flags.deinit();
     try testing.expectEqual(@as(usize, 0), no_flags.value.flags.len);
@@ -585,7 +687,7 @@ test "addReplayGroup appends a group once and keeps the hash" {
 
 test "flagTokens emits only build-affecting flags" {
     const a = testing.allocator;
-    const f = flags.CommandFlags{
+    const f = cli.Flags{
         .use_uv = true,
         .no_cache = true,
         .skip_hostname_check = true, // --no-host: excluded
@@ -636,8 +738,7 @@ test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
         var cfg = try validation.validateAndParse(a, testing.io, cfg_path);
         defer cfg.deinit();
         const env_cfg = cfg.getEnvironment("zenv-test").?;
-        const h = try computeTrackedHash(a, testing.io, proj, "zenv-test", env_cfg);
-        defer a.free(h);
+        const h = &try computeTrackedHash(a, testing.io, proj, "zenv-test", env_cfg);
         try writeStamp(a, testing.io, venv, h, &.{});
     }
 
@@ -703,8 +804,13 @@ test "isStale reports drift without spawning setup" {
         defer a.free(cfg_path);
         var cfg = try validation.validateAndParse(a, testing.io, cfg_path);
         defer cfg.deinit();
-        const h = try computeTrackedHash(a, testing.io, proj, "zenv-test", cfg.getEnvironment("zenv-test").?);
-        defer a.free(h);
+        const h = &try computeTrackedHash(
+            a,
+            testing.io,
+            proj,
+            "zenv-test",
+            cfg.getEnvironment("zenv-test").?,
+        );
         try writeStamp(a, testing.io, venv, h, &.{});
     }
     try testing.expect(!try isStale(ctx, &entry)); // stamp matches

@@ -2,23 +2,23 @@
 //! blocks into the `zig build test` binary.
 
 test {
-    _ = @import("utils/validation.zig");
-    _ = @import("utils/parse_deps.zig");
-    _ = @import("utils/shell.zig");
-    _ = @import("utils/config.zig");
-    _ = @import("utils/activation.zig");
-    _ = @import("utils/venv.zig");
-    _ = @import("utils/envbuild.zig");
-    _ = @import("utils/environment.zig");
-    _ = @import("utils/jupyter.zig");
-    _ = @import("utils/host.zig");
-    _ = @import("utils/paths.zig");
-    _ = @import("utils/flags.zig");
-    _ = @import("utils/manifest.zig");
-    _ = @import("utils/autosetup.zig");
-    _ = @import("utils/envspec.zig");
-    _ = @import("utils/output.zig");
-    _ = @import("utils/hook.zig");
-    _ = @import("utils/python.zig");
+    _ = @import("validation.zig");
+    _ = @import("deps.zig");
+    _ = @import("shell.zig");
+    _ = @import("config.zig");
+    _ = @import("Registry.zig");
+    _ = @import("activation.zig");
+    _ = @import("venv.zig");
+    _ = @import("envbuild.zig");
+    _ = @import("jupyter.zig");
+    _ = @import("host.zig");
+    _ = @import("paths.zig");
+    _ = @import("cli.zig");
+    _ = @import("manifest.zig");
+    _ = @import("autosetup.zig");
+    _ = @import("envspec.zig");
+    _ = @import("output.zig");
+    _ = @import("hook.zig");
+    _ = @import("python.zig");
     _ = @import("commands.zig");
 }

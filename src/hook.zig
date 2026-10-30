@@ -15,11 +15,11 @@ pub fn forShell(shell: []const u8) ?[]const u8 {
     return null;
 }
 
-// _zenv_hook_root is the project the hook last saw ("" for none) and
-// _zenv_hook_env the ZENV_ENV_DIR it activated there. Neither is exported, so a
-// nested shell starts fresh. The hook deactivates only an env it activated
-// itself and that is still active: a manual `deactivate` or `zenv activate`
-// inside a project is left alone until you enter another project.
+/// _zenv_hook_root is the project the hook last saw ("" for none) and
+/// _zenv_hook_env the ZENV_ENV_DIR it activated there. Neither is exported, so a
+/// nested shell starts fresh. The hook deactivates only an env it activated
+/// itself and that is still active: a manual `deactivate` or `zenv activate`
+/// inside a project is left alone until you enter another project.
 const zsh =
     \\# zenv hook for zsh: activates a project's environment when you cd into
     \\# it and deactivates it when you leave. Load it from ~/.zshrc with:
@@ -54,11 +54,11 @@ const zsh =
     \\
 ;
 
-// The same hook for bash 3.2+. _zenv_hook runs from PROMPT_COMMAND before each
-// prompt: it keeps $? for prompts that show it and calls _zenv_hook_chpwd (the
-// zsh hook's body) only when $PWD changed since the last prompt, which keeps
-// the per-prompt cost to one string compare. It is prepended to element 0 of
-// PROMPT_COMMAND, which works whether that is a string or (bash 5.1+) an array.
+/// The same hook for bash 3.2+. _zenv_hook runs from PROMPT_COMMAND before each
+/// prompt: it keeps $? for prompts that show it and calls _zenv_hook_chpwd (the
+/// zsh hook's body) only when $PWD changed since the last prompt, which keeps
+/// the per-prompt cost to one string compare. It is prepended to element 0 of
+/// PROMPT_COMMAND, which works whether that is a string or (bash 5.1+) an array.
 const bash =
     \\# zenv hook for bash: activates a project's environment when you cd into
     \\# it and deactivates it when you leave. Load it at the end of ~/.bashrc with:

@@ -14,8 +14,8 @@ const Version = union(enum) {
     }
 };
 
-// Tries to get version info from git describe
-// Adapted from https://github.com/kristoff-it/zine/blob/main/build.zig
+/// Tries to get version info from git describe
+/// Adapted from https://github.com/kristoff-it/zine/blob/main/build.zig
 fn getVersion(b: *std.Build) Version {
     // Allow overriding via build option first
     if (b.option([]const u8, "version", "Override the version string")) |ver| {
@@ -65,7 +65,7 @@ fn getVersion(b: *std.Build) Version {
     }
 }
 
-// Target definitions for release builds
+/// Target definitions for release builds
 const ReleaseTarget = struct {
     query: std.Target.Query,
     name: []const u8,
@@ -100,10 +100,22 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Add release-safe option for building with assertions enabled
-    const release_safe = b.option(bool, "release-safe", "Build with ReleaseSafe mode (optimized but with assertions)") orelse false;
-    const small_release = b.option(bool, "small-release", "Build with ReleaseSmall mode (optimize for binary size)") orelse false;
+    const release_safe = b.option(
+        bool,
+        "release-safe",
+        "Build with ReleaseSafe mode (optimized but with assertions)",
+    ) orelse false;
+    const small_release = b.option(
+        bool,
+        "small-release",
+        "Build with ReleaseSmall mode (optimize for binary size)",
+    ) orelse false;
     // Add option to force releases even without a tag
-    const force_release = b.option(bool, "force-release", "Allow release builds without git tags") orelse false;
+    const force_release = b.option(
+        bool,
+        "force-release",
+        "Allow release builds without git tags",
+    ) orelse false;
 
     // Determine effective optimization level
     const effective_optimize: std.lang.Optimize = if (small_release)
@@ -117,28 +129,14 @@ pub fn build(b: *std.Build) !void {
     const version = getVersion(b);
     const version_string = version.string(); // Get the final string representation
 
-    // Create the options module
-    const options_module = b.addOptions();
-    options_module.addOption([]const u8, "version", version_string);
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version_string);
+    const options = build_options.createModule();
 
-    // Create the executable
     const exe = b.addExecutable(.{
         .name = "zenv",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = effective_optimize,
-        }),
+        .root_module = zenvModule(b, "src/main.zig", target, effective_optimize, null, options),
     });
-
-    // Add the options module as an import named "options"
-    exe.root_module.addImport("options", options_module.createModule());
-
-    // Add the zig-toml parser as an import named "toml" (used by utils/parse_deps.zig)
-    const toml_dep = b.dependency("toml", .{ .target = target, .optimize = effective_optimize });
-    exe.root_module.addImport("toml", toml_dep.module("toml"));
-
-    // Link standard library, etc.
     b.installArtifact(exe);
 
     // Add a run step
@@ -157,15 +155,8 @@ pub fn build(b: *std.Build) !void {
 
     // Add a `zig build test` step that runs the unit tests.
     const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = zenvModule(b, "src/test_root.zig", target, optimize, null, options),
     });
-    // utils/parse_deps.zig imports "toml"; utils/venv.zig imports "options".
-    unit_tests.root_module.addImport("toml", toml_dep.module("toml"));
-    unit_tests.root_module.addImport("options", options_module.createModule());
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -174,11 +165,16 @@ pub fn build(b: *std.Build) !void {
     // Each target is archived once; its per-target step and the all-targets
     // step share that archive. Without a tag every release step fails instead.
     const tagged = version == .tag or force_release;
-    const fail = &b.addFail("error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.").step;
+    const fail = &b.addFail(
+        "error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.",
+    ).step;
     const release_step = b.step("release", "Create release builds for all targets");
     for (release_targets) |release_target| {
-        const archive = if (tagged) releaseArchive(b, options_module, release_target.query) else fail;
-        b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create release build for {s}", .{release_target.description})).dependOn(archive);
+        const archive = if (tagged) releaseArchive(b, options, release_target.query) else fail;
+        b.step(
+            b.fmt("release-{s}", .{release_target.name}),
+            b.fmt("Create release build for {s}", .{release_target.description}),
+        ).dependOn(archive);
         release_step.dependOn(archive);
     }
 }
@@ -191,21 +187,14 @@ pub fn build(b: *std.Build) !void {
 /// nothing measurable. Stripped, since ReleaseSafe keeps debug info by default.
 fn releaseArchive(
     b: *std.Build,
-    options: *std.Build.Step.Options,
+    options: *std.Build.Module,
     query: std.Target.Query,
 ) *std.Build.Step {
     const target = b.resolveTargetQuery(query);
     const exe = b.addExecutable(.{
         .name = "zenv",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = .safe,
-            .strip = true,
-        }),
+        .root_module = zenvModule(b, "src/main.zig", target, .safe, true, options),
     });
-    exe.root_module.addImport("options", options.createModule());
-    exe.root_module.addImport("toml", b.dependency("toml", .{ .target = target, .optimize = .safe }).module("toml"));
 
     const t = target.result;
     const archive_name = b.fmt("zenv-{t}-{t}{s}.tar.gz", .{
@@ -219,4 +208,28 @@ fn releaseArchive(
     tar.addDirectoryArg(exe.getEmittedBinDirectory());
     tar.addArg("zenv");
     return &b.addInstallFileWithDir(archive, .{ .custom = "releases" }, archive_name).step;
+}
+
+/// A module rooted at `root` with zenv's imports: the build `options` and the
+/// zig-toml parser (`toml`).
+fn zenvModule(
+    b: *std.Build,
+    root: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    strip: ?bool,
+    options: *std.Build.Module,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(root),
+        .target = target,
+        .optimize = optimize,
+        .strip = strip,
+    });
+    module.addImport("options", options);
+    module.addImport(
+        "toml",
+        b.dependency("toml", .{ .target = target, .optimize = optimize }).module("toml"),
+    );
+    return module;
 }

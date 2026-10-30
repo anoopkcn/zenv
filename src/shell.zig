@@ -56,12 +56,23 @@ pub fn fsq(value: []const u8) Quoted {
 /// activate. A relative `hook_path` is tried relative to `cwd_path` (where
 /// zenv.json is), then relative to the process cwd. Allocates with `a` (use an
 /// arena).
-pub fn copyHookScript(a: Allocator, io: Io, hook_path: []const u8, venv_dir: []const u8, dest_name: []const u8, cwd_path: []const u8) ![]const u8 {
+pub fn copyHookScript(
+    a: Allocator,
+    io: Io,
+    hook_path: []const u8,
+    venv_dir: []const u8,
+    dest_name: []const u8,
+    cwd_path: []const u8,
+) ![]const u8 {
     const src = if (Io.Dir.path.isAbsolute(hook_path)) hook_path else blk: {
         const rel_path = try Io.Dir.path.join(a, &.{ cwd_path, hook_path });
         if (runtime.exists(io, rel_path)) break :blk rel_path;
         if (runtime.exists(io, hook_path)) break :blk hook_path;
-        output.printError(io, "Hook script not found: tried '{s}' and '{s}'", .{ hook_path, rel_path });
+        output.printError(
+            io,
+            "Hook script not found: tried '{s}' and '{s}'",
+            .{ hook_path, rel_path },
+        );
         return error.FileNotFound;
     };
     const dest = try Io.Dir.path.join(a, &.{ venv_dir, "scripts", dest_name });
@@ -74,9 +85,18 @@ pub fn copyHookScript(a: Allocator, io: Io, hook_path: []const u8, venv_dir: []c
 test "Quoted escapes for each shell" {
     var buf: [128]u8 = undefined;
     const v = "it's \\ and !";
-    try std.testing.expectEqualStrings("it'\\''s \\ and !", try std.fmt.bufPrint(&buf, "{f}", .{sq(v)}));
-    try std.testing.expectEqualStrings("it'\\''s \\ and \\!", try std.fmt.bufPrint(&buf, "{f}", .{csq(v)}));
-    try std.testing.expectEqualStrings("it\\'s \\\\ and !", try std.fmt.bufPrint(&buf, "{f}", .{fsq(v)}));
+    try std.testing.expectEqualStrings(
+        "it'\\''s \\ and !",
+        try std.fmt.bufPrint(&buf, "{f}", .{sq(v)}),
+    );
+    try std.testing.expectEqualStrings(
+        "it'\\''s \\ and \\!",
+        try std.fmt.bufPrint(&buf, "{f}", .{csq(v)}),
+    );
+    try std.testing.expectEqualStrings(
+        "it\\'s \\\\ and !",
+        try std.fmt.bufPrint(&buf, "{f}", .{fsq(v)}),
+    );
 }
 
 test "copyHookScript resolves against cwd_path and creates scripts/ with mode 0755" {
@@ -92,11 +112,24 @@ test "copyHookScript resolves against cwd_path and creates scripts/ with mode 07
     try cwd.createDirPath(io, root ++ "/project");
     try cwd.writeFile(io, .{ .sub_path = root ++ "/project/hook.sh", .data = "echo hi\n" });
 
-    const dest = try copyHookScript(a, io, "hook.sh", root ++ "/venv", "activate_hook.sh", root ++ "/project");
+    const dest = try copyHookScript(
+        a,
+        io,
+        "hook.sh",
+        root ++ "/venv",
+        "activate_hook.sh",
+        root ++ "/project",
+    );
     try std.testing.expectEqualStrings(root ++ "/venv/scripts/activate_hook.sh", dest);
-    try std.testing.expectEqualStrings("echo hi\n", try cwd.readFileAlloc(io, dest, a, .limited(1024)));
+    try std.testing.expectEqualStrings(
+        "echo hi\n",
+        try cwd.readFileAlloc(io, dest, a, .limited(1024)),
+    );
     const st = try cwd.statFile(io, dest, .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), st.permissions.toMode() & 0o777);
 
-    try std.testing.expectError(error.FileNotFound, copyHookScript(a, io, "missing.sh", root ++ "/venv", "x.sh", root ++ "/project"));
+    try std.testing.expectError(
+        error.FileNotFound,
+        copyHookScript(a, io, "missing.sh", root ++ "/venv", "x.sh", root ++ "/project"),
+    );
 }

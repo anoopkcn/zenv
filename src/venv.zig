@@ -25,7 +25,7 @@ const shell = @import("shell.zig");
 
 /// Run by the base interpreter (with `-I`) to describe itself and the venv
 /// layout for `sys.argv[1]`. Mirrors venv.EnvBuilder.ensure_directories.
-const QUERY_SCRIPT =
+const query_script =
     \\import json, os, sys, sysconfig
     \\venv = sys.argv[1]
     \\exe = getattr(sys, "_base_executable", None) or sys.executable
@@ -69,8 +69,14 @@ pub const Interpreter = struct {
 /// Results are allocated with `a` (use an arena).
 /// `env` is the environment to run it in (a module Python may need the
 /// module's LD_LIBRARY_PATH); null means zenv's own.
-pub fn query(a: Allocator, io: Io, python: []const u8, venv_dir: []const u8, env: ?*const std.process.Environ.Map) !Interpreter {
-    const res = runtime.run(a, io, &.{ python, "-I", "-c", QUERY_SCRIPT, venv_dir }, .{
+pub fn query(
+    a: Allocator,
+    io: Io,
+    python: []const u8,
+    venv_dir: []const u8,
+    env: ?*const std.process.Environ.Map,
+) !Interpreter {
+    const res = runtime.run(a, io, &.{ python, "-I", "-c", query_script, venv_dir }, .{
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
         .environ_map = env,
@@ -79,13 +85,17 @@ pub fn query(a: Allocator, io: Io, python: []const u8, venv_dir: []const u8, env
         return error.PythonQueryFailed;
     };
     if (!res.term.success()) {
-        output.printError(io, "Python '{s}' failed to describe itself:\n{s}", .{ python, res.stderr });
+        output.printError(
+            io,
+            "Python '{s}' failed to describe itself:\n{s}",
+            .{ python, res.stderr },
+        );
         return error.PythonQueryFailed;
     }
     return parseQuery(a, res.stdout);
 }
 
-pub fn parseQuery(a: Allocator, text: []const u8) !Interpreter {
+fn parseQuery(a: Allocator, text: []const u8) !Interpreter {
     const info = json.parseFromSliceLeaky(Interpreter, a, text, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -97,7 +107,7 @@ pub fn parseQuery(a: Allocator, text: []const u8) !Interpreter {
 /// Names linked in `bin/`, after the interpreter's own basename: `python`,
 /// `python3`, `python3.X`, plus `python3.Xt` for free-threaded builds, as
 /// `venv` creates them. Excludes `exe_name` itself.
-pub fn linkNames(a: Allocator, info: *const Interpreter, exe_name: []const u8) ![]const []const u8 {
+fn linkNames(a: Allocator, info: *const Interpreter, exe_name: []const u8) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     const candidates = [_][]const u8{
         "python",
@@ -117,7 +127,7 @@ pub fn linkNames(a: Allocator, info: *const Interpreter, exe_name: []const u8) !
 
 /// The `pyvenv.cfg` contents. `home` is the base interpreter's directory,
 /// which is what the interpreter uses to find its standard library.
-pub fn pyvenvCfg(a: Allocator, info: *const Interpreter, zenv_version: []const u8) ![]u8 {
+fn pyvenvCfg(a: Allocator, info: *const Interpreter, zenv_version: []const u8) ![]u8 {
     return a.print(
         \\home = {s}
         \\include-system-site-packages = false
@@ -125,12 +135,28 @@ pub fn pyvenvCfg(a: Allocator, info: *const Interpreter, zenv_version: []const u
         \\executable = {s}
         \\zenv = {s}
         \\
-    , .{ std.Io.Dir.path.dirname(info.base_executable) orelse "/", info.version, info.real_executable, zenv_version });
+    , .{
+        std.Io.Dir.path.dirname(info.base_executable) orelse "/",
+        info.version,
+        info.real_executable,
+        zenv_version,
+    });
 }
 
 /// Creates the link unless something (even a dangling link) is already there.
+/// Keeps everything in `venv_dir` out of git.
+pub fn writeGitignore(a: Allocator, io: Io, venv_dir: []const u8) !void {
+    const path = try Io.Dir.path.join(a, &.{ venv_dir, ".gitignore" });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "# Created by zenv\n*\n" });
+}
+
 fn symlinkIfMissing(io: Io, target: []const u8, link_path: []const u8, is_dir: bool) !void {
-    Io.Dir.cwd().symLink(io, target, link_path, .{ .is_directory = is_dir }) catch |err| switch (err) {
+    Io.Dir.cwd().symLink(
+        io,
+        target,
+        link_path,
+        .{ .is_directory = is_dir },
+    ) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -144,15 +170,27 @@ fn writeShims(a: Allocator, io: Io, scripts: []const u8, venv_dir: []const u8) !
         .{ "activate.csh", "", "source", "activate.csh", shell.csq },
         .{ "activate.fish", "", "source", "activate.fish", shell.fsq },
     }) |s| {
-        const text = try a.print("# Created by zenv. Sourcing bin/" ++ s[0] ++ s[1] ++ " runs zenv's activation.\n" ++ s[2] ++ " '{f}/" ++ s[3] ++ "'\n", .{s[4](venv_dir)});
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = try Io.Dir.path.join(a, &.{ scripts, s[0] }), .data = text });
+        const text = try a.print(
+            "# Created by zenv. Sourcing bin/" ++ s[0] ++ s[1] ++ " runs zenv's activation.\n" ++ s[2] ++ " '{f}/" ++ s[3] ++ "'\n",
+            .{s[4](venv_dir)},
+        );
+        try Io.Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = try Io.Dir.path.join(a, &.{ scripts, s[0] }), .data = text },
+        );
     }
 }
 
 /// Creates the venv at `venv_dir` (absolute) for interpreter `python` (an
 /// absolute path), querying it in `env`. Idempotent: existing links are kept,
 /// pyvenv.cfg and the shims are rewritten. Allocates with `a` (use an arena).
-pub fn create(a: Allocator, io: Io, python: []const u8, venv_dir: []const u8, env: ?*const std.process.Environ.Map) !void {
+pub fn create(
+    a: Allocator,
+    io: Io,
+    python: []const u8,
+    venv_dir: []const u8,
+    env: ?*const std.process.Environ.Map,
+) !void {
     const cwd = Io.Dir.cwd();
     const join = Io.Dir.path.join;
     if (!Io.Dir.path.isAbsolute(venv_dir)) return error.VenvPathNotAbsolute;
@@ -161,23 +199,106 @@ pub fn create(a: Allocator, io: Io, python: []const u8, venv_dir: []const u8, en
 
     // `venv` creates a plain include/ whatever the scheme says.
     const include = try join(a, &.{ venv_dir, "include" });
-    for ([_][]const u8{ info.scripts, info.purelib, info.platlib, include }) |dir| try cwd.createDirPath(io, dir);
+    for ([_][]const u8{
+        info.scripts,
+        info.purelib,
+        info.platlib,
+        include,
+    }) |dir| try cwd.createDirPath(
+        io,
+        dir,
+    );
     if (info.lib64_link) {
         try symlinkIfMissing(io, "lib", try join(a, &.{ venv_dir, "lib64" }), true);
     }
 
     // bin/<exe> -> base interpreter; python, python3, python3.X -> <exe>.
     const exe_name = Io.Dir.path.basename(info.base_executable);
-    try symlinkIfMissing(io, info.base_executable, try join(a, &.{ info.scripts, exe_name }), false);
+    try symlinkIfMissing(
+        io,
+        info.base_executable,
+        try join(a, &.{ info.scripts, exe_name }),
+        false,
+    );
     for (try linkNames(a, &info, exe_name)) |name| {
         try symlinkIfMissing(io, exe_name, try join(a, &.{ info.scripts, name }), false);
     }
 
-    try cwd.writeFile(io, .{ .sub_path = try join(a, &.{ venv_dir, "pyvenv.cfg" }), .data = try pyvenvCfg(a, &info, options.version) });
-    try cwd.writeFile(io, .{ .sub_path = try join(a, &.{ venv_dir, ".gitignore" }), .data = "# Created by zenv\n*\n" });
+    try cwd.writeFile(
+        io,
+        .{
+            .sub_path = try join(a, &.{ venv_dir, "pyvenv.cfg" }),
+            .data = try pyvenvCfg(a, &info, options.version),
+        },
+    );
+    try writeGitignore(a, io, venv_dir);
     try writeShims(a, io, info.scripts, venv_dir);
 
-    output.print(io, "Created virtual environment {s} (Python {s}, from {s})", .{ venv_dir, info.version, info.base_executable });
+    output.print(
+        io,
+        "Created virtual environment {s} (Python {s}, from {s})",
+        .{ venv_dir, info.version, info.base_executable },
+    );
+}
+
+/// Fields extracted from a pyvenv.cfg body. Slices point INTO the input.
+const PyvenvFields = struct { version: ?[]const u8, path: ?[]const u8 };
+
+/// Pure parser for pyvenv.cfg contents. `version` is the `version =` value.
+/// `path` is the best-available interpreter path across Python versions:
+/// `executable =` (3.11+) -> first token of `command =` (3.x, incl. zenv's
+/// default 3.10) -> `home =` (the bin dir). Returns nulls when absent.
+fn parsePyvenvCfg(content: []const u8) PyvenvFields {
+    var version: ?[]const u8 = null;
+    var executable: ?[]const u8 = null;
+    var home: ?[]const u8 = null;
+    var command: ?[]const u8 = null;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const raw_key, const raw_val = std.mem.cutScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, raw_key, " \t\r");
+        const val = std.mem.trim(u8, raw_val, " \t\r");
+        if (std.mem.eql(u8, key, "version")) {
+            version = val;
+        } else if (std.mem.eql(u8, key, "executable")) {
+            executable = val;
+        } else if (std.mem.eql(u8, key, "home")) {
+            home = val;
+        } else if (std.mem.eql(u8, key, "command")) {
+            command = val;
+        }
+    }
+
+    var path: ?[]const u8 = executable;
+    if (path == null) {
+        if (command) |cmd| {
+            const first = std.mem.sliceTo(cmd, ' ');
+            if (first.len > 0) path = first;
+        }
+    }
+    if (path == null) path = home;
+
+    return .{ .version = version, .path = path };
+}
+
+/// Reads <venv_path>/pyvenv.cfg and returns the Python that built the venv: its
+/// interpreter path, or its version when no path is recorded. Returns null if
+/// the file is absent/unreadable (env not built) or has no `version`. Caller
+/// owns the result.
+pub fn readPython(allocator: Allocator, io: Io, venv_path: []const u8) !?[]u8 {
+    const cfg_path = try Io.Dir.path.join(allocator, &.{ venv_path, "pyvenv.cfg" });
+    defer allocator.free(cfg_path);
+
+    const content = Io.Dir.cwd().readFileAlloc(io, cfg_path, allocator, .limited(64 * 1024)) catch {
+        // Missing or unreadable -> treat as "not built"; list output stays robust.
+        return null;
+    };
+    defer allocator.free(content);
+
+    const fields = parsePyvenvCfg(content);
+    const version = fields.version orelse return null;
+    return try allocator.dupe(u8, fields.path orelse version);
 }
 
 // ============================ Tests ============================
@@ -254,9 +375,69 @@ test "writeShims quote the venv path for each shell" {
     try writeShims(a, io, root, "/p/it's!");
 
     const sh = try cwd.readFileAlloc(io, root ++ "/activate", a, .limited(1024));
-    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate (IDEs, scripts) runs zenv's activation.\n. '/p/it'\\''s!/activate.sh'\n", sh);
+    try testing.expectEqualStrings(
+        "# Created by zenv. Sourcing bin/activate (IDEs, scripts) runs zenv's activation.\n. '/p/it'\\''s!/activate.sh'\n",
+        sh,
+    );
     const csh = try cwd.readFileAlloc(io, root ++ "/activate.csh", a, .limited(1024));
-    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate.csh runs zenv's activation.\nsource '/p/it'\\''s\\!/activate.csh'\n", csh);
+    try testing.expectEqualStrings(
+        "# Created by zenv. Sourcing bin/activate.csh runs zenv's activation.\nsource '/p/it'\\''s\\!/activate.csh'\n",
+        csh,
+    );
     const fish = try cwd.readFileAlloc(io, root ++ "/activate.fish", a, .limited(1024));
-    try testing.expectEqualStrings("# Created by zenv. Sourcing bin/activate.fish runs zenv's activation.\nsource '/p/it\\'s!/activate.fish'\n", fish);
+    try testing.expectEqualStrings(
+        "# Created by zenv. Sourcing bin/activate.fish runs zenv's activation.\nsource '/p/it\\'s!/activate.fish'\n",
+        fish,
+    );
+}
+
+test "parsePyvenvCfg: 3.11-style uses executable path" {
+    const content =
+        \\home = /opt/python/3.11/bin
+        \\include-system-site-packages = false
+        \\version = 3.11.5
+        \\executable = /opt/python/3.11/bin/python3.11
+        \\command = /opt/python/3.11/bin/python3.11 -m venv /p/zenv/e
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.11.5", f.version.?);
+    try testing.expectEqualStrings("/opt/python/3.11/bin/python3.11", f.path.?);
+}
+
+test "parsePyvenvCfg: 3.10-style (no executable) falls back to command's first token" {
+    const content =
+        \\home = /opt/python/3.10/bin
+        \\include-system-site-packages = false
+        \\version = 3.10.8
+        \\command = /opt/python/3.10/bin/python3.10 -m venv /p/zenv/e
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.10.8", f.version.?);
+    try testing.expectEqualStrings("/opt/python/3.10/bin/python3.10", f.path.?);
+}
+
+test "parsePyvenvCfg: only version + home falls back to home" {
+    const content =
+        \\home = /usr/bin
+        \\version = 3.9.2
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.9.2", f.version.?);
+    try testing.expectEqualStrings("/usr/bin", f.path.?);
+}
+
+test "parsePyvenvCfg: missing version yields null (caller omits the line)" {
+    const content =
+        \\home = /usr/bin
+        \\include-system-site-packages = false
+    ;
+    const f = parsePyvenvCfg(content);
+    try testing.expect(f.version == null);
+}
+
+test "parsePyvenvCfg: tolerates CRLF and irregular spacing around '='" {
+    const content = "version=3.12.1\r\nexecutable   =   /x/py\r\n";
+    const f = parsePyvenvCfg(content);
+    try testing.expectEqualStrings("3.12.1", f.version.?);
+    try testing.expectEqualStrings("/x/py", f.path.?);
 }

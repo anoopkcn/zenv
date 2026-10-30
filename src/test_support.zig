@@ -2,7 +2,7 @@
 //! `zig build test`.
 
 const std = @import("std");
-const runtime = @import("utils/runtime.zig");
+const runtime = @import("runtime.zig");
 
 /// A context over `std.testing.io` with `env` as the environment.
 pub fn ctx(arena: std.mem.Allocator, env: *const std.process.Environ.Map) runtime.Ctx {
@@ -10,7 +10,10 @@ pub fn ctx(arena: std.mem.Allocator, env: *const std.process.Environ.Map) runtim
 }
 
 /// An empty environment for tests that need none.
-pub const no_env: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.testing.failing_allocator };
+pub const no_env: std.process.Environ.Map = .{
+    .array_hash_map = .empty,
+    .allocator = std.testing.failing_allocator,
+};
 
 // --- Fake process-execution backend -----------------------------------------
 // Set the canned values, install with useFakeExec(), and restore the returned
@@ -23,10 +26,12 @@ pub var fake_run_stderr: []const u8 = "";
 pub var fake_run_exit: u8 = 0;
 pub var fake_exec_exit: u8 = 0;
 
-fn fakeRun(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, opts: runtime.RunOptions) anyerror!runtime.RunResult {
-    _ = io;
-    _ = argv;
-    _ = opts;
+fn fakeRun(
+    allocator: std.mem.Allocator,
+    _: std.Io,
+    _: []const []const u8,
+    _: runtime.RunOptions,
+) anyerror!runtime.RunResult {
     return .{
         .term = .{ .exited = fake_run_exit },
         .stdout = try allocator.dupe(u8, fake_run_stdout),
@@ -34,10 +39,7 @@ fn fakeRun(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, o
     };
 }
 
-fn fakeExec(io: std.Io, argv: []const []const u8, opts: runtime.ExecOptions) anyerror!runtime.Term {
-    _ = io;
-    _ = argv;
-    _ = opts;
+fn fakeExec(_: std.Io, _: []const []const u8, _: runtime.ExecOptions) anyerror!runtime.Term {
     return .{ .exited = fake_exec_exit };
 }
 

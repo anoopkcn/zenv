@@ -1,21 +1,24 @@
+//! Validates a zenv.json and builds its `config.Project` in one pass, with
+//! every problem reported at its line and field.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const json = std.json;
 const paths = @import("paths.zig");
 const output = @import("output.zig");
-const config_module = @import("config.zig");
+const config = @import("config.zig");
 const envspec = @import("envspec.zig");
 
-/// Represents an error found during validation
-pub const ValidationError = struct {
+/// One problem found in a zenv.json, with its position when known.
+pub const Problem = struct {
     line: usize = 0,
     column: usize = 0,
     message: []const u8,
     context: ?[]const u8 = null,
     field_path: ?[]const u8 = null,
 
-    pub fn deinit(self: *ValidationError, allocator: Allocator) void {
+    pub fn deinit(self: *Problem, allocator: Allocator) void {
         allocator.free(self.message);
         if (self.context) |ctx| allocator.free(ctx);
         if (self.field_path) |path| allocator.free(path);
@@ -23,18 +26,35 @@ pub const ValidationError = struct {
 };
 
 const StrList = std.ArrayList([]const u8);
-const ErrorList = std.ArrayList(ValidationError);
+const ErrorList = std.ArrayList(Problem);
+
+/// Records a problem whose message and field path are formatted from
+/// `message`/`message_args` and `path`/`path_args`.
+fn addProblem(
+    allocator: Allocator,
+    errors: *ErrorList,
+    comptime message: []const u8,
+    message_args: anytype,
+    comptime path: []const u8,
+    path_args: anytype,
+) !void {
+    const owned_message = try allocator.print(message, message_args);
+    errdefer allocator.free(owned_message);
+    const owned_path = try allocator.print(path, path_args);
+    errdefer allocator.free(owned_path);
+    try errors.append(allocator, .{ .message = owned_message, .field_path = owned_path });
+}
 
 /// Outcome of the single parse-and-validate seam: either the built config or the
 /// full list of positioned errors, never both.
 pub const LoadResult = union(enum) {
-    config: config_module.ZenvConfig,
+    config: config.Project,
     errors: ErrorList,
 };
 
 /// THE parse-and-validate seam. Parses `content` once (an owned tree, with
 /// Diagnostics for syntax positions), then walks it a single time to BOTH
-/// validate and build the typed `ZenvConfig`. The schema — every field name,
+/// validate and build the typed `config.Project`. The schema — every field name,
 /// type, required-ness, and the environment whitelist — is described exactly
 /// here and nowhere else. A passing result therefore guarantees the config also
 /// builds, which is the whole point of unifying the two former encodings.
@@ -47,14 +67,19 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
-    var parsed = json.parseFromTokenSource(json.Value, allocator, &scanner, .{}) catch |err| switch (err) {
+    var parsed = json.parseFromTokenSource(
+        json.Value,
+        allocator,
+        &scanner,
+        .{},
+    ) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
-            try errors.append(allocator, ValidationError{
+            try errors.append(allocator, Problem{
                 .line = diag.getLine(),
                 .column = diag.getColumn(),
                 .message = try allocator.print("Invalid JSON syntax: {t}", .{err}),
-                .context = getContextAroundPosition(allocator, content, diag.getLine()) catch null,
+                .context = lineAt(allocator, content, diag.getLine()) catch null,
                 // field_path left null: a syntax error has no schema path.
             });
             return .{ .errors = errors };
@@ -65,36 +90,32 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
 
     const root = parsed.value;
     if (root != .object) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.dupe(u8, "Root configuration must be a JSON object"),
-            .field_path = try allocator.dupe(u8, ""),
-        });
+        try addProblem(
+            allocator,
+            &errors,
+            "Root configuration must be a JSON object",
+            .{},
+            "",
+            .{},
+        );
         return .{ .errors = errors };
     }
 
-    var config = config_module.ZenvConfig{
+    var project = config.Project{
         .allocator = allocator,
-        .base_dir = try allocator.dupe(u8, ".zenv"), // safe default; always deinit-able
+        .base_dir = try allocator.dupe(u8, ".zenv"), // the default when absent
     };
-    errdefer config.deinit();
+    errdefer project.deinit();
 
-    // base_dir: required string.
+    // base_dir: optional string.
     if (root.object.get("base_dir")) |bd| {
         if (bd == .string) {
             const dup = try allocator.dupe(u8, bd.string);
-            allocator.free(config.base_dir);
-            config.base_dir = dup;
+            allocator.free(project.base_dir);
+            project.base_dir = dup;
         } else {
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.dupe(u8, "'base_dir' must be a string"),
-                .field_path = try allocator.dupe(u8, "base_dir"),
-            });
+            try addProblem(allocator, &errors, "'base_dir' must be a string", .{}, "base_dir", .{});
         }
-    } else {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.dupe(u8, "Missing required 'base_dir' field"),
-            .field_path = try allocator.dupe(u8, ""),
-        });
     }
 
     // Environments: every top-level key except base_dir.
@@ -103,90 +124,101 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
         if (std.mem.eql(u8, key, "base_dir")) continue;
         has_envs = true;
         if (!paths.isValidEnvName(key)) {
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.print("Invalid environment name '{s}': use letters, digits, '_', '-' and '.' (not '.' or '..')", .{key}),
-                .field_path = try allocator.dupe(u8, key),
-            });
+            try addProblem(
+                allocator,
+                &errors,
+                "Invalid environment name '{s}': use letters, digits, '_', '-' and '.' (not '.' or '..')",
+                .{key},
+                "{s}",
+                .{key},
+            );
             continue;
         }
 
-        if (try validateAndBuildEnvironment(allocator, &errors, env_value, key)) |built| {
+        if (try buildEnv(allocator, &errors, env_value, key)) |built| {
             var env = built;
             errdefer env.deinit();
             const env_key = try allocator.dupe(u8, key);
             errdefer allocator.free(env_key);
-            try config.environments.put(allocator, env_key, env);
+            try project.environments.put(allocator, env_key, env);
         }
     }
 
     if (!has_envs) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.dupe(u8, "At least one environment must be defined"),
-            .field_path = try allocator.dupe(u8, ""),
-        });
+        try addProblem(
+            allocator,
+            &errors,
+            "At least one environment must be defined",
+            .{},
+            "",
+            .{},
+        );
     }
 
     if (errors.items.len > 0) {
-        fillPositions(allocator, content, errors.items) catch {}; // positions are best-effort
-        config.deinit();
+        fillPositions(allocator, content, errors.items);
+        project.deinit();
         return .{ .errors = errors };
     }
 
     errors.deinit(allocator);
-    return .{ .config = config };
+    return .{ .config = project };
 }
 
-/// Validates one environment AND builds its `EnvironmentConfig` in the same pass.
+/// Validates one environment AND builds its `config.Env` in the same pass.
 /// Records positioned errors for any problem and returns the always-deinit-safe
 /// env (the caller discards it if the overall config has any errors), or null
 /// when the value isn't an object.
-fn validateAndBuildEnvironment(
+fn buildEnv(
     allocator: Allocator,
     errors: *ErrorList,
     value: json.Value,
     env_name: []const u8,
-) !?config_module.EnvironmentConfig {
+) !?config.Env {
     if (value != .object) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.print("Environment '{s}' must be an object", .{env_name}),
-            .field_path = try allocator.dupe(u8, env_name),
-        });
+        try addProblem(
+            allocator,
+            errors,
+            "Environment '{s}' must be an object",
+            .{env_name},
+            "{s}",
+            .{env_name},
+        );
         return null;
     }
 
-    var env = config_module.EnvironmentConfig.init(allocator);
+    var env = config.Env.init(allocator);
     errdefer env.deinit();
 
     // target_machines: required, non-empty array of strings.
     if (value.object.get("target_machines")) |tm| {
         if (tm == .array and tm.array.items.len == 0) {
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.print("In environment '{s}', 'target_machines' must not be empty", .{env_name}),
-                .field_path = try allocator.print("{s}.target_machines", .{env_name}),
-            });
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', 'target_machines' must not be empty",
+                .{env_name},
+                "{s}.target_machines",
+                .{env_name},
+            );
         }
     } else {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.print("Environment '{s}' is missing required 'target_machines' field", .{env_name}),
-            .field_path = try allocator.dupe(u8, env_name),
-        });
+        try addProblem(
+            allocator,
+            errors,
+            "Environment '{s}' is missing required 'target_machines' field",
+            .{env_name},
+            "{s}",
+            .{env_name},
+        );
     }
-    try buildOptStringArray(allocator, errors, value, env_name, "target_machines", &env.target_machines);
+    // The typed fields, in the order their errors are reported.
+    inline for (.{
+        "target_machines", "description",  "fallback_python",  "modules_file", "dependency_file",
+        "modules",         "dependencies", "dev_dependencies", "module_cache", "python",
+    }) |field| try buildField(allocator, errors, value, env_name, field, &@field(env, field));
 
-    // Optional string fields.
-    try buildOptString(allocator, errors, value, env_name, "description", &env.description);
-    try buildOptString(allocator, errors, value, env_name, "fallback_python", &env.fallback_python);
-    try buildOptString(allocator, errors, value, env_name, "modules_file", &env.modules_file);
-    try buildOptString(allocator, errors, value, env_name, "dependency_file", &env.dependency_file);
-
-    // Optional string arrays.
-    try buildOptStringArray(allocator, errors, value, env_name, "modules", &env.modules);
-    try buildOptStringArray(allocator, errors, value, env_name, "dependencies", &env.dependencies);
-    try buildOptStringArray(allocator, errors, value, env_name, "dev_dependencies", &env.dev_dependencies);
-
-    // Optional booleans. A Python-free env has nothing to install into.
-    try buildOptBool(allocator, errors, value, env_name, "module_cache", &env.module_cache);
-    try buildOptBool(allocator, errors, value, env_name, "python", &env.python);
+    // A Python-free env has nothing to install into.
     if (!env.python) {
         const fields = [_]struct { name: []const u8, set: bool }{
             .{ .name = "dependencies", .set = env.dependencies.items.len > 0 },
@@ -195,18 +227,21 @@ fn validateAndBuildEnvironment(
         };
         for (fields) |f| {
             if (!f.set) continue;
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.print("In environment '{s}', '{s}' needs Python, but 'python' is false. Set \"python\": true or remove '{s}'.", .{ env_name, f.name, f.name }),
-                .field_path = try allocator.print("{s}.{s}", .{ env_name, f.name }),
-            });
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}' needs Python, but 'python' is false. Set \"python\": true or remove '{s}'.",
+                .{ env_name, f.name, f.name },
+                "{s}.{s}",
+                .{ env_name, f.name },
+            );
         }
     }
 
     try buildEnvVars(allocator, errors, value, env_name, &env.env);
 
-    // setup / activate: optional script objects.
-    env.setup = try validateAndBuildScriptObject(allocator, errors, value, env_name, "setup");
-    env.activate = try validateAndBuildScriptObject(allocator, errors, value, env_name, "activate");
+    env.setup = try buildHook(allocator, errors, value, env_name, "setup");
+    env.activate = try buildHook(allocator, errors, value, env_name, "activate");
 
     // Whitelist: every other field is unrecognized.
     const allowed = [_][]const u8{
@@ -217,81 +252,75 @@ fn validateAndBuildEnvironment(
     for (value.object.keys()) |fname| {
         for (allowed) |a| {
             if (std.mem.eql(u8, fname, a)) break;
-        } else try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}' is not a recognized field.", .{ env_name, fname }),
-            .field_path = try allocator.print("{s}.{s}", .{ env_name, fname }),
-        });
+        } else try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', '{s}' is not a recognized field.",
+            .{ env_name, fname },
+            "{s}.{s}",
+            .{ env_name, fname },
+        );
     }
 
     return env;
 }
 
-// Validates+builds an optional string field of `obj` directly into `out`.
-// `path` names the field in messages ("description", "setup.script"); its
-// last segment is the key in `obj`.
-fn buildOptString(
+/// Validates+builds the optional field at `path` of `obj` into `out`: a
+/// string or a boolean (null keeps the default), or an array of strings. `path`
+/// names the field in messages ("description", "setup.script"); its last
+/// segment is the key in `obj`.
+fn buildField(
     allocator: Allocator,
     errors: *ErrorList,
     obj: json.Value,
     env_name: []const u8,
     comptime path: []const u8,
-    out: *?[]const u8,
+    out: anytype,
 ) !void {
     const key = comptime path[if (std.mem.findScalarLast(u8, path, '.')) |dot| dot + 1 else 0..];
     const v = obj.object.get(key) orelse return;
-    switch (v) {
-        .string => |s| out.* = try allocator.dupe(u8, s),
-        .null => {},
-        else => try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}' must be a string or null", .{ env_name, path }),
-            .field_path = try allocator.print("{s}.{s}", .{ env_name, path }),
-        }),
+    switch (@TypeOf(out)) {
+        *?[]const u8 => switch (v) {
+            .string => |s| out.* = try allocator.dupe(u8, s),
+            .null => {},
+            else => try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}' must be a string or null",
+                .{ env_name, path },
+                "{s}.{s}",
+                .{ env_name, path },
+            ),
+        },
+        *bool => switch (v) {
+            .bool => |b| out.* = b,
+            .null => {},
+            else => try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}' must be a boolean or null",
+                .{ env_name, path },
+                "{s}.{s}",
+                .{ env_name, path },
+            ),
+        },
+        *StrList => if (v == .array)
+            try takeStrings(allocator, errors, v.array.items, env_name, path, out)
+        else
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}' must be an array",
+                .{ env_name, path },
+                "{s}.{s}",
+                .{ env_name, path },
+            ),
+        else => @compileError("no builder for " ++ @typeName(@TypeOf(out))),
     }
 }
 
-// Validates+builds an optional boolean field directly into `out`; absent or
-// null keeps the default.
-fn buildOptBool(
-    allocator: Allocator,
-    errors: *ErrorList,
-    value: json.Value,
-    env_name: []const u8,
-    field: []const u8,
-    out: *bool,
-) !void {
-    const v = value.object.get(field) orelse return;
-    switch (v) {
-        .bool => |b| out.* = b,
-        .null => {},
-        else => try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}' must be a boolean or null", .{ env_name, field }),
-            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
-        }),
-    }
-}
-
-// Validates+builds an optional array-of-strings field directly into `out`.
-fn buildOptStringArray(
-    allocator: Allocator,
-    errors: *ErrorList,
-    value: json.Value,
-    env_name: []const u8,
-    field: []const u8,
-    out: *StrList,
-) !void {
-    const v = value.object.get(field) orelse return;
-    if (v != .array) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}' must be an array", .{ env_name, field }),
-            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
-        });
-        return;
-    }
-    try takeStrings(allocator, errors, v.array.items, env_name, field, out);
-}
-
-// Appends a copy of every string in `items` to `out` and records an error for
-// each item that is not a string. `path` names the array in messages.
+/// Appends a copy of every string in `items` to `out` and records an error for
+/// each item that is not a string. `path` names the array in messages.
 fn takeStrings(
     allocator: Allocator,
     errors: *ErrorList,
@@ -304,55 +333,85 @@ fn takeStrings(
     for (items, 0..) |item, i| {
         if (item == .string) {
             out.appendAssumeCapacity(try allocator.dupe(u8, item.string));
-        } else try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}[{d}]' must be a string", .{ env_name, path, i }),
-            .field_path = try allocator.print("{s}.{s}[{d}]", .{ env_name, path, i }),
-        });
+        } else try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', '{s}[{d}]' must be a string",
+            .{ env_name, path, i },
+            "{s}.{s}[{d}]",
+            .{ env_name, path, i },
+        );
     }
 }
 
 /// Variables zenv's activation owns. Setting them from `env` would break the
 /// venv or the prompt, or (PYTHONHOME, kept by the venv convention) would not
 /// be unset again by deactivate.
-const RESERVED_ENV_NAMES = [_][]const u8{ "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ZENV_ENV_DIR", "PYTHONHOME", "PS1" };
+const reserved_env_names = [_][]const u8{
+    "VIRTUAL_ENV",
+    "VIRTUAL_ENV_PROMPT",
+    "ZENV_ENV_DIR",
+    "PYTHONHOME",
+    "PS1",
+};
 /// Prefixes of the variables activation saves old values in.
-const RESERVED_ENV_PREFIXES = [_][]const u8{ "_ZENV_", "_OLD_VIRTUAL_" };
+const reserved_env_prefixes = [_][]const u8{ "_ZENV_", "_OLD_VIRTUAL_" };
 
 /// Why `name` cannot be set from `env` with `kind`, or null when it can.
-fn envNameProblem(name: []const u8, kind: config_module.EnvVar.Kind) ?[]const u8 {
+fn envNameProblem(name: []const u8, kind: config.EnvVar.Kind) ?[]const u8 {
     if (!envspec.isIdentifier(name)) return "is not a valid variable name";
-    for (RESERVED_ENV_NAMES) |r| if (std.mem.eql(u8, name, r)) return "is managed by zenv's activation";
-    for (RESERVED_ENV_PREFIXES) |r| if (std.mem.startsWith(u8, name, r)) return "is managed by zenv's activation";
-    if (kind == .set and std.mem.eql(u8, name, "PATH")) return "can only be extended: use {\"prepend\": ...} or {\"append\": ...}";
+    for (reserved_env_names) |r| if (std.mem.eql(
+        u8,
+        name,
+        r,
+    )) return "is managed by zenv's activation";
+    for (reserved_env_prefixes) |r| if (std.mem.startsWith(
+        u8,
+        name,
+        r,
+    )) return "is managed by zenv's activation";
+    if (kind == .set and std.mem.eql(
+        u8,
+        name,
+        "PATH",
+    )) return "can only be extended: use {\"prepend\": ...} or {\"append\": ...}";
     return null;
 }
 
-// Validates+builds the optional `env` object: NAME -> "value" (set), or
-// NAME -> {"prepend": "value"} / {"append": "value"}.
+/// Validates+builds the optional `env` object: NAME -> "value" (set), or
+/// NAME -> {"prepend": "value"} / {"append": "value"}.
 fn buildEnvVars(
     allocator: Allocator,
     errors: *ErrorList,
     value: json.Value,
     env_name: []const u8,
-    out: *std.ArrayList(config_module.EnvVar),
+    out: *std.ArrayList(config.EnvVar),
 ) !void {
     const v = value.object.get("env") orelse return;
     if (v == .null) return;
     if (v != .object) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', 'env' must be an object or null", .{env_name}),
-            .field_path = try allocator.print("{s}.env", .{env_name}),
-        });
+        try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', 'env' must be an object or null",
+            .{env_name},
+            "{s}.env",
+            .{env_name},
+        );
         return;
     }
     for (v.object.keys(), v.object.values()) |name, entry| {
-        var kind: config_module.EnvVar.Kind = .set;
+        var kind: config.EnvVar.Kind = .set;
         const text: ?[]const u8 = switch (entry) {
             .string => |s| s,
             .object => |o| blk: {
                 if (o.count() != 1) break :blk null;
                 const key = o.keys()[0];
-                kind = if (std.mem.eql(u8, key, "prepend")) .prepend else if (std.mem.eql(u8, key, "append")) .append else break :blk null;
+                kind = if (std.mem.eql(
+                    u8,
+                    key,
+                    "prepend",
+                )) .prepend else if (std.mem.eql(u8, key, "append")) .append else break :blk null;
                 break :blk if (o.values()[0] == .string) o.values()[0].string else null;
             },
             else => null,
@@ -362,10 +421,14 @@ fn buildEnvVars(
         else
             envNameProblem(name, kind);
         if (problem) |p| {
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.print("In environment '{s}', env variable '{s}' {s}", .{ env_name, name, p }),
-                .field_path = try allocator.print("{s}.env.{s}", .{ env_name, name }),
-            });
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', env variable '{s}' {s}",
+                .{ env_name, name, p },
+                "{s}.env.{s}",
+                .{ env_name, name },
+            );
             continue;
         }
         const owned_name = try allocator.dupe(u8, name);
@@ -376,45 +439,59 @@ fn buildEnvVars(
     }
 }
 
-// Validates+builds an optional `setup`/`activate` object into a ScriptConfig.
-fn validateAndBuildScriptObject(
+/// Validates+builds an optional `setup`/`activate` object; absent or null is
+/// an empty hook.
+fn buildHook(
     allocator: Allocator,
     errors: *ErrorList,
     value: json.Value,
     env_name: []const u8,
     comptime field: []const u8,
-) !?config_module.ScriptConfig {
-    const v = value.object.get(field) orelse return null;
-    if (v == .null) return null;
+) !config.Hook {
+    const v = value.object.get(field) orelse return .{};
+    if (v == .null) return .{};
     if (v != .object) {
-        try errors.append(allocator, ValidationError{
-            .message = try allocator.print("In environment '{s}', '{s}' must be an object or null", .{ env_name, field }),
-            .field_path = try allocator.print("{s}.{s}", .{ env_name, field }),
-        });
-        return null;
+        try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', '{s}' must be an object or null",
+            .{ env_name, field },
+            "{s}.{s}",
+            .{ env_name, field },
+        );
+        return .{};
     }
 
-    var sc: config_module.ScriptConfig = .{};
-    errdefer sc.deinit(allocator);
+    var hook: config.Hook = .{};
+    errdefer hook.deinit(allocator);
 
-    try buildOptString(allocator, errors, v, env_name, field ++ ".script", &sc.script);
+    try buildField(allocator, errors, v, env_name, field ++ ".script", &hook.script);
 
     if (v.object.get("commands")) |cmds| {
         if (cmds == .array) {
-            sc.commands = .empty;
-            try takeStrings(allocator, errors, cmds.array.items, env_name, field ++ ".commands", &sc.commands.?);
+            try takeStrings(
+                allocator,
+                errors,
+                cmds.array.items,
+                env_name,
+                field ++ ".commands",
+                &hook.commands,
+            );
         } else if (cmds != .null) {
-            try errors.append(allocator, ValidationError{
-                .message = try allocator.print("In environment '{s}', '{s}.commands' must be an array or null", .{ env_name, field }),
-                .field_path = try allocator.print("{s}.{s}.commands", .{ env_name, field }),
-            });
+            try addProblem(
+                allocator,
+                errors,
+                "In environment '{s}', '{s}.commands' must be an array or null",
+                .{ env_name, field },
+                "{s}.{s}.commands",
+                .{ env_name, field },
+            );
         }
     }
 
-    return sc;
+    return hook;
 }
 
-/// Position in the JSON text
 const Position = struct {
     line: usize,
     column: usize,
@@ -426,14 +503,22 @@ const Position = struct {
 /// string key "" is the document root. Positions come from the parser's own
 /// `Diagnostics`, so they are exact and repeat-proof. Nothing is freed
 /// individually: `allocator` is an arena.
-fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMapUnmanaged(Position) {
+fn buildPositionMap(
+    allocator: Allocator,
+    content: []const u8,
+) !std.StringHashMapUnmanaged(Position) {
     var map: std.StringHashMapUnmanaged(Position) = .empty;
     var scanner = json.Scanner.initCompleteInput(allocator, content);
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
     // One frame per open container; `base_len` is the length of its path.
-    const Frame = struct { is_object: bool, expecting_key: bool, index: usize = 0, base_len: usize };
+    const Frame = struct {
+        is_object: bool,
+        expecting_key: bool,
+        index: usize = 0,
+        base_len: usize,
+    };
     var frames: std.ArrayList(Frame) = .empty;
     var path: std.ArrayList(u8) = .empty;
 
@@ -490,7 +575,7 @@ fn buildPositionMap(allocator: Allocator, content: []const u8) !std.StringHashMa
 /// Backfills accurate line/column/context for each semantic error from the
 /// position map, keyed by each error's `field_path`. Errors whose path is not
 /// found keep their default (0, 0) position.
-fn fillPositions(allocator: Allocator, content: []const u8, errors: []ValidationError) !void {
+fn fillPositions(allocator: Allocator, content: []const u8, errors: []Problem) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -502,13 +587,13 @@ fn fillPositions(allocator: Allocator, content: []const u8, errors: []Validation
             e.line = pos.line;
             e.column = pos.column;
             if (e.context) |old| allocator.free(old);
-            e.context = getContextAroundPosition(allocator, content, pos.line) catch null;
+            e.context = lineAt(allocator, content, pos.line) catch null;
         }
     }
 }
 
 /// The text of line `line_number` (1-based) of `content`, or null past its end.
-fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_number: usize) !?[]const u8 {
+fn lineAt(allocator: Allocator, content: []const u8, line_number: usize) !?[]const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
     var n: usize = 1;
     while (lines.next()) |line| : (n += 1) {
@@ -517,13 +602,16 @@ fn getContextAroundPosition(allocator: Allocator, content: []const u8, line_numb
     return null;
 }
 
-/// Prints validation errors to stderr
-pub fn printValidationErrors(io: Io, errors: []const ValidationError) void {
+fn printProblems(io: Io, errors: []const Problem) void {
     for (errors, 0..) |err, i| {
         if (i > 0) output.printError(io, "", .{});
 
         if (err.line > 0) {
-            output.printError(io, "at line {d}, column {d}: {s}", .{ err.line, err.column, err.message });
+            output.printError(
+                io,
+                "at line {d}, column {d}: {s}",
+                .{ err.line, err.column, err.message },
+            );
         } else {
             output.printError(io, "{s}", .{err.message});
         }
@@ -535,16 +623,25 @@ pub fn printValidationErrors(io: Io, errors: []const ValidationError) void {
         if (err.context) |ctx| {
             output.printError(io, "Context: {s}", .{ctx});
             // A '^' under the column ("" padded to the column with spaces).
-            if (err.column > 0) output.printError(io, "         {s:[1]}^", .{ "", @min(err.column - 1, ctx.len) });
+            if (err.column > 0) output.printError(
+                io,
+                "         {s:[1]}^",
+                .{ "", @min(err.column - 1, ctx.len) },
+            );
         }
     }
 }
 
-/// Reads `config_path` and returns the built `ZenvConfig`, or prints positioned
+/// Reads `config_path` and returns the built `config.Project`, or prints positioned
 /// errors and fails. The production parse path (setup/register): a single call
 /// to the parse-and-validate seam — one read, one parse, one walk.
-pub fn validateAndParse(allocator: Allocator, io: Io, config_path: []const u8) !config_module.ZenvConfig {
-    const content = Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+pub fn validateAndParse(allocator: Allocator, io: Io, config_path: []const u8) !config.Project {
+    const content = Io.Dir.cwd().readFileAlloc(
+        io,
+        config_path,
+        allocator,
+        .limited(10 * 1024 * 1024),
+    ) catch |err| {
         if (err == error.FileNotFound) {
             output.printError(io, "Configuration file not found", .{});
             output.printError(io, "Context: {s}", .{config_path});
@@ -558,7 +655,7 @@ pub fn validateAndParse(allocator: Allocator, io: Io, config_path: []const u8) !
         .errors => |errs| {
             var e = errs;
             defer freeErrors(allocator, &e);
-            printValidationErrors(io, e.items);
+            printProblems(io, e.items);
             return error.InvalidFormat;
         },
         .config => |c| return c,
@@ -637,9 +734,25 @@ test "loadConfig builds a valid config (the formerly-untested build path)" {
             try testing.expectEqualStrings("*", env.target_machines.items[0]);
             try testing.expectEqual(@as(usize, 2), env.modules.items.len);
             try testing.expectEqual(false, env.module_cache);
-            try testing.expect(env.setup != null);
-            try testing.expectEqualStrings("s.sh", env.setup.?.script.?);
-            try testing.expectEqual(@as(usize, 1), env.setup.?.commands.?.items.len);
+            try testing.expectEqualStrings("s.sh", env.setup.script.?);
+            try testing.expectEqual(@as(usize, 1), env.setup.commands.items.len);
+        },
+    }
+}
+
+test "loadConfig: base_dir is optional and defaults to .zenv" {
+    const a = testing.allocator;
+    var result = try loadConfig(a,
+        \\{ "e": { "target_machines": ["*"] } }
+    );
+    switch (result) {
+        .errors => |*errs| {
+            freeErrors(a, errs);
+            return error.TestUnexpectedResult;
+        },
+        .config => |*cfg| {
+            defer cfg.deinit();
+            try testing.expectEqualStrings(".zenv", cfg.base_dir);
         },
     }
 }
@@ -861,9 +974,9 @@ test "loadConfig: env keeps file order, kinds and raw values" {
             try testing.expectEqual(@as(usize, 4), vars.len);
             try testing.expectEqualStrings("DATA", vars[0].name);
             try testing.expectEqualStrings("${ZENV_PROJECT_DIR}/data", vars[0].value);
-            try testing.expectEqual(config_module.EnvVar.Kind.set, vars[0].kind);
-            try testing.expectEqual(config_module.EnvVar.Kind.prepend, vars[1].kind);
-            try testing.expectEqual(config_module.EnvVar.Kind.append, vars[2].kind);
+            try testing.expectEqual(config.EnvVar.Kind.set, vars[0].kind);
+            try testing.expectEqual(config.EnvVar.Kind.prepend, vars[1].kind);
+            try testing.expectEqual(config.EnvVar.Kind.append, vars[2].kind);
             try testing.expectEqualStrings("", vars[3].value);
         },
     }
@@ -885,21 +998,22 @@ test "validateJsonContent: bad env entries are reported by name" {
     ;
     var errs = (try validateJsonContent(a, content)).?;
     defer freeErrors(a, &errs);
-    const want = [_][]const u8{ "e.env.1BAD", "e.env.VIRTUAL_ENV", "e.env._ZENV_ACTIVE", "e.env.PATH", "e.env.NUM", "e.env.BOTH", "e.env.WHAT" };
+    const want = [_][]const u8{
+        "e.env.1BAD",
+        "e.env.VIRTUAL_ENV",
+        "e.env._ZENV_ACTIVE",
+        "e.env.PATH",
+        "e.env.NUM",
+        "e.env.BOTH",
+        "e.env.WHAT",
+    };
     try testing.expectEqual(want.len, errs.items.len);
     for (want, errs.items) |w, e| try testing.expectEqualStrings(w, e.field_path.?);
 }
 
-test "validateJsonContent: missing required base_dir is reported" {
-    const a = testing.allocator;
+test "validateJsonContent: a missing base_dir is not a problem" {
     const content =
         \\{ "e1": { "target_machines": ["*"] } }
     ;
-    var errs = (try validateJsonContent(a, content)).?;
-    defer freeErrors(a, &errs);
-    var found = false;
-    for (errs.items) |e| {
-        if (std.mem.find(u8, e.message, "base_dir") != null) found = true;
-    }
-    try testing.expect(found);
+    try testing.expect((try validateJsonContent(testing.allocator, content)) == null);
 }

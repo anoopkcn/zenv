@@ -6,12 +6,10 @@ const Io = std.Io;
 const options = @import("options");
 const commands = @import("commands.zig");
 const Command = commands.Command;
-const configurations = @import("utils/config.zig");
-const output = @import("utils/output.zig");
-const flags_module = @import("utils/flags.zig");
-const validation = @import("utils/validation.zig");
-const runtime = @import("utils/runtime.zig");
-const errors = @import("utils/errors.zig");
+const Registry = @import("Registry.zig");
+const output = @import("output.zig");
+const runtime = @import("runtime.zig");
+const errors = @import("errors.zig");
 
 fn printUsage(io: Io) void {
     const usage =
@@ -172,8 +170,9 @@ fn printUsage(io: Io) void {
         \\[z] Configuration (zenv.json):
         \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
-        \\  top-level key specifying the storage location for virtual environments.
-        \\  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
+        \\  top-level key specifying the storage location for virtual environments (default:
+        \\  .zenv). Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json'
+        \\  location.
         \\  In an environment, "python": false builds it without a Python venv, and "env" sets
         \\  environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
         \\
@@ -216,7 +215,7 @@ fn printUsage(io: Io) void {
     Io.File.stdout().writeStreamingAll(io, usage) catch {};
 }
 
-pub fn main(init: std.process.Init.Minimal) anyerror!void {
+pub fn main(init: std.process.Init.Minimal) !void {
     // One arena for the whole run; the process exits when the command ends.
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
@@ -243,149 +242,54 @@ pub fn main(init: std.process.Init.Minimal) anyerror!void {
 
     const args = try init.args.toSlice(allocator);
 
-    const command: Command = if (args.len < 2) .help else std.meta.stringToEnum(Command, args[1]) orelse .unknown;
-
-    const config_path = "zenv.json";
-
-    // Commands that never touch the registry are handled before it is loaded,
-    // so `zenv python`/`zenv validate` don't pay for (or fail on) registry.json.
-    switch (command) {
-        .help, .@"--help" => {
-            printUsage(io);
-            process.exit(0);
-        },
-        .version, .@"-v", .@"-V", .@"--version" => {
-            Io.File.stdout().writeStreamingAll(io, options.version ++ "\n") catch {};
-            process.exit(0);
-        },
-        .init => {
-            // Handle init command directly to avoid loading config
-            commands.handleInitCommand(ctx, args);
-            process.exit(0);
-        },
-        .python => {
-            commands.handlePythonCommand(ctx, args) catch |err| errors.report(io, err);
-            return;
-        },
-        .hook => {
-            commands.handleHookCommand(ctx, args) catch |err| errors.report(io, err);
-            return;
-        },
-        .validate => {
-            commands.handleValidateCommand(ctx, config_path, args) catch |err| errors.report(io, err);
-            return;
-        },
-        .unknown => {
-            output.printError(io, "Unknown command '{s}'", .{args[1]});
-            output.print(io, "run 'zenv help' to see the usage", .{});
-            process.exit(1);
-        },
-        // Registry-backed commands proceed to registry/config loading below.
-        .setup,
-        .activate,
-        .ls,
-        .list,
-        .register,
-        .deregister,
-        .cd,
-        .rm,
-        .rename,
-        .log,
-        .run,
-        .add,
-        .alias,
-        .jupyter,
-        => {},
-    }
-    // Load the environment registry first, as we'll need it for all commands
-    var registry = configurations.EnvironmentRegistry.load(allocator, io, &environ_map) catch |err| {
-        output.printError(io, "Failed to load environment registry: {t}", .{err});
-        errors.report(io, error.RegistryError);
+    const command: Command = if (args.len < 2) .help else std.meta.stringToEnum(
+        Command,
+        args[1],
+    ) orelse {
+        output.printError(io, "Unknown command '{s}'", .{args[1]});
+        output.print(io, "run 'zenv help' to see the usage", .{});
+        process.exit(1);
     };
-    defer registry.deinit();
-
-    // Parse configuration if we're in a project directory with zenv.json
-    // We'll only need this for setup and registering new environments
-    var config: ?configurations.ZenvConfig = null;
-    defer if (config != null) config.?.deinit();
-
-    // For setup command, check if we need to init first
-    if (command == .setup) {
-        commands.checkFlags(io, args, &commands.SETUP_FLAGS) catch |err| errors.report(io, err);
-        const flags = flags_module.CommandFlags.fromArgs(args);
-        const init_flag = flags.init_mode;
-
-        // --no-python only shapes a new env's config; after that, zenv.json
-        // decides (and auto-setup rebuilds from it without replaying flags).
-        if (flags.no_python and !init_flag) {
-            output.printError(io, "--no-python only applies with --init. For an existing environment, set \"python\": false for it in zenv.json.", .{});
-            process.exit(1);
-        }
-
-        if (init_flag) {
-            // The name is the first POSITIONAL argument, skipping flags:
-            // `zenv setup --init myenv` must not create an env named "--init".
-            const env_name = flags_module.positional(args, 0) orelse {
-                output.printError(io, "Missing environment name. Usage: zenv setup <name> --init", .{});
-                process.exit(1);
-            };
-            commands.requireValidEnvName(io, env_name) catch process.exit(1);
-            // Writes zenv.json, or adds the env to an existing one; an env the
-            // file already defines is simply set up.
-            const outcome = commands.initConfig(allocator, io, env_name, flags_module.positional(args, 1), !flags.no_python) catch |err| {
-                output.printError(io, "Could not add '{s}' to zenv.json: {t}", .{ env_name, err });
-                process.exit(1);
-            };
-            switch (outcome) {
-                .created => output.print(io, "--init: created zenv.json with environment '{s}'", .{env_name}),
-                .added => output.print(io, "--init: added environment '{s}' to zenv.json", .{env_name}),
-                .exists => {
-                    // An existing env keeps its config; refuse rather than
-                    // set up something other than what --no-python asked for.
-                    if (flags.no_python and !(commands.pythonDisabled(allocator, io, config_path, env_name) catch false)) {
-                        output.printError(io, "zenv.json already defines '{s}' with Python. Set \"python\": false for it in zenv.json, or pick a new name.", .{env_name});
-                        process.exit(1);
-                    }
-                    output.print(io, "--init: zenv.json already defines '{s}'; using it", .{env_name});
-                },
-            }
-        }
-    }
-    if (command == .setup or command == .register) {
-        config = validation.validateAndParse(allocator, io, config_path) catch |err| errors.report(io, err);
-    }
-
-    // Dispatch the command; any error it returns is mapped to a user-facing
-    // message (and exits) by the single error handler.
-    const config_ptr: ?*configurations.ZenvConfig = if (config) |*c| c else null;
-    dispatch(ctx, command, config_ptr, &registry, args) catch |err| errors.report(io, err);
+    // Handlers return errors rather than reporting them; they are mapped to a
+    // message (and an exit status) in one place.
+    dispatch(ctx, command, args) catch |err| errors.report(io, err);
 }
 
-/// Routes a parsed command to its handler. Handlers return errors rather than
-/// reporting them; `main` maps the error to a message in one place.
-fn dispatch(
-    ctx: runtime.Ctx,
-    command: Command,
-    config: ?*configurations.ZenvConfig,
-    registry: *configurations.EnvironmentRegistry,
-    args: []const []const u8,
-) !void {
+fn dispatch(ctx: runtime.Ctx, command: Command, args: []const []const u8) !void {
     switch (command) {
-        .setup => try commands.handleSetupCommand(ctx, config.?, registry, args),
-        .activate => try commands.handleActivateCommand(ctx, registry, args),
-        .ls, .list => try commands.handleListCommand(ctx, registry, args),
-        .register => try commands.handleRegisterCommand(ctx, config.?, registry, args),
-        .deregister => try commands.handleDeregisterCommand(ctx, registry, args),
-        .rm => try commands.handleRmCommand(ctx, registry, args),
-        .rename => try commands.handleRenameCommand(ctx, registry, args),
-        .cd => try commands.handleCdCommand(ctx, registry, args),
-        .log => try commands.handleLogCommand(ctx, registry, args),
-        .run => try commands.handleRunCommand(ctx, registry, args),
-        .add => try commands.handleAddCommand(ctx, registry, args),
-        .alias => try commands.handleAliasCommand(ctx, registry, args),
-        .jupyter => try commands.handleJupyterCommand(ctx, registry, args),
-
-        // These were handled before dispatch, unreachable here
-        .help, .@"--help", .version, .@"-v", .@"-V", .@"--version", .init, .python, .validate, .hook, .unknown => unreachable,
+        .help, .@"--help" => printUsage(ctx.io),
+        .version, .@"-v", .@"-V", .@"--version" => {
+            Io.File.stdout().writeStreamingAll(ctx.io, options.version ++ "\n") catch {};
+        },
+        .init => commands.handleInit(ctx, args),
+        // These never touch the registry, so they neither pay for nor fail on
+        // registry.json.
+        .python => try commands.handlePython(ctx, args),
+        .hook => try commands.handleHook(ctx, args),
+        .validate => try commands.handleValidate(ctx, args),
+        .setup => try withRegistry(ctx, args, commands.handleSetup),
+        .activate => try withRegistry(ctx, args, commands.handleActivate),
+        .ls, .list => try withRegistry(ctx, args, commands.handleList),
+        .register => try withRegistry(ctx, args, commands.handleRegister),
+        .deregister => try withRegistry(ctx, args, commands.handleDeregister),
+        .rm => try withRegistry(ctx, args, commands.handleRm),
+        .rename => try withRegistry(ctx, args, commands.handleRename),
+        .cd => try withRegistry(ctx, args, commands.handleCd),
+        .log => try withRegistry(ctx, args, commands.handleLog),
+        .run => try withRegistry(ctx, args, commands.handleRun),
+        .add => try withRegistry(ctx, args, commands.handleAdd),
+        .alias => try withRegistry(ctx, args, commands.handleAlias),
+        .jupyter => try withRegistry(ctx, args, commands.handleJupyter),
     }
+}
+
+/// Loads the registry, then runs `handler` with it.
+fn withRegistry(ctx: runtime.Ctx, args: []const []const u8, comptime handler: anytype) !void {
+    var registry = Registry.load(ctx.arena, ctx.io, ctx.env) catch |err| {
+        output.printError(ctx.io, "Failed to load environment registry: {t}", .{err});
+        // A corrupt file has a message of its own; anything else is access.
+        return if (err == error.InvalidRegistryFormat) err else error.RegistryError;
+    };
+    defer registry.deinit();
+    try handler(ctx, &registry, args);
 }

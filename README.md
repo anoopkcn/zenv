@@ -662,8 +662,9 @@ Options for 'zenv add <name> <package>':
 [z] Configuration (zenv.json):
   The 'zenv.json' file is a JSON formatted file that defines your environments.
   Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
-  top-level key specifying the storage location for virtual environments.
-  Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json' location.
+  top-level key specifying the storage location for virtual environments (default:
+  .zenv). Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json'
+  location.
   In an environment, "python": false builds it without a Python venv, and "env" sets
   environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
 

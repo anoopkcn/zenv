@@ -36,7 +36,11 @@ pub const WriteOptions = struct {
 /// created exclusively, so concurrent writers (other zenv processes, other
 /// nodes of a shared filesystem) cannot collide.
 pub fn writeFileAtomic(io: Io, path: []const u8, data: []const u8, options: WriteOptions) !void {
-    var file = try Dir.cwd().createFileAtomic(io, path, .{ .replace = true, .permissions = options.permissions });
+    var file = try Dir.cwd().createFileAtomic(
+        io,
+        path,
+        .{ .replace = true, .permissions = options.permissions },
+    );
     defer file.deinit(io);
     try file.file.writeStreamingAll(io, data);
     try file.file.sync(io);
@@ -79,7 +83,8 @@ pub fn isFile(io: Io, path: []const u8) bool {
 /// when `options` follow symlinks. Some filesystems do not report kinds while
 /// iterating; std then says `.unknown` and this asks the filesystem.
 pub fn kindOf(io: Io, dir: Dir, entry: Dir.Entry, options: Dir.StatFileOptions) !Io.File.Kind {
-    if (entry.kind != .unknown and !(entry.kind == .sym_link and options.follow_symlinks)) return entry.kind;
+    const follow = entry.kind == .sym_link and options.follow_symlinks;
+    if (entry.kind != .unknown and !follow) return entry.kind;
     const st = dir.statFile(io, entry.name, options) catch |err| switch (err) {
         error.FileNotFound => return .unknown, // a dangling link
         else => return err,
@@ -102,11 +107,7 @@ pub fn tempDir(env: *const Environ.Map) []const u8 {
 pub const Term = std.process.Child.Term;
 
 /// Result of a captured run. Caller owns `stdout` and `stderr`.
-pub const RunResult = struct {
-    term: Term,
-    stdout: []u8,
-    stderr: []u8,
-};
+pub const RunResult = std.process.RunResult;
 
 pub const RunOptions = struct {
     stdout_limit: Io.Limit = .unlimited,
@@ -128,7 +129,12 @@ pub const ExecOptions = struct {
 };
 
 pub const ExecBackend = struct {
-    run: *const fn (allocator: Allocator, io: Io, argv: []const []const u8, opts: RunOptions) anyerror!RunResult,
+    run: *const fn (
+        allocator: Allocator,
+        io: Io,
+        argv: []const []const u8,
+        opts: RunOptions,
+    ) anyerror!RunResult,
     exec: *const fn (io: Io, argv: []const []const u8, opts: ExecOptions) anyerror!Term,
 };
 
@@ -165,15 +171,19 @@ fn cwdOf(cwd: ?[]const u8) std.process.Child.Cwd {
     return if (cwd) |c| .{ .path = c } else .inherit;
 }
 
-fn realRun(allocator: Allocator, io: Io, argv: []const []const u8, opts: RunOptions) anyerror!RunResult {
-    const r = try std.process.run(allocator, io, .{
+fn realRun(
+    allocator: Allocator,
+    io: Io,
+    argv: []const []const u8,
+    opts: RunOptions,
+) anyerror!RunResult {
+    return std.process.run(allocator, io, .{
         .argv = argv,
         .stdout_limit = opts.stdout_limit,
         .stderr_limit = opts.stderr_limit,
         .cwd = cwdOf(opts.cwd),
         .environ_map = opts.environ_map,
     });
-    return .{ .term = r.term, .stdout = r.stdout, .stderr = r.stderr };
 }
 
 fn realExec(io: Io, argv: []const []const u8, opts: ExecOptions) anyerror!Term {

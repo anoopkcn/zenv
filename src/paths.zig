@@ -1,3 +1,6 @@
+//! Paths zenv derives: ZENV_DIR, a project's root and venv directory, and the
+//! check on names that become directories.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -18,7 +21,9 @@ pub fn isValidEnvName(name: []const u8) bool {
 
 test "isValidEnvName" {
     try std.testing.expect(isValidEnvName("my-env_1.2"));
-    for ([_][]const u8{ "", ".", "..", "a b", "a/b", "../x", "x\n" }) |bad| try std.testing.expect(!isValidEnvName(bad));
+    for ([_][]const u8{ "", ".", "..", "a b", "a/b", "../x", "x\n" }) |bad| try std.testing.expect(
+        !isValidEnvName(bad),
+    );
 }
 
 /// The zenv directory: $ZENV_DIR if set, otherwise ~/.zenv. Caller owns it.
@@ -137,23 +142,45 @@ test "venvPath normalizes a trailing slash on base_dir" {
 }
 
 test "baseDirIsZenvDir flags the default base_dir in the zenv home" {
-    try testing.expect(try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv", "/home/u/.zenv"));
+    try testing.expect(
+        try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv", "/home/u/.zenv"),
+    );
 }
 
 test "baseDirIsZenvDir allows a project elsewhere" {
-    try testing.expect(!try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u/proj", ".zenv", "/home/u/.zenv"));
+    try testing.expect(
+        !try baseDirIsZenvDir(
+            testing.allocator,
+            testing.io,
+            "/home/u/proj",
+            ".zenv",
+            "/home/u/.zenv",
+        ),
+    );
 }
 
 test "baseDirIsZenvDir flags an absolute base_dir pointing at the zenv home" {
-    try testing.expect(try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u/proj", "/home/u/.zenv", "/home/u/.zenv"));
+    try testing.expect(
+        try baseDirIsZenvDir(
+            testing.allocator,
+            testing.io,
+            "/home/u/proj",
+            "/home/u/.zenv",
+            "/home/u/.zenv",
+        ),
+    );
 }
 
 test "baseDirIsZenvDir allows a custom base_dir name in the home dir" {
-    try testing.expect(!try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", "venvs", "/home/u/.zenv"));
+    try testing.expect(
+        !try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", "venvs", "/home/u/.zenv"),
+    );
 }
 
 test "baseDirIsZenvDir ignores a trailing slash on base_dir" {
-    try testing.expect(try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv/", "/home/u/.zenv"));
+    try testing.expect(
+        try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv/", "/home/u/.zenv"),
+    );
 }
 
 test "findProjectRoot finds the nearest zenv.json at or above start" {

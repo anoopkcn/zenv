@@ -14,7 +14,7 @@
 //! from activate.sh only; activate.csh warns that it skipped them.
 //!
 //! Values go through `shell.Quoted` (`{f}`). Literal text that holds shell
-//! `${...}` is written with `writeAll`, never used as a format string.
+//! `${...}` is written with `writeFiles`, never used as a format string.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,7 +26,7 @@ const Op = envspec.Op;
 const shell = @import("shell.zig");
 const runtime = @import("runtime.zig");
 const output = @import("output.zig");
-const EnvironmentConfig = @import("config.zig").EnvironmentConfig;
+const config = @import("config.zig");
 
 const sq = shell.sq;
 const csq = shell.csq;
@@ -37,9 +37,7 @@ pub const Shell = enum { sh, csh, fish };
 /// The script `zenv activate` prints for `flavour`.
 pub fn fileName(flavour: Shell) []const u8 {
     return switch (flavour) {
-        .sh => "activate.sh",
-        .csh => "activate.csh",
-        .fish => "activate.fish",
+        inline else => |f| "activate." ++ @tagName(f),
     };
 }
 
@@ -55,27 +53,37 @@ pub fn parseShell(name: []const u8) ?Shell {
 
 /// Builds the Spec for an environment, writes activate.sh, activate.csh,
 /// deactivate.csh and zenv-env.json into `venv_path`. Called at the end of
-/// setup, after the setup script ran. Setup runs in the project directory, so
-/// cwd anchors a relative activate.script path. Allocates with `a` (use an
-/// arena).
-pub fn generate(a: Allocator, io: Io, env_config: *const EnvironmentConfig, env_name: []const u8, venv_path: []const u8) !void {
+/// setup, after the setup script ran. `project_dir` anchors a relative
+/// activate.script path. Allocates with `a` (use an arena).
+pub fn generate(
+    a: Allocator,
+    io: Io,
+    env_config: *const config.Env,
+    env_name: []const u8,
+    venv_path: []const u8,
+    project_dir: []const u8,
+) !void {
     output.print(io, "Creating activation scripts for '{s}'...", .{env_name});
 
-    const cwd = try std.process.currentPathAlloc(io, a);
     var hook: ?[]const u8 = null;
-    if (env_config.activate) |act| {
-        if (act.script) |src| {
-            hook = shell.copyHookScript(a, io, src, venv_path, "activate_hook.sh", cwd) catch |err| blk: {
-                output.printError(io, "Failed to copy activation script '{s}': {t}", .{ src, err });
-                break :blk null;
-            };
-        }
+    if (env_config.activate.script) |src| {
+        hook = shell.copyHookScript(
+            a,
+            io,
+            src,
+            venv_path,
+            "activate_hook.sh",
+            project_dir,
+        ) catch |err| blk: {
+            output.printError(io, "Failed to copy activation script '{s}': {t}", .{ src, err });
+            break :blk null;
+        };
     }
 
-    var spec = try envspec.build(a, io, env_config, env_name, venv_path, cwd, hook);
+    var spec = try envspec.build(a, io, env_config, env_name, venv_path, project_dir, hook);
     spec.modules = try printableModules(a, io, spec.modules);
 
-    try writeAll(a, io, &spec);
+    try writeFiles(a, io, &spec);
     output.print(io, "Activation scripts created in {s}", .{venv_path});
 }
 
@@ -84,7 +92,7 @@ pub fn generate(a: Allocator, io: Io, env_config: *const EnvironmentConfig, env_
 /// stored Spec), so the scripts are always a pure function of the data. Each
 /// file is replaced atomically, so a shell sourcing a script meanwhile reads
 /// the old one or the new one, never a partial one.
-pub fn writeAll(a: Allocator, io: Io, spec: *const Spec) !void {
+pub fn writeFiles(a: Allocator, io: Io, spec: *const Spec) !void {
     try writeScript(a, io, spec.venv, fileName(.sh), try renderSh(a, spec));
     try writeScript(a, io, spec.venv, fileName(.csh), try renderCsh(a, spec));
     try writeScript(a, io, spec.venv, "deactivate.csh", try renderCshDeactivate(a, spec));
@@ -101,7 +109,11 @@ fn printableModules(a: Allocator, io: Io, modules: []const []const u8) ![]const 
             if (std.ascii.isControl(c)) break true;
         } else false;
         if (bad) {
-            output.printError(io, "Module name '{f}' contains control characters; skipping it.", .{std.ascii.hexEscape(m, .lower)});
+            output.printError(
+                io,
+                "Module name '{f}' contains control characters; skipping it.",
+                .{std.ascii.hexEscape(m, .lower)},
+            );
             continue;
         }
         try kept.append(a, m);
@@ -109,7 +121,13 @@ fn printableModules(a: Allocator, io: Io, modules: []const []const u8) ![]const 
     return kept.toOwnedSlice(a);
 }
 
-fn writeScript(a: Allocator, io: Io, venv_path: []const u8, name: []const u8, content: []const u8) !void {
+fn writeScript(
+    a: Allocator,
+    io: Io,
+    venv_path: []const u8,
+    name: []const u8,
+    content: []const u8,
+) !void {
     const path = try Io.Dir.path.join(a, &.{ venv_path, name });
     try runtime.writeFileAtomic(io, path, content, .{ .permissions = .fromMode(0o755) });
 }
@@ -190,7 +208,8 @@ const Syntax = struct {
     cache_end: []const u8,
 
     fn purge(comptime s: Syntax) []const u8 {
-        return "    module --force purge" ++ s.or_else ++ "echo 'WARNING: Failed to purge modules, continuing anyway' " ++ s.stderr ++ "\n";
+        return "    module --force purge" ++ s.or_else ++
+            "echo 'WARNING: Failed to purge modules, continuing anyway' " ++ s.stderr ++ "\n";
     }
 };
 
@@ -204,12 +223,17 @@ fn writeLoads(w: *Writer, comptime s: Syntax, modules: []const []const u8, ind: 
     }
     for (modules) |m| {
         try indent(w, ind + 4);
-        try w.print("module load '{0f}'" ++ s.or_else ++ "echo 'WARNING: Failed to load module {0f}' " ++ s.stderr ++ "\n", .{s.quote(m)});
+        try w.print(
+            "module load '{0f}'" ++ s.or_else ++ "echo 'WARNING: Failed to load module {0f}' " ++ s.stderr ++ "\n",
+            .{s.quote(m)},
+        );
     }
     try indent(w, ind);
     try w.writeAll("else\n");
     try indent(w, ind + 4);
-    try w.writeAll("echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" " ++ s.stderr ++ "\n");
+    try w.writeAll(
+        "echo \"WARNING: zenv: no 'module' command available; this environment's modules are not loaded.\" " ++ s.stderr ++ "\n",
+    );
     try indent(w, ind);
     try w.writeAll(s.end ++ "\n");
 }
@@ -220,19 +244,23 @@ fn writeLoads(w: *Writer, comptime s: Syntax, modules: []const []const u8, ind: 
 ///     the system matches (no `module` command needed), else load;
 ///   - otherwise (caching off, or nothing usable captured): load.
 fn writeModules(a: Allocator, w: *Writer, comptime s: Syntax, spec: *const Spec) !void {
-    if (spec.modules.len == 0) return w.writeAll(comptime s.has_module ++ s.purge() ++ s.end ++ "\n\n");
+    if (spec.modules.len == 0) return w.writeAll(
+        comptime s.has_module ++ s.purge() ++ s.end ++ "\n\n",
+    );
     const cache = spec.usableModuleCache() orelse {
         try writeLoads(w, s, spec.modules, 0);
         return w.writeAll("\n");
     };
-    const cache_file = try Io.Dir.path.join(a, &.{ spec.venv, envspec.MODULE_CACHE_FILE });
+    const cache_file = try Io.Dir.path.join(a, &.{ spec.venv, envspec.module_cache_file });
     try w.writeAll(s.cache_if[0]);
     try w.print("{f}", .{s.quote(cache_file)});
     try w.writeAll(s.cache_if[1]);
     try w.print("{f}", .{s.quote(cache.system)});
     try w.writeAll(s.cache_if[2]);
     for (cache.ops) |op| try s.op(w, op, 4);
-    try w.writeAll("else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" " ++ s.stderr ++ "\n");
+    try w.writeAll(
+        "else\n    echo \"INFO: zenv module cache is missing or for another system; loading modules. Re-run 'zenv setup' here to refresh.\" " ++ s.stderr ++ "\n",
+    );
     try writeLoads(w, s, spec.modules, 4);
     try w.writeAll(s.cache_end);
 }
@@ -240,7 +268,9 @@ fn writeModules(a: Allocator, w: *Writer, comptime s: Syntax, spec: *const Spec)
 /// The activate hooks are sh code: csh and fish skip them, and say so.
 fn writeHooksSkipped(w: *Writer, comptime s: Syntax, spec: *const Spec) !void {
     if (spec.hasActivateHooks()) {
-        try w.writeAll("\necho 'WARNING: zenv activate hooks are sh code and were skipped; activate from bash or zsh to run them.' " ++ s.stderr ++ "\n");
+        try w.writeAll(
+            "\necho 'WARNING: zenv activate hooks are sh code and were skipped; activate from bash or zsh to run them.' " ++ s.stderr ++ "\n",
+        );
     }
 }
 
@@ -248,7 +278,7 @@ fn writeHooksSkipped(w: *Writer, comptime s: Syntax, spec: *const Spec) !void {
 // sh (bash / zsh)
 // ---------------------------------------------------------------------------
 
-pub fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
+fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
     var buf: Writer.Allocating = .init(a);
     const w = &buf.writer;
     const names = try touchedNames(a, spec);
@@ -265,7 +295,7 @@ pub fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
         \\
         \\deactivate () {{
         \\
-    , .{ spec.name, envspec.FILE_NAME, spec.name });
+    , .{ spec.name, envspec.file_name, spec.name });
     for (names) |n| switch (restoreFor(n)) {
         .venv_old => try w.print(
             \\    if [ -n "${{_OLD_VIRTUAL_{0s}:-}}" ] ; then
@@ -315,9 +345,15 @@ pub fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
     );
 
     for (names) |n| switch (restoreFor(n)) {
-        .venv_old => try w.print("if [ -n \"${{{0s}:-}}\" ] ; then _OLD_VIRTUAL_{0s}=\"${0s}\" ; fi\n", .{n}),
+        .venv_old => try w.print(
+            "if [ -n \"${{{0s}:-}}\" ] ; then _OLD_VIRTUAL_{0s}=\"${0s}\" ; fi\n",
+            .{n},
+        ),
         .unset => {},
-        .zenv_old => try w.print("if [ -n \"${{{0s}+x}}\" ] ; then _ZENV_OLD_{0s}=\"${0s}\" ; else unset _ZENV_OLD_{0s} ; fi\n", .{n}),
+        .zenv_old => try w.print(
+            "if [ -n \"${{{0s}+x}}\" ] ; then _ZENV_OLD_{0s}=\"${0s}\" ; else unset _ZENV_OLD_{0s} ; fi\n",
+            .{n},
+        ),
     };
     try w.writeAll("_ZENV_ACTIVE=1\n\n");
 
@@ -399,7 +435,7 @@ const sh_syntax: Syntax = .{
 // csh (csh / tcsh)
 // ---------------------------------------------------------------------------
 
-pub fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
+fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
     var buf: Writer.Allocating = .init(a);
     const w = &buf.writer;
     const names = try touchedNames(a, spec);
@@ -420,7 +456,7 @@ pub fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
         \\deactivate nondestructive
         \\
         \\
-    , .{ spec.name, envspec.FILE_NAME, spec.name, csq(deactivate_path) });
+    , .{ spec.name, envspec.file_name, spec.name, csq(deactivate_path) });
 
     for (names) |n| switch (restoreFor(n)) {
         .venv_old => try w.print(
@@ -463,12 +499,15 @@ pub fn renderCsh(a: Allocator, spec: *const Spec) ![]u8 {
 }
 
 /// deactivate.csh, sourced by the `deactivate` alias with its arguments.
-pub fn renderCshDeactivate(a: Allocator, spec: *const Spec) ![]u8 {
+fn renderCshDeactivate(a: Allocator, spec: *const Spec) ![]u8 {
     var buf: Writer.Allocating = .init(a);
     const w = &buf.writer;
     const names = try touchedNames(a, spec);
 
-    try w.print("# Deactivation for '{s}', generated by zenv. Sourced by the `deactivate` alias.\n\n", .{spec.name});
+    try w.print(
+        "# Deactivation for '{s}', generated by zenv. Sourced by the `deactivate` alias.\n\n",
+        .{spec.name},
+    );
     for (names) |n| switch (restoreFor(n)) {
         .venv_old => try w.print(
             \\if ( $?_OLD_VIRTUAL_{0s} ) then
@@ -582,7 +621,7 @@ const csh_syntax: Syntax = .{
 // fish
 // ---------------------------------------------------------------------------
 
-pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
+fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
     var buf: Writer.Allocating = .init(a);
     const w = &buf.writer;
     const names = try touchedNames(a, spec);
@@ -599,7 +638,7 @@ pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
         \\
         \\function deactivate -d "Leave the zenv environment"
         \\
-    , .{ spec.name, envspec.FILE_NAME, spec.name });
+    , .{ spec.name, envspec.file_name, spec.name });
     for (names) |n| switch (restoreFor(n)) {
         .venv_old => try w.print(
             \\    if set -q _OLD_VIRTUAL_{0s}
@@ -643,7 +682,10 @@ pub fn renderFish(a: Allocator, spec: *const Spec) ![]u8 {
     for (names) |n| switch (restoreFor(n)) {
         .venv_old => try w.print("if set -q {0s}\n    set -g _OLD_VIRTUAL_{0s} ${0s}\nend\n", .{n}),
         .unset => {},
-        .zenv_old => try w.print("if set -q {0s}\n    set -g _ZENV_OLD_{0s} ${0s}\nelse\n    set -e _ZENV_OLD_{0s}\nend\n", .{n}),
+        .zenv_old => try w.print(
+            "if set -q {0s}\n    set -g _ZENV_OLD_{0s} ${0s}\nelse\n    set -e _ZENV_OLD_{0s}\nend\n",
+            .{n},
+        ),
     };
     try w.writeAll("set -g _ZENV_ACTIVE 1\n\n");
 
@@ -790,7 +832,11 @@ test "renderSh: deactivate, then saves, then modules, then venv ops" {
     defer arena.deinit();
     const a = arena.allocator();
     const out = try renderSh(a, &try testSpec(a));
-    const prev = std.mem.find(u8, out, "if typeset -f deactivate > /dev/null 2>&1 ; then\n    deactivate\nfi").?;
+    const prev = std.mem.find(
+        u8,
+        out,
+        "if typeset -f deactivate > /dev/null 2>&1 ; then\n    deactivate\nfi",
+    ).?;
     const define = std.mem.find(u8, out, "\ndeactivate () {").?;
     const deact = std.mem.find(u8, out, "\ndeactivate nondestructive").?;
     const save = std.mem.find(u8, out, "_OLD_VIRTUAL_PATH=\"$PATH\"").?;
@@ -814,24 +860,43 @@ test "renderSh: usable module cache is inlined behind a system check" {
     };
     spec.modules = &.{ "gcc/13", "it's" };
     spec.module_cache_enabled = true;
-    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &mod_ops };
+    spec.module_cache = .{
+        .version = envspec.module_cache_version,
+        .system = "jureca",
+        .untrusted = false,
+        .ops = &mod_ops,
+    };
     const out = try renderSh(a, &spec);
 
     // The replay is not gated on a `module` command; only the load fallback is.
-    try expectContains(out, "\nif [ -f '/p/.zenv/demo/.zenv_module_cache.json' ] && [ \"${SYSTEMNAME:-$(uname -n)}\" = 'jureca' ] ; then\n");
-    try expectContains(out, "\n    LD_LIBRARY_PATH='/m/lib'\"${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"");
+    try expectContains(
+        out,
+        "\nif [ -f '/p/.zenv/demo/.zenv_module_cache.json' ] && [ \"${SYSTEMNAME:-$(uname -n)}\" = 'jureca' ] ; then\n",
+    );
+    try expectContains(
+        out,
+        "\n    LD_LIBRARY_PATH='/m/lib'\"${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\"",
+    );
     try expectContains(out, "\n    export LOADEDMODULES='gcc/13'");
     try expectContains(out, "module () { eval \"$(\"$LMOD_CMD\" bash \"$@\")\" ; }");
     // Cache variables are saved, so deactivate undoes the replay.
     try expectContains(out, "_ZENV_OLD_LD_LIBRARY_PATH=\"$LD_LIBRARY_PATH\"");
     try expectContains(out, "_ZENV_OLD_LOADEDMODULES=\"$LOADEDMODULES\"");
-    try expectContains(out, "        module load 'it'\\''s' || echo 'WARNING: Failed to load module it'\\''s' >&2");
+    try expectContains(
+        out,
+        "        module load 'it'\\''s' || echo 'WARNING: Failed to load module it'\\''s' >&2",
+    );
     try expectNotContains(out, "sed -n"); // no stamp parsing at activation
     try expectNotContains(out, ".zenv_module_cache.sh");
 
     // csh renders the same cache; a multi-line value is skipped, not mangled.
     const multi = [_]Op{.{ .op = .set, .name = "BANNER", .value = "a\nb" }};
-    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &multi };
+    spec.module_cache = .{
+        .version = envspec.module_cache_version,
+        .system = "jureca",
+        .untrusted = false,
+        .ops = &multi,
+    };
     const csh = try renderCsh(a, &spec);
     try expectContains(csh, "# skipped BANNER: multi-line values cannot be set from csh");
     try expectContains(csh, ".zenv_module_cache.json");
@@ -863,7 +928,9 @@ test "renderSh: hooks are emitted after activation" {
     const out = try renderSh(a, &spec);
     try expectContains(out, "export FOO=bar\n");
     try expectContains(out, ". '/p/.zenv/demo/scripts/activate_hook.sh'");
-    try testing.expect(std.mem.find(u8, out, "_ZENV_ACTIVE=1").? < std.mem.find(u8, out, "export FOO=bar").?);
+    try testing.expect(
+        std.mem.find(u8, out, "_ZENV_ACTIVE=1").? < std.mem.find(u8, out, "export FOO=bar").?,
+    );
 }
 
 test "render rejects variable names that are not identifiers" {
@@ -879,7 +946,12 @@ test "render rejects variable names that are not identifiers" {
     spec.modules = &.{"gcc"};
     spec.module_cache_enabled = true;
     const bad = [_]Op{.{ .op = .set, .name = "BAD NAME", .value = "" }};
-    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "s", .untrusted = false, .ops = &bad };
+    spec.module_cache = .{
+        .version = envspec.module_cache_version,
+        .system = "s",
+        .untrusted = false,
+        .ops = &bad,
+    };
     try testing.expectError(error.InvalidVariableName, renderSh(a, &spec));
 }
 
@@ -892,7 +964,11 @@ test "renderCsh / renderCshDeactivate: setenv ops, alias, hooks skipped" {
     const out = try renderCsh(a, &spec);
     try expectContains(out, "alias deactivate 'source \"/p/.zenv/demo/deactivate.csh\" \\!*'");
     // The previous environment's own deactivate runs before the alias is replaced.
-    const prev = std.mem.find(u8, out, "if ( \"`alias deactivate`\" != \"\" ) then\n    deactivate\nendif").?;
+    const prev = std.mem.find(
+        u8,
+        out,
+        "if ( \"`alias deactivate`\" != \"\" ) then\n    deactivate\nendif",
+    ).?;
     try testing.expect(prev < std.mem.find(u8, out, "alias deactivate 'source").?);
     try expectContains(out, "setenv VIRTUAL_ENV '/p/.zenv/demo'");
     try expectContains(out, "        setenv PATH '/p/.zenv/demo/bin':\"$PATH\"");
@@ -921,7 +997,12 @@ test "renderFish: list ops for PATH-like vars, string ops otherwise, deactivate"
     };
     spec.modules = &.{"gcc"};
     spec.module_cache_enabled = true;
-    spec.module_cache = .{ .version = envspec.MODULE_CACHE_VERSION, .system = "jureca", .untrusted = false, .ops = &mod_ops };
+    spec.module_cache = .{
+        .version = envspec.module_cache_version,
+        .system = "jureca",
+        .untrusted = false,
+        .ops = &mod_ops,
+    };
     const out = try renderFish(a, &spec);
 
     try expectContains(out, "set -gx PATH '/p/.zenv/demo/bin' $PATH\n");
@@ -931,7 +1012,10 @@ test "renderFish: list ops for PATH-like vars, string ops otherwise, deactivate"
     try expectContains(out, "set -gx BANG 'it\\'s a \\\\ and ! and\nnewline'");
     try expectContains(out, "set -g _OLD_VIRTUAL_PATH $PATH");
     try expectContains(out, "set -g _ZENV_OLD_LD_LIBRARY_PATH $LD_LIBRARY_PATH");
-    try expectContains(out, "if test -f '/p/.zenv/demo/.zenv_module_cache.json'; and test \"$_zenv_sys\" = 'jureca'\n");
+    try expectContains(
+        out,
+        "if test -f '/p/.zenv/demo/.zenv_module_cache.json'; and test \"$_zenv_sys\" = 'jureca'\n",
+    );
     try expectContains(out, "function module; $LMOD_CMD fish $argv | source; end");
     try expectContains(out, "deactivate nondestructive\n");
     const prev = std.mem.find(u8, out, "if functions -q deactivate\n    deactivate\nend").?;

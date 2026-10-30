@@ -9,7 +9,7 @@ const toml = @import("toml");
 /// case-insensitive duplicate detection — e.g. "Flask[async] >= 2.0; python_version<'3.12'"
 /// and "flask==3.1" both reduce to a name that compares equal via `samePackage`.
 /// The returned slice points INTO `spec` (no allocation).
-pub fn packageBaseName(spec: []const u8) []const u8 {
+fn packageBaseName(spec: []const u8) []const u8 {
     // The name ends at the first version operator, extras bracket, marker
     // separator, URL ('@'), or whitespace.
     const end = std.mem.findAny(u8, spec, "<>=~!@;[ \t") orelse spec.len;
@@ -59,15 +59,15 @@ pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
     return out.toOwnedSlice(a);
 }
 
-// Parse a pyproject.toml file and extract PEP 621 dependencies.
-//
-// Reads `[project].dependencies` (an array of PEP 508 requirement strings) using a
-// real TOML parser (zig-toml) instead of the old line-by-line scanner. Each string is
-// kept verbatim (version specifiers and extras preserved) and duped into `allocator`;
-// the caller owns the appended strings. Returns the number of dependencies appended.
-//
-// zig-toml is strict: a malformed document fails as a whole. We keep that non-fatal
-// here (warn and return 0) so `zenv setup` still proceeds, matching prior behavior.
+/// Parse a pyproject.toml file and extract PEP 621 dependencies.
+///
+/// Reads `[project].dependencies` (an array of PEP 508 requirement strings) using a
+/// real TOML parser (zig-toml) instead of the old line-by-line scanner. Each string is
+/// kept verbatim (version specifiers and extras preserved) and duped into `allocator`;
+/// the caller owns the appended strings. Returns the number of dependencies appended.
+///
+/// zig-toml is strict: a malformed document fails as a whole. We keep that non-fatal
+/// here (warn and return 0) so `zenv setup` still proceeds, matching prior behavior.
 pub fn parsePyprojectToml(
     allocator: Allocator,
     io: Io,
@@ -172,7 +172,11 @@ fn appendGroup(
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
     const key, const value = findGroup(table, name) orelse {
-        output.printError(io, "Dependency group '{s}' is not in [dependency-groups] of {s}.", .{ name, file });
+        output.printError(
+            io,
+            "Dependency group '{s}' is not in [dependency-groups] of {s}.",
+            .{ name, file },
+        );
         if (table) |t| if (t.count() > 0) {
             var keys: std.ArrayList([]const u8) = .empty;
             defer keys.deinit(allocator);
@@ -212,13 +216,21 @@ fn appendGroup(
                 else => null,
             } else null;
             const inc = include orelse {
-                output.printError(io, "Dependency group '{s}' in {s} has a table entry without include-group.", .{ key, file });
+                output.printError(
+                    io,
+                    "Dependency group '{s}' in {s} has a table entry without include-group.",
+                    .{ key, file },
+                );
                 return error.InvalidDependencyGroup;
             };
             count += try appendGroup(allocator, io, file, table, inc, chain, deps_list);
         },
         else => {
-            output.printError(io, "Dependency group '{s}' in {s} has an entry that is neither a string nor an include-group table.", .{ key, file });
+            output.printError(
+                io,
+                "Dependency group '{s}' in {s} has an entry that is neither a string nor an include-group table.",
+                .{ key, file },
+            );
             return error.InvalidDependencyGroup;
         },
     };
@@ -253,8 +265,8 @@ pub fn pyprojectField(allocator: Allocator, content: []const u8, key: []const u8
     return try allocator.dupe(u8, trimmed);
 }
 
-// Parse dependencies from requirements.txt format content
-// Returns the number of dependencies found
+/// Parse dependencies from requirements.txt format content
+/// Returns the number of dependencies found
 pub fn parseRequirementsTxt(
     allocator: Allocator,
     io: Io,
@@ -301,7 +313,7 @@ pub fn validateDependencies(
 
     next: for (raw_deps) |dep| {
         if (dep.len == 0) {
-            output.print(io, "Warning: Skipping empty dependency", .{});
+            output.printWarning(io, "Skipping empty dependency", .{});
             continue;
         }
 
@@ -310,13 +322,21 @@ pub fn validateDependencies(
         // is left for pip/uv, which validate it properly at install time.
         const name = packageBaseName(dep);
         if (name.len == 0 or !std.ascii.isAlphanumeric(name[0])) {
-            output.print(io, "Warning: Skipping invalid dependency (no project name): '{s}'", .{dep});
+            output.printWarning(
+                io,
+                "Skipping invalid dependency (no project name): '{s}'",
+                .{dep},
+            );
             continue;
         }
 
         for (valid_deps.items) |seen| {
             if (!samePackage(seen, dep)) continue;
-            output.print(io, "Warning: Skipping duplicate package '{s}' (already included in dependencies)", .{dep});
+            output.printWarning(
+                io,
+                "Skipping duplicate package '{s}' (already included in dependencies)",
+                .{dep},
+            );
             continue :next;
         }
 
@@ -382,7 +402,10 @@ test "packageBaseName strips versions, extras, and markers" {
     try testing.expectEqualStrings("flask", packageBaseName("flask!=2.0"));
     try testing.expectEqualStrings("numpy", packageBaseName("numpy>=1.26.0, <2.0"));
     try testing.expectEqualStrings("mkdocstrings", packageBaseName("mkdocstrings[python]>=0.19"));
-    try testing.expectEqualStrings("requests", packageBaseName("requests ; python_version < '3.12'"));
+    try testing.expectEqualStrings(
+        "requests",
+        packageBaseName("requests ; python_version < '3.12'"),
+    );
 }
 
 test "samePackage is case-insensitive and ignores constraints" {
@@ -414,7 +437,10 @@ test "validateDependencies keeps any PEP 508 line that starts with a name" {
     defer valid.deinit(a);
     try std.testing.expectEqual(@as(usize, 6), valid.items.len);
     try std.testing.expectEqualStrings("flask!=2.0", valid.items[0]);
-    try std.testing.expectEqualStrings("pkg @ https://example.com/pkg-1.0-py3-none-any.whl", valid.items[4]);
+    try std.testing.expectEqualStrings(
+        "pkg @ https://example.com/pkg-1.0-py3-none-any.whl",
+        valid.items[4],
+    );
     try std.testing.expectEqualStrings("flask_login", valid.items[5]);
 }
 
@@ -473,7 +499,11 @@ test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
     try testing.expect(count >= 1);
     var found = false;
     for (deps.items) |d| {
-        if (std.mem.find(u8, d, "numpy") != null and std.mem.find(u8, d, "<2.0") != null) found = true;
+        if (std.mem.find(
+            u8,
+            d,
+            "numpy",
+        ) != null and std.mem.find(u8, d, "<2.0") != null) found = true;
     }
     try testing.expect(found);
 }
@@ -554,8 +584,12 @@ test "pyprojectField reads [project] strings only" {
     defer a.free(rp);
     try std.testing.expectEqualStrings(">=3.10", rp);
     try std.testing.expect((try pyprojectField(a, content, "version")) == null); // not a string
-    try std.testing.expect((try pyprojectField(a, "[project]\nname = \"x\"\n", "description")) == null);
-    try std.testing.expect((try pyprojectField(a, "[project]\ndescription = \"\"\n", "description")) == null);
+    try std.testing.expect(
+        (try pyprojectField(a, "[project]\nname = \"x\"\n", "description")) == null,
+    );
+    try std.testing.expect(
+        (try pyprojectField(a, "[project]\ndescription = \"\"\n", "description")) == null,
+    );
     try std.testing.expect((try pyprojectField(a, "not = = toml", "description")) == null);
 }
 
@@ -586,7 +620,14 @@ test "parseDependencyGroups: named groups, normalized names, include-group" {
         \\Docs_Build = [{include-group = "dev"}, "mkdocs"]
     ;
     var list: std.ArrayList([]const u8) = .empty;
-    const n = try parseDependencyGroups(a, testing.io, content, "pyproject.toml", &.{ "demo", "docs-build" }, &list);
+    const n = try parseDependencyGroups(
+        a,
+        testing.io,
+        content,
+        "pyproject.toml",
+        &.{ "demo", "docs-build" },
+        &list,
+    );
     try testing.expectEqual(@as(usize, 4), n);
     try testing.expectEqualStrings("openai>=1.50", list.items[0]);
     try testing.expectEqualStrings("ipykernel>=6", list.items[1]);
@@ -606,9 +647,38 @@ test "parseDependencyGroups: missing group, missing table and cycles are errors"
         \\b = [{include-group = "A"}]
         \\bad = "pytest"
     ;
-    try testing.expectError(error.DependencyGroupNotFound, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"test"}, &list));
-    try testing.expectError(error.DependencyGroupNotFound, parseDependencyGroups(a, testing.io, "[project]\nname = \"x\"\n", "pyproject.toml", &.{"dev"}, &list));
-    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"a"}, &list));
-    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"bad"}, &list));
-    try testing.expectError(error.InvalidDependencyGroup, parseDependencyGroups(a, testing.io, "[dependency-groups\n", "pyproject.toml", &.{"dev"}, &list));
+    try testing.expectError(
+        error.DependencyGroupNotFound,
+        parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"test"}, &list),
+    );
+    try testing.expectError(
+        error.DependencyGroupNotFound,
+        parseDependencyGroups(
+            a,
+            testing.io,
+            "[project]\nname = \"x\"\n",
+            "pyproject.toml",
+            &.{"dev"},
+            &list,
+        ),
+    );
+    try testing.expectError(
+        error.InvalidDependencyGroup,
+        parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"a"}, &list),
+    );
+    try testing.expectError(
+        error.InvalidDependencyGroup,
+        parseDependencyGroups(a, testing.io, groups_toml, "pyproject.toml", &.{"bad"}, &list),
+    );
+    try testing.expectError(
+        error.InvalidDependencyGroup,
+        parseDependencyGroups(
+            a,
+            testing.io,
+            "[dependency-groups\n",
+            "pyproject.toml",
+            &.{"dev"},
+            &list,
+        ),
+    );
 }

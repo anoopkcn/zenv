@@ -1,11 +1,5 @@
-//! Host / hostname matching primitives.
-//!
-//! A leaf module: it depends only on `std`, `runtime` and `output`,
-//! and is imported by both `environment.zig` (which re-exports the public
-//! functions for its existing callers) and `config.zig` (which uses them for
-//! host-aware identifier resolution). Keeping these here avoids a circular
-//! import — `environment.zig` imports `config.zig`, so `config.zig` cannot
-//! import `environment.zig` in turn.
+//! The current machine's identity and how it is matched against an
+//! environment's `target_machines`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -55,7 +49,7 @@ test "globMatch handles long patterns and many stars" {
     try std.testing.expect(!globMatch(many_stars, &as)); // no exponential blow-up
 }
 
-// Splits a hostname into domain components and checks if any match the target
+/// Whether one of `hostname`'s dot-separated components is `target`.
 fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     var parts = std.mem.splitScalar(u8, hostname, '.');
     while (parts.next()) |part| {
@@ -66,13 +60,11 @@ fn matchDomainComponent(hostname: []const u8, target: []const u8) bool {
     return false;
 }
 
-// Get the hostname via the `gethostname(2)`/`uname(2)` syscall (internal).
-//
-// Unlike `getHostnameFromCommand`, this needs no external `hostname` binary —
-// on Linux it goes straight to the kernel via `uname`, so it works on minimal
-// systems (containers, HPC compute nodes, busybox images) where `/bin/hostname`
-// is absent. We try this before shelling out to the command.
-pub fn getHostnameFromSyscall(allocator: Allocator, io: Io) ![]const u8 {
+/// The hostname from the `gethostname(2)`/`uname(2)` syscall. Unlike
+/// `fromCommand`, this needs no external `hostname` binary, so it works on
+/// minimal systems (containers, HPC compute nodes, busybox images) where
+/// `/bin/hostname` is absent.
+pub fn fromSyscall(allocator: Allocator, io: Io) ![]const u8 {
     output.debug(io, "Querying hostname via gethostname syscall", .{});
     var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
     const name = std.posix.gethostname(&buf) catch |err| {
@@ -88,8 +80,8 @@ pub fn getHostnameFromSyscall(allocator: Allocator, io: Io) ![]const u8 {
     return allocator.dupe(u8, trimmed);
 }
 
-// Helper function to get hostname using the `hostname` command (internal)
-pub fn getHostnameFromCommand(allocator: Allocator, io: Io) ![]const u8 {
+/// The hostname the `hostname` command prints.
+fn fromCommand(allocator: Allocator, io: Io) ![]const u8 {
     output.debug(io, "Executing 'hostname' command", .{});
     const result = runtime.run(allocator, io, &.{"hostname"}, .{
         .stdout_limit = .limited(128),
@@ -102,7 +94,11 @@ pub fn getHostnameFromCommand(allocator: Allocator, io: Io) ![]const u8 {
     defer allocator.free(result.stderr);
 
     if (!result.term.success()) {
-        output.printError(io, "`hostname` command {f}. Stderr: {s}", .{ result.term, result.stderr });
+        output.printError(
+            io,
+            "`hostname` command {f}. Stderr: {s}",
+            .{ result.term, result.stderr },
+        );
         return error.ProcessError;
     }
 
@@ -116,17 +112,20 @@ pub fn getHostnameFromCommand(allocator: Allocator, io: Io) ![]const u8 {
     return allocator.dupe(u8, trimmed_hostname);
 }
 
-// Resolve the identity of the current machine for `target_machines` matching.
-//
-// On HPC systems every node of a cluster exports the same `$SYSTEMNAME`, while
-// `hostname` differs per node (jrlogin01 vs jrc0042). Keying off `$SYSTEMNAME`
-// first means one `target_machines` entry (e.g. "jureca") matches on login and
-// compute nodes alike, instead of only the nodes whose hostname happens to carry
-// the cluster name. This mirrors the `${SYSTEMNAME:-$(hostname)}` rule that keys
-// the module cache (envspec.currentSystem, and the check in generated
-// activate scripts), so matching and caching agree on one cluster identity. Off HPC, `$SYSTEMNAME` is unset and we
-// fall back to the previous hostname behaviour unchanged.
-pub fn getSystemHostname(allocator: Allocator, io: Io, env: *const std.process.Environ.Map) ![]const u8 {
+/// The identity of the current machine for `target_machines` matching.
+///
+/// On HPC systems every node of a cluster exports the same `$SYSTEMNAME`, while
+/// `hostname` differs per node (jrlogin01 vs jrc0042). Keying off `$SYSTEMNAME`
+/// first means one `target_machines` entry (e.g. "jureca") matches on login and
+/// compute nodes alike. This mirrors the `${SYSTEMNAME:-$(hostname)}` rule that
+/// keys the module cache (envspec.currentSystem, and the check in generated
+/// activate scripts), so matching and caching agree on one cluster identity.
+/// Off HPC, `$SYSTEMNAME` is unset and the hostname is used.
+pub fn getSystemHostname(
+    allocator: Allocator,
+    io: Io,
+    env: *const std.process.Environ.Map,
+) ![]const u8 {
     output.debug(io, "Attempting to get machine identity from environment variable...", .{});
 
     // Prefer SYSTEMNAME (cluster-global), then HOSTNAME, then HOST (if non-empty).
@@ -141,19 +140,23 @@ pub fn getSystemHostname(allocator: Allocator, io: Io, env: *const std.process.E
     // machines without `/bin/hostname` still resolve an identity. Fall back to
     // the command only if the syscall itself fails.
     output.debug(io, "Hostname env vars not set, trying gethostname syscall...", .{});
-    if (getHostnameFromSyscall(allocator, io)) |name| {
+    if (fromSyscall(allocator, io)) |name| {
         return name;
     } else |err| {
-        output.debug(io, "Syscall hostname failed ({t}), falling back to 'hostname' command...", .{err});
+        output.debug(
+            io,
+            "Syscall hostname failed ({t}), falling back to 'hostname' command...",
+            .{err},
+        );
     }
 
-    return getHostnameFromCommand(allocator, io);
+    return fromCommand(allocator, io);
 }
 
 /// True if `hostname` matches one `target_machines` entry: a universal target
 /// ("*", "any", "localhost"), "local" for `*.local` hosts, a `*`/`?` glob, the
 /// exact name, one of its dot-separated components, or a domain suffix.
-pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool {
+fn matches(hostname: []const u8, target_machine: []const u8) bool {
     if (std.mem.eql(u8, target_machine, "localhost") or
         std.mem.eql(u8, target_machine, "any") or
         std.mem.eql(u8, target_machine, "*"))
@@ -166,10 +169,17 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
         return true;
     }
 
-    if (std.mem.findAny(u8, target_machine, "*?") != null) return globMatch(target_machine, hostname);
+    if (std.mem.findAny(u8, target_machine, "*?") != null) return globMatch(
+        target_machine,
+        hostname,
+    );
 
     // Exact name, or one of its components ("jureca" for jrlogin01.jureca)
-    if (std.mem.eql(u8, hostname, target_machine) or matchDomainComponent(hostname, target_machine)) return true;
+    if (std.mem.eql(
+        u8,
+        hostname,
+        target_machine,
+    ) or matchDomainComponent(hostname, target_machine)) return true;
 
     // Domain suffix: ".example.com", or "example.com" after a dot (node1.example.com)
     if (std.mem.cutSuffix(u8, hostname, target_machine)) |rest| {
@@ -182,61 +192,101 @@ pub fn checkHostnameMatch(hostname: []const u8, target_machine: []const u8) bool
 /// True if `hostname` matches ANY comma-separated pattern in `target_machines_str`
 /// (the registry's stored form, e.g. "m1, m2" or "any"). An empty/blank string
 /// matches every host (mirrors how an empty target list registers as "any").
-pub fn hostMatchesTargets(hostname: []const u8, target_machines_str: []const u8) bool {
+pub fn matchesTargets(hostname: []const u8, target_machines_str: []const u8) bool {
     if (std.mem.trim(u8, target_machines_str, " ").len == 0) return true;
     var it = std.mem.splitScalar(u8, target_machines_str, ',');
     while (it.next()) |raw| {
         const pattern = std.mem.trim(u8, raw, " ");
         if (pattern.len == 0) continue;
-        if (checkHostnameMatch(hostname, pattern)) return true;
+        if (matches(hostname, pattern)) return true;
     }
     return false;
 }
 
+/// True if `hostname` matches any of `targets`; an empty list matches every
+/// machine.
+fn matchesAny(hostname: []const u8, targets: []const []const u8) bool {
+    if (targets.len == 0) return true;
+    for (targets) |target| {
+        if (matches(hostname, target)) return true;
+    }
+    return false;
+}
+
+/// Checks the current host against `targets`, the target_machines of
+/// environment `env_name`. On a mismatch, says so (naming the targets) and
+/// returns TargetMachineMismatch.
+pub fn check(ctx: runtime.Ctx, targets: []const []const u8, env_name: []const u8) !void {
+    const io = ctx.io;
+    const hostname = getSystemHostname(ctx.arena, io, ctx.env) catch |err| {
+        output.printError(io, "Failed to get current hostname: {t}", .{err});
+        return err;
+    };
+
+    output.debug(
+        io,
+        "Comparing current hostname '{s}' with target machines for env '{s}'",
+        .{ hostname, env_name },
+    );
+    if (matchesAny(hostname, targets)) return;
+
+    var quoted: std.Io.Writer.Allocating = .init(ctx.arena);
+    for (targets, 0..) |target, i| {
+        quoted.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", target }) catch {};
+    }
+    output.printError(
+        io,
+        "Current machine ('{s}') does not match target machines ([{s}]) specified for environment '{s}'.",
+        .{ hostname, quoted.written(), env_name },
+    );
+    output.printError(io, "Use '--no-host' flag to bypass this check if needed.", .{});
+    return error.TargetMachineMismatch;
+}
+
 // ============================ Tests ============================
 const testing = std.testing;
-const test_support = @import("../test_support.zig");
+const test_support = @import("test_support.zig");
 
-test "checkHostnameMatch: universal targets match any host" {
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*"));
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "any"));
-    try testing.expect(checkHostnameMatch("whatever", "localhost"));
+test "matches: universal targets match any host" {
+    try testing.expect(matches("jrlogin01.jureca", "*"));
+    try testing.expect(matches("jrlogin01.jureca", "any"));
+    try testing.expect(matches("whatever", "localhost"));
 }
 
-test "checkHostnameMatch: exact and domain-component matching" {
-    try testing.expect(checkHostnameMatch("jureca", "jureca"));
-    try testing.expect(!checkHostnameMatch("juwels", "jureca"));
+test "matches: exact and domain-component matching" {
+    try testing.expect(matches("jureca", "jureca"));
+    try testing.expect(!matches("juwels", "jureca"));
     // A target naming any dot-separated component of the FQDN matches.
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jureca"));
-    try testing.expect(checkHostnameMatch("node1.cluster.example.com", "cluster"));
-    try testing.expect(!checkHostnameMatch("node1.cluster.example.com", "uster"));
+    try testing.expect(matches("jrlogin01.jureca", "jureca"));
+    try testing.expect(matches("node1.cluster.example.com", "cluster"));
+    try testing.expect(!matches("node1.cluster.example.com", "uster"));
 }
 
-test "checkHostnameMatch: wildcard patterns" {
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jrlogin*"));
-    try testing.expect(!checkHostnameMatch("jwlogin01.juwels", "jrlogin*"));
-    try testing.expect(checkHostnameMatch("node1.cluster", "*.cluster"));
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "*jureca*"));
-    try testing.expect(checkHostnameMatch("node1", "node?"));
-    try testing.expect(!checkHostnameMatch("node12", "node?"));
-    try testing.expect(!checkHostnameMatch("jrlogin01.jureca", "*juwels*"));
-    try testing.expect(checkHostnameMatch("jrlogin01.jureca", "jr*0?.jureca"));
+test "matches: wildcard patterns" {
+    try testing.expect(matches("jrlogin01.jureca", "jrlogin*"));
+    try testing.expect(!matches("jwlogin01.juwels", "jrlogin*"));
+    try testing.expect(matches("node1.cluster", "*.cluster"));
+    try testing.expect(matches("jrlogin01.jureca", "*jureca*"));
+    try testing.expect(matches("node1", "node?"));
+    try testing.expect(!matches("node12", "node?"));
+    try testing.expect(!matches("jrlogin01.jureca", "*juwels*"));
+    try testing.expect(matches("jrlogin01.jureca", "jr*0?.jureca"));
 }
 
-test "checkHostnameMatch: domain suffix forms" {
-    try testing.expect(checkHostnameMatch("node1.example.com", ".example.com"));
-    try testing.expect(!checkHostnameMatch("example.com", ".example.com"));
-    try testing.expect(checkHostnameMatch("node1.example.com", "example.com"));
-    try testing.expect(!checkHostnameMatch("myexample.com", "example.com"));
-    try testing.expect(checkHostnameMatch("mymac.local", "local"));
+test "matches: domain suffix forms" {
+    try testing.expect(matches("node1.example.com", ".example.com"));
+    try testing.expect(!matches("example.com", ".example.com"));
+    try testing.expect(matches("node1.example.com", "example.com"));
+    try testing.expect(!matches("myexample.com", "example.com"));
+    try testing.expect(matches("mymac.local", "local"));
 }
 
-test "hostMatchesTargets: comma-separated list, blank, and no-match" {
-    try testing.expect(hostMatchesTargets("machine2", "machine1, machine2"));
-    try testing.expect(!hostMatchesTargets("machine3", "machine1, machine2"));
-    try testing.expect(hostMatchesTargets("anything", "")); // blank = any
-    try testing.expect(hostMatchesTargets("anything", "machine1, *"));
-    try testing.expect(hostMatchesTargets("jrlogin01.jureca", "juwels, jureca"));
+test "matchesTargets: comma-separated list, blank, and no-match" {
+    try testing.expect(matchesTargets("machine2", "machine1, machine2"));
+    try testing.expect(!matchesTargets("machine3", "machine1, machine2"));
+    try testing.expect(matchesTargets("anything", "")); // blank = any
+    try testing.expect(matchesTargets("anything", "machine1, *"));
+    try testing.expect(matchesTargets("jrlogin01.jureca", "juwels, jureca"));
 }
 
 test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
@@ -252,12 +302,12 @@ test "getSystemHostname: SYSTEMNAME takes precedence over HOSTNAME/HOST" {
     const id = try getSystemHostname(a, testing.io, &env_map);
     defer a.free(id);
     try testing.expectEqualStrings("jureca", id);
-    try testing.expect(hostMatchesTargets(id, "jureca"));
+    try testing.expect(matchesTargets(id, "jureca"));
 }
 
-test "getHostnameFromSyscall: returns a non-empty hostname without the `hostname` binary" {
+test "fromSyscall: returns a non-empty hostname without the `hostname` binary" {
     const a = testing.allocator;
-    const name = getHostnameFromSyscall(a, testing.io) catch |err| {
+    const name = fromSyscall(a, testing.io) catch |err| {
         // Some sandboxed CI environments block the syscall; tolerate that.
         try testing.expect(err == error.ProcessError or err == error.MissingHostname);
         return;
@@ -278,7 +328,7 @@ test "getSystemHostname: empty SYSTEMNAME falls back to HOSTNAME" {
     try testing.expectEqualStrings("jrlogin01.jureca", id);
 }
 
-test "getHostnameFromCommand trims output and rejects empty/failed runs" {
+test "fromCommand trims output and rejects empty/failed runs" {
     const a = testing.allocator;
     const prev = test_support.useFakeExec();
     defer runtime.exec_backend = prev;
@@ -287,16 +337,16 @@ test "getHostnameFromCommand trims output and rejects empty/failed runs" {
     test_support.fake_run_stdout = "  jrlogin01.jureca \n";
     test_support.fake_run_stderr = "";
     test_support.fake_run_exit = 0;
-    const h = try getHostnameFromCommand(a, testing.io);
+    const h = try fromCommand(a, testing.io);
     defer a.free(h);
     try testing.expectEqualStrings("jrlogin01.jureca", h);
 
     // whitespace-only output -> MissingHostname
     test_support.fake_run_stdout = "   \n";
-    try testing.expectError(error.MissingHostname, getHostnameFromCommand(a, testing.io));
+    try testing.expectError(error.MissingHostname, fromCommand(a, testing.io));
 
     // non-zero exit -> ProcessError
     test_support.fake_run_stdout = "ignored";
     test_support.fake_run_exit = 1;
-    try testing.expectError(error.ProcessError, getHostnameFromCommand(a, testing.io));
+    try testing.expectError(error.ProcessError, fromCommand(a, testing.io));
 }
