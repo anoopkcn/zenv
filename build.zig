@@ -171,40 +171,28 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_unit_tests.step);
 
     // --- Release steps ---
-    // Each target and mode is archived once; its per-target step and the
-    // all-targets step share that archive. Without a tag every release step
-    // fails instead.
+    // Each target is archived once; its per-target step and the all-targets
+    // step share that archive. Without a tag every release step fails instead.
     const tagged = version == .tag or force_release;
     const fail = &b.addFail("error: git tag missing or invalid (needed for release builds, e.g., v0.1.0). Use -Dforce-release=true to override.").step;
-    var fast: [release_targets.len]*std.Build.Step = undefined;
-    var small: [release_targets.len]*std.Build.Step = undefined;
-    for (release_targets, &fast, &small) |release_target, *f, *s| {
-        s.* = if (tagged) releaseArchive(b, options_module, release_target.query, .small) else fail;
-        b.step(b.fmt("release-{s}-small", .{release_target.name}), b.fmt("Create ReleaseSmall build for {s}", .{release_target.description})).dependOn(s.*);
-
-        f.* = if (tagged) releaseArchive(b, options_module, release_target.query, .fast) else fail;
-        b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create ReleaseFast build for {s}", .{release_target.description})).dependOn(f.*);
-    }
-
     const release_step = b.step("release", "Create release builds for all targets");
-    const release_small_step = b.step("release-small", "Create small release builds for all targets");
-    if (!tagged) {
-        release_step.dependOn(fail);
-        release_small_step.dependOn(fail);
-    } else for (fast, small) |f, s| {
-        release_step.dependOn(f);
-        release_small_step.dependOn(s);
+    for (release_targets) |release_target| {
+        const archive = if (tagged) releaseArchive(b, options_module, release_target.query) else fail;
+        b.step(b.fmt("release-{s}", .{release_target.name}), b.fmt("Create release build for {s}", .{release_target.description})).dependOn(archive);
+        release_step.dependOn(archive);
     }
 }
 
-/// Builds zenv for `query` and packs it as
-/// `releases/zenv-<arch>-<os>[-musl][-small].tar.gz` (the names install.sh and
-/// the release workflow expect). Returns the step that installs the archive.
+/// Builds zenv for `query` and packs it as `releases/zenv-<arch>-<os>[-musl].tar.gz`
+/// (the names install.sh and the release workflow expect). Returns the step that
+/// installs the archive. ReleaseSafe: runtime safety checks turn a bug into a
+/// panic instead of undefined behavior in a tool that writes the registry and
+/// deletes env directories; zenv is I/O-bound, so ReleaseFast/Small would gain
+/// nothing measurable. Stripped, since ReleaseSafe keeps debug info by default.
 fn releaseArchive(
     b: *std.Build,
     options: *std.Build.Step.Options,
     query: std.Target.Query,
-    optimize: std.lang.Optimize,
 ) *std.Build.Step {
     const target = b.resolveTargetQuery(query);
     const exe = b.addExecutable(.{
@@ -212,18 +200,18 @@ fn releaseArchive(
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = .safe,
+            .strip = true,
         }),
     });
     exe.root_module.addImport("options", options.createModule());
-    exe.root_module.addImport("toml", b.dependency("toml", .{ .target = target, .optimize = optimize }).module("toml"));
+    exe.root_module.addImport("toml", b.dependency("toml", .{ .target = target, .optimize = .safe }).module("toml"));
 
     const t = target.result;
-    const archive_name = b.fmt("zenv-{t}-{t}{s}{s}.tar.gz", .{
+    const archive_name = b.fmt("zenv-{t}-{t}{s}.tar.gz", .{
         t.cpu.arch,
         t.os.tag,
         if (t.os.tag == .linux and t.abi == .musl) "-musl" else "",
-        if (optimize == .small) "-small" else "",
     });
     const tar = b.addSystemCommand(&.{ "tar", "-czf" });
     const archive = tar.addOutputFileArg(archive_name);

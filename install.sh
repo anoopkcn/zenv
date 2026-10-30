@@ -50,12 +50,11 @@ else
   abort "Unsupported architecture: $ARCH_TYPE"
 fi
 
-OPT_BUILD='-small'
 # Correctly construct asset name based on OS
 if [ "$OS" = "linux" ]; then
-  ASSET_NAME="${EXE_NAME}-${ARCH}-${OS}-musl${OPT_BUILD}.tar.gz"
+  ASSET_NAME="${EXE_NAME}-${ARCH}-${OS}-musl.tar.gz"
 else
-  ASSET_NAME="${EXE_NAME}-${ARCH}-${OS}${OPT_BUILD}.tar.gz"
+  ASSET_NAME="${EXE_NAME}-${ARCH}-${OS}.tar.gz"
 fi
 
 ohai "Detected: ${OS} (${ARCH})"
