@@ -10,7 +10,7 @@ Environments are registered globally, so you can activate one, run a command in 
 
 ## Features
 
-- **One file per project.** `zenv.json` holds one or more environments. `zenv init` writes a starting point from what it finds in the project, and `zenv validate` checks it.
+- **One file per project.** `zenv.json` holds one or more environments, and may contain `//` and `/* */` comments. `zenv init` writes a starting point from what it finds in the project, and `zenv validate` checks it.
 - **Variables and modules as data.** Environment variables and the result of `module load` are recorded rather than re-executed, so activation is fast on clusters and `deactivate` (or switching to another environment) restores the variables they changed.
 - **Python when the project needs it.** A venv built with uv when it is installed, else pip, from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
 - **Use it from anywhere.** Refer to an environment by name, id, alias, or `.` for the project you are in. `zenv run` runs a command in it without activating, `zenv cd` takes you to its project, and Jupyter kernels start through `zenv run` so they get the environment's modules.
@@ -421,6 +421,8 @@ One can have multiple environment configurations in the same `zenv.json` file an
 
 One can run `zenv validate` to validate the config file. If there are errors in the JSON it will try to inform the context of the error.
 
+`zenv.json` may contain comments: `// to the end of the line` and `/* block */`, as in JSONC. Other JSON extensions, such as trailing commas, are not accepted. `zenv add`, `zenv init` and `zenv rename` edit the file in place, so comments and layout are kept, and a change to a comment alone does not trigger an [automatic rebuild](#automatic-rebuilds).
+
 In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to match any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
 
 `python` (default `true`) says whether the environment has a Python venv; set it to `false` for a project that only needs modules, environment variables and settings (see [Environments without Python](#environments-without-python)). `env` sets environment variables (see [Environment variables](#environment-variables)). `container` runs the environment in an Apptainer image (see [Container images](#container-images-apptainer)).
@@ -699,7 +701,8 @@ Options for 'zenv add <name> <package>':
                              it is on PATH, else pip.
 
 [z] Configuration (zenv.json):
-  The 'zenv.json' file is a JSON formatted file that defines your environments.
+  The 'zenv.json' file is a JSON formatted file that defines your environments; it
+  may contain // line and /* block */ comments.
   Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
   top-level key specifying the storage location for virtual environments (default:
   .zenv). Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json'

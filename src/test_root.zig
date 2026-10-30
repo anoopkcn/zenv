@@ -22,4 +22,5 @@ test {
     _ = @import("python.zig");
     _ = @import("commands.zig");
     _ = @import("container.zig");
+    _ = @import("jsonc.zig");
 }

@@ -169,7 +169,8 @@ fn printUsage(io: Io) void {
         \\                             it is on PATH, else pip.
         \\
         \\[z] Configuration (zenv.json):
-        \\  The 'zenv.json' file is a JSON formatted file that defines your environments.
+        \\  The 'zenv.json' file is a JSON formatted file that defines your environments; it
+        \\  may contain // line and /* block */ comments.
         \\  Each top-level key is an environment name. "base_dir": "path/to/venvs" is a special
         \\  top-level key specifying the storage location for virtual environments (default:
         \\  .zenv). Paths can be absolute (e.g., /path/to/venvs) or relative to the 'zenv.json'

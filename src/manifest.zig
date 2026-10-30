@@ -4,8 +4,8 @@
 //!   - pyproject.toml     : surgical text edit, preserving comments, key order
 //!                          and unrelated tables (zig-toml's serializer would
 //!                          drop comments and sort keys).
-//!   - zenv.json          : parse -> mutate the Value tree -> re-stringify,
-//!                          the same pattern Registry.save uses.
+//!   - zenv.json          : JSONC; a text edit at spans found by `jsonc`, so
+//!                          comments and layout stay.
 //!
 //! De-duplication is by bare package name (case-insensitive) via
 //! `deps.samePackage`: re-adding a package replaces its spec (so the pin
@@ -18,6 +18,7 @@ const json = std.json;
 const Value = json.Value;
 const runtime = @import("runtime.zig");
 const deps = @import("deps.zig");
+const jsonc = @import("jsonc.zig");
 
 const max_file_size = 10 * 1024 * 1024;
 
@@ -84,10 +85,39 @@ pub fn addToRequirementsTxt(
 // zenv.json
 // =======================================================================
 
+/// A zenv.json read for a text edit: the file as written, the same text with
+/// its comments blanked, and the parsed tree of that.
+pub const ZenvJson = struct {
+    content: []const u8,
+    text: []const u8,
+    root: json.ObjectMap,
+
+    /// Reads and parses the zenv.json at `path` into `a`, an arena.
+    pub fn read(a: Allocator, io: Io, path: []const u8) !ZenvJson {
+        const content = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_file_size));
+        const text = try jsonc.strip(a, content);
+        const doc = json.parseFromSliceLeaky(json.Value, a, text, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidFormat,
+        };
+        if (doc != .object) return error.InvalidFormat;
+        return .{ .content = content, .text = text, .root = doc.object };
+    }
+
+    /// The top-level members, in the order of `root`.
+    pub fn members(self: ZenvJson, a: Allocator) ![]jsonc.Member {
+        return jsonc.members(a, self.text, jsonc.root(self.text));
+    }
+
+    /// Writes the file back atomically with `edit` applied.
+    pub fn write(self: ZenvJson, a: Allocator, io: Io, path: []const u8, edit: jsonc.Edit) !void {
+        try runtime.writeFileAtomic(io, path, try jsonc.apply(a, self.content, edit), .{});
+    }
+};
+
 /// Records `spec` in the `dependencies` (or `dev_dependencies` when `dev`)
-/// array of environment `env_name` inside the zenv.json at `path`. Re-emits the
-/// whole document with 2-space indentation; key order is preserved because
-/// `json.ObjectMap` is an insertion-ordered array hash map. The target array is
+/// array of environment `env_name` inside the zenv.json at `path`. The file is
+/// edited as text, so its comments and layout stay; the target array is
 /// created if it does not yet exist.
 pub fn addToZenvJson(
     allocator: Allocator,
@@ -97,50 +127,47 @@ pub fn addToZenvJson(
     spec: []const u8,
     dev: bool,
 ) !void {
-    const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size));
-    defer allocator.free(content);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    var parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
-    defer parsed.deinit();
-    const a = parsed.arena.allocator();
-
-    if (parsed.value != .object) return error.InvalidFormat;
-    const env_ptr = parsed.value.object.getPtr(env_name) orelse return error.EnvironmentNotFound;
-    if (env_ptr.* != .object) return error.InvalidFormat;
+    const file = try ZenvJson.read(a, io, path);
+    const env_index = file.root.getIndex(env_name) orelse return error.EnvironmentNotFound;
+    const env = file.root.values()[env_index];
+    if (env != .object) return error.InvalidFormat;
+    const env_span = (try file.members(a))[env_index].value;
 
     const key: []const u8 = if (dev) "dev_dependencies" else "dependencies";
+    const quoted = try json.Stringify.valueAlloc(a, spec, .{});
+    const array = try std.mem.concat(a, u8, &.{ "[", quoted, "]" });
 
-    // Get-or-create the target array on the environment object (a value of
-    // the wrong type is replaced). `key` is a literal, so it outlives the map.
-    const gop = try env_ptr.object.getOrPut(a, key);
-    if (!gop.found_existing or gop.value_ptr.* != .array) gop.value_ptr.* = .{ .array = .init(a) };
-    const arr_ptr = gop.value_ptr;
-
-    // De-dup by package name: replace an existing spec, else append.
-    const owned_spec = try a.dupe(u8, spec);
-    var replaced = false;
-    for (arr_ptr.array.items) |*item| {
-        if (item.* == .string and deps.samePackage(item.string, spec)) {
-            item.* = Value{ .string = owned_spec };
-            replaced = true;
-            break;
+    const edit: jsonc.Edit = if (env.object.getIndex(key)) |i| edit: {
+        const span = (try jsonc.members(a, file.text, env_span))[i].value;
+        // A value of the wrong type is replaced.
+        const deps_value = env.object.values()[i];
+        if (deps_value != .array) break :edit .{ .span = span, .text = array };
+        // De-dup by package name: replace an existing spec, else append.
+        for (deps_value.array.items, 0..) |item, j| {
+            if (item == .string and deps.samePackage(item.string, spec)) break :edit .{
+                .span = (try jsonc.items(a, file.text, span))[j],
+                .text = quoted,
+            };
         }
-    }
-    if (!replaced) try arr_ptr.array.append(Value{ .string = owned_spec });
-
-    try writeJson(io, path, parsed.value);
+        break :edit try jsonc.append(a, file.content, file.text, span, quoted);
+    } else try jsonc.append(
+        a,
+        file.content,
+        file.text,
+        env_span,
+        try std.mem.concat(a, u8, &.{ "\"", key, "\": ", array }),
+    );
+    try file.write(a, io, path, edit);
 }
 
-/// Writes `value` to `path` atomically as 2-space-indented JSON with a final
-/// newline, the layout `zenv init` writes.
-pub fn writeJson(io: Io, path: []const u8, value: Value) !void {
-    try runtime.writeJsonAtomic(io, path, value, true);
-}
-
-/// Adds environment `env_name` to the zenv.json at `path`, taking its object
+/// Adds environment `env_name` to the zenv.json at `path`, copying its entry
 /// from `template`, a zenv.json document that defines it (as `zenv init`
 /// writes). Returns false, writing nothing, when the file already has that
-/// environment. Re-emits the document like addToZenvJson.
+/// environment. The file is edited as text, like addToZenvJson.
 pub fn addEnvToZenvJson(
     allocator: Allocator,
     io: Io,
@@ -148,26 +175,45 @@ pub fn addEnvToZenvJson(
     env_name: []const u8,
     template: []const u8,
 ) !bool {
-    const content = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size));
-    defer allocator.free(content);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    var parsed = json.parseFromSlice(json.Value, allocator, content, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return error.InvalidFormat,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidFormat;
-    if (parsed.value.object.contains(env_name)) return false;
+    const file = try ZenvJson.read(a, io, path);
+    if (file.root.contains(env_name)) return false;
 
-    // Parsed into the same arena, so the new entry lives as long as the document.
-    const a = parsed.arena.allocator();
     const tmpl = try json.parseFromSliceLeaky(json.Value, a, template, .{});
     if (tmpl != .object) return error.InvalidFormat;
-    const env_value = tmpl.object.get(env_name) orelse return error.InvalidFormat;
-    try parsed.value.object.put(a, try a.dupe(u8, env_name), env_value);
+    const index = tmpl.object.getIndex(env_name) orelse return error.InvalidFormat;
+    const member = (try jsonc.members(a, template, jsonc.root(template)))[index];
+    var entry = template[member.key.start..member.value.end];
 
-    try writeJson(io, path, parsed.value);
+    // Indent the entry like the file's own envs: one level is the indent of a
+    // top-level key that starts its line.
+    const members = try file.members(a);
+    if (members.len > 0) if (jsonc.ownLineIndent(file.content, members[0].key.start)) |unit| {
+        entry = try reindent(a, entry, unit);
+    };
+
+    const root = jsonc.root(file.text);
+    try file.write(a, io, path, try jsonc.append(a, file.content, file.text, root, entry));
     return true;
+}
+
+/// `entry`, written with two spaces per level (as `zenv init` writes), with
+/// `unit` per level instead.
+fn reindent(a: Allocator, entry: []const u8, unit: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, unit, "  ")) return entry;
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, entry, '\n');
+    try out.appendSlice(a, lines.first());
+    while (lines.next()) |line| {
+        const n = line.len - std.mem.trimStart(u8, line, " ").len;
+        try out.append(a, '\n');
+        for (0..n / 2) |_| try out.appendSlice(a, unit);
+        try out.appendSlice(a, line[n - n % 2 ..]);
+    }
+    return out.toOwnedSlice(a);
 }
 
 // =======================================================================
@@ -994,6 +1040,62 @@ test "zenv.json: adds to dependencies and dev_dependencies, preserving order" {
     const demo = parsed.value.object.get("demo").?;
     try testing.expectEqual(@as(usize, 2), demo.object.get("dependencies").?.array.items.len);
     try testing.expectEqual(@as(usize, 1), demo.object.get("dev_dependencies").?.array.items.len);
+}
+
+test "zenv.json: add and a new env keep comments and layout" {
+    const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
+    const path = ".zig-cache/tmp/zenv-manifest-comments.json";
+    cwd.deleteFile(io, path) catch {};
+    defer cwd.deleteFile(io, path) catch {};
+
+    try cwd.writeFile(io, .{ .sub_path = path, .data =
+        \\{
+        \\    // envs live next to the code
+        \\    "base_dir": ".zenv",
+        \\    "demo": {
+        \\        "target_machines": ["*"], // anywhere
+        \\        "dependencies": [
+        \\            "requests" /* http */
+        \\        ]
+        \\    } // demo
+        \\}
+        \\
+    });
+
+    try addToZenvJson(a, io, path, "demo", "flask", false);
+    try addToZenvJson(a, io, path, "demo", "requests>=2", false);
+    try addToZenvJson(a, io, path, "demo", "pytest", true);
+    try testing.expect(try addEnvToZenvJson(a, io, path, "new",
+        \\{
+        \\  "base_dir": ".zenv",
+        \\  "new": {
+        \\    "target_machines": ["*"]
+        \\  }
+        \\}
+    ));
+
+    const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+    defer a.free(c);
+    try testing.expectEqualStrings(
+        \\{
+        \\    // envs live next to the code
+        \\    "base_dir": ".zenv",
+        \\    "demo": {
+        \\        "target_machines": ["*"], // anywhere
+        \\        "dependencies": [
+        \\            "requests>=2", /* http */
+        \\            "flask"
+        \\        ],
+        \\        "dev_dependencies": ["pytest"]
+        \\    }, // demo
+        \\    "new": {
+        \\        "target_machines": ["*"]
+        \\    }
+        \\}
+        \\
+    , c);
 }
 
 test "zenv.json: a non-array dependencies value is replaced by the new array" {

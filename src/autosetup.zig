@@ -30,6 +30,7 @@ const output = @import("output.zig");
 const cli = @import("cli.zig");
 const deps = @import("deps.zig");
 const container = @import("container.zig");
+const jsonc = @import("jsonc.zig");
 
 const stamp_name = ".zenv.stamp";
 const stamp_version = 1;
@@ -83,10 +84,13 @@ fn foldEnvConfig(
         sha.update(if (err == error.FileNotFound) "A\x00" else "E\x00");
         return;
     };
+    // Comments are blanked, so editing only a comment does not cause a rebuild.
+    const stripped = jsonc.strip(allocator, content) catch return foldBytes(sha, content);
+    defer allocator.free(stripped);
     const parsed = json.parseFromSlice(
         json.Value,
         allocator,
-        content,
+        stripped,
         .{},
     ) catch return foldBytes(sha, content);
     defer parsed.deinit();
@@ -603,6 +607,18 @@ test "computeTrackedHash is deterministic and content-sensitive" {
     );
     const h4 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
     try testing.expectEqualStrings(h3, h4);
+
+    // So does a comment: only values count.
+    try writeAt(a, dir, "zenv.json",
+        \\{
+        \\  "base_dir": ".zenv", // where envs live
+        \\  /* the test env */
+        \\  "zenv-test": { "target_machines": ["*"], "dependencies": ["numpy"] },
+        \\  "other": { "target_machines": ["*"], "modules": ["gcc"] }
+        \\}
+    );
+    const h5 = &try computeTrackedHash(a, testing.io, dir, "zenv-test", &env_cfg);
+    try testing.expectEqualStrings(h3, h5);
 }
 
 test "computeTrackedHash tracks dependency_file presence" {

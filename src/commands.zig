@@ -13,6 +13,7 @@ const deps = @import("deps.zig");
 const envbuild = @import("envbuild.zig");
 const autosetup = @import("autosetup.zig");
 const manifest = @import("manifest.zig");
+const jsonc = @import("jsonc.zig");
 const python = @import("python.zig");
 const jupyter = @import("jupyter.zig");
 const config = @import("config.zig");
@@ -1694,7 +1695,9 @@ fn readEnvJson(allocator: Allocator, io: Io, path: []const u8, env_name: []const
     };
     defer allocator.free(content);
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return .{};
+    const text = try jsonc.strip(allocator, content);
+    defer allocator.free(text);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return .{};
     defer parsed.deinit();
     if (parsed.value != .object) return .{};
     const env_obj = parsed.value.object.get(env_name) orelse return .{};
@@ -2869,35 +2872,21 @@ fn updateLocalConfigs(
 
     output.print(io, "Updating local config: {s}", .{config_path});
 
-    const config_contents = Io.Dir.cwd().readFileAlloc(
-        io,
-        config_path,
-        allocator,
-        .limited(1024 * 1024),
-    ) catch |err| {
-        if (err == error.FileNotFound) {
+    const file = manifest.ZenvJson.read(allocator, io, config_path) catch |err| switch (err) {
+        error.FileNotFound => {
             output.print(io, "No local config file found, skipping update", .{});
             return; // No config file, that's fine
-        }
-        output.printError(io, "Failed to open config file: {t}", .{err});
-        return err;
+        },
+        error.InvalidFormat => {
+            output.printError(io, "Local config is not a valid JSON object, skipping update", .{});
+            return;
+        },
+        else => {
+            output.printError(io, "Failed to open config file: {t}", .{err});
+            return err;
+        },
     };
-    var parsed = std.json.parseFromSlice(
-        std.json.Value,
-        allocator,
-        config_contents,
-        .{},
-    ) catch |err| {
-        output.printError(io, "Failed to parse local config JSON: {t}", .{err});
-        return;
-    };
-    defer parsed.deinit();
-
-    if (parsed.value != .object) {
-        output.printError(io, "Local config is not a JSON object, skipping update", .{});
-        return;
-    }
-    const root = &parsed.value.object;
+    const root = file.root;
 
     const index = root.getIndex(old_name) orelse {
         output.print(
@@ -2922,11 +2911,14 @@ fn updateLocalConfigs(
         .{ old_name, new_name },
     );
 
-    // Rename the TOP-LEVEL key only, structurally and in place (the order is
-    // kept), then re-serialize. Unlike a textual replace, this can never touch
-    // a nested key or a string value that happens to contain the name.
-    root.setKey(index, new_name);
-    try manifest.writeJson(io, config_path, parsed.value);
+    // Rewrite the TOP-LEVEL key only, at its span, so comments and layout stay.
+    // Unlike a search-and-replace, this can never touch a nested key or a
+    // string value that happens to contain the name.
+    const key = (try file.members(allocator))[index].key;
+    try file.write(allocator, io, config_path, .{
+        .span = key,
+        .text = try std.json.Stringify.valueAlloc(allocator, new_name, .{}),
+    });
 
     output.print(io, "Successfully updated local config file", .{});
 }

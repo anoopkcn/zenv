@@ -9,6 +9,7 @@ const paths = @import("paths.zig");
 const output = @import("output.zig");
 const config = @import("config.zig");
 const envspec = @import("envspec.zig");
+const jsonc = @import("jsonc.zig");
 
 /// One problem found in a zenv.json, with its position when known.
 pub const Problem = struct {
@@ -62,7 +63,10 @@ pub fn loadConfig(allocator: Allocator, content: []const u8) !LoadResult {
     var errors: ErrorList = .empty;
     errdefer freeErrors(allocator, &errors);
 
-    var scanner = json.Scanner.initCompleteInput(allocator, content);
+    // zenv.json is JSONC: comments become spaces, so positions stay the file's.
+    const text = try jsonc.strip(allocator, content);
+    defer allocator.free(text);
+    var scanner = json.Scanner.initCompleteInput(allocator, text);
     defer scanner.deinit();
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
@@ -583,7 +587,7 @@ fn buildPositionMap(
     content: []const u8,
 ) !std.StringHashMapUnmanaged(Position) {
     var map: std.StringHashMapUnmanaged(Position) = .empty;
-    var scanner = json.Scanner.initCompleteInput(allocator, content);
+    var scanner = json.Scanner.initCompleteInput(allocator, try jsonc.strip(allocator, content));
     var diag: json.Diagnostics = .{};
     scanner.enableDiagnostics(&diag);
 
@@ -962,6 +966,37 @@ test "validateJsonContent: a value is located at its own line and column, not th
     try testing.expectEqual(@as(usize, 7), errs.items[0].column);
     try testing.expectEqualStrings("e.module_cache", errs.items[1].field_path.?);
     try testing.expectEqual(@as(usize, 10), errs.items[1].line);
+}
+
+test "validateJsonContent: comments are allowed and positions stay the file's" {
+    const a = testing.allocator;
+    try testing.expect((try validateJsonContent(a,
+        \\{
+        \\  // shared settings
+        \\  "base_dir": "zenv", /* relative to this file */
+        \\  "e1": { "target_machines": ["*"] } // any machine
+        \\}
+    )) == null);
+
+    const content =
+        \\{
+        \\  /* a block
+        \\     over two lines */ "e": {
+        \\    "target_machines": "*" // not an array
+        \\  }
+        \\}
+    ;
+    var errs = (try validateJsonContent(a, content)).?;
+    defer freeErrors(a, &errs);
+    try testing.expectEqual(@as(usize, 1), errs.items.len);
+    try testing.expectEqualStrings("e.target_machines", errs.items[0].field_path.?);
+    try testing.expectEqual(@as(usize, 4), errs.items[0].line);
+    try testing.expectEqual(@as(usize, 24), errs.items[0].column);
+    // The context is the line as written, comment included.
+    try testing.expectEqualStrings(
+        "    \"target_machines\": \"*\" // not an array",
+        errs.items[0].context.?,
+    );
 }
 
 test "validateJsonContent: module_cache must be boolean" {
