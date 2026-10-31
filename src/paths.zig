@@ -78,43 +78,56 @@ pub fn findProjectRoot(allocator: Allocator, io: Io, start: []const u8) !?[]u8 {
     }
 }
 
-/// True when `base_dir`, resolved against `project_dir` the way `venvPath`
-/// resolves it (a relative base_dir is anchored at project_dir), refers to the
-/// same directory as `zenv_dir` — the global ZENV_DIR holding registry.json,
-/// the python installs and default-python. Creating an environment there would
-/// overwrite global state — e.g. `zenv setup` run from $HOME with the default
-/// base_dir `.zenv` and ZENV_DIR unset (which defaults to $HOME/.zenv).
-///
-/// Compares on normalized absolute paths first, then falls back to realpath
-/// identity when both directories exist on disk, so symlinked roots (e.g. macOS
-/// /var -> /private/var, or a symlinked $HOME) still compare equal. No
-/// allocations escape.
-pub fn baseDirIsZenvDir(
+/// What an env directory would clobber (see `envDirOverlap`).
+pub const Overlap = enum {
+    /// It is the project directory, or contains it.
+    project_dir,
+    /// It is ZENV_DIR or contains it, sits directly in it (next to
+    /// registry.json), or inside its Python installs.
+    zenv_dir,
+};
+
+/// Whether the env directory `env_dir` is or holds something that is not the
+/// env's own, so that setup would write over it and `zenv rm` would delete
+/// it: the project directory, or zenv's global state in `zenv_dir`. An env
+/// elsewhere inside ZENV_DIR (e.g. `$ZENV_DIR/envs/<name>`) is fine. Paths
+/// are compared with symlinks resolved as far as they exist (macOS
+/// /var -> /private/var, a symlinked $HOME). Allocates with `allocator`, an arena.
+pub fn envDirOverlap(
     allocator: Allocator,
     io: Io,
+    env_dir: []const u8,
     project_dir: []const u8,
-    base_dir: []const u8,
     zenv_dir: []const u8,
-) !bool {
-    // resolveAlloc restarts at an absolute base_dir, dropping project_dir.
-    const base_abs = try path.resolveAlloc(allocator, &.{ project_dir, base_dir });
-    defer allocator.free(base_abs);
+) !?Overlap {
+    const env = try canonical(allocator, io, env_dir);
+    if (within(try canonical(allocator, io, project_dir), env)) return .project_dir;
+    const zenv = try canonical(allocator, io, zenv_dir);
+    if (within(zenv, env)) return .zenv_dir;
+    if (std.mem.eql(u8, path.dirname(env) orelse env, zenv)) return .zenv_dir;
+    if (within(env, try path.join(allocator, &.{ zenv, "python" }))) return .zenv_dir;
+    return null;
+}
 
-    const zenv_abs = try path.resolveAlloc(allocator, &.{zenv_dir});
-    defer allocator.free(zenv_abs);
+/// `p` made absolute and normalized, with its longest existing prefix
+/// replaced by that prefix's realpath.
+fn canonical(allocator: Allocator, io: Io, p: []const u8) ![]const u8 {
+    const abs = try path.resolveAlloc(allocator, &.{p});
+    var head: []const u8 = abs;
+    while (true) {
+        if (Io.Dir.cwd().realPathFileAlloc(io, head, allocator)) |real| {
+            const rest = std.mem.trimStart(u8, abs[head.len..], "/");
+            return if (rest.len == 0) real else path.join(allocator, &.{ real, rest });
+        } else |_| {}
+        head = path.dirname(head) orelse return abs;
+    }
+}
 
-    if (std.mem.eql(u8, base_abs, zenv_abs)) return true;
-
-    // Lexically different paths can still be the same directory through a
-    // symlink. Compare realpaths when both exist; if either is missing there is
-    // nothing to overwrite, so treat them as distinct.
-    const cwd = Io.Dir.cwd();
-    const base_real = cwd.realPathFileAlloc(io, base_abs, allocator) catch return false;
-    defer allocator.free(base_real);
-    const zenv_real = cwd.realPathFileAlloc(io, zenv_abs, allocator) catch return false;
-    defer allocator.free(zenv_real);
-
-    return std.mem.eql(u8, base_real, zenv_real);
+/// Whether `child` is `parent` or lies below it (both canonical).
+fn within(child: []const u8, parent: []const u8) bool {
+    if (!std.mem.startsWith(u8, child, parent)) return false;
+    if (child.len == parent.len) return true;
+    return std.mem.endsWith(u8, parent, "/") or child[parent.len] == '/';
 }
 
 // ============================ Tests ============================
@@ -141,46 +154,28 @@ test "venvPath normalizes a trailing slash on base_dir" {
     try testing.expectEqualStrings("/proj/zenv/test", p);
 }
 
-test "baseDirIsZenvDir flags the default base_dir in the zenv home" {
-    try testing.expect(
-        try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv", "/home/u/.zenv"),
-    );
-}
-
-test "baseDirIsZenvDir allows a project elsewhere" {
-    try testing.expect(
-        !try baseDirIsZenvDir(
-            testing.allocator,
-            testing.io,
-            "/home/u/proj",
-            ".zenv",
-            "/home/u/.zenv",
-        ),
-    );
-}
-
-test "baseDirIsZenvDir flags an absolute base_dir pointing at the zenv home" {
-    try testing.expect(
-        try baseDirIsZenvDir(
-            testing.allocator,
-            testing.io,
-            "/home/u/proj",
-            "/home/u/.zenv",
-            "/home/u/.zenv",
-        ),
-    );
-}
-
-test "baseDirIsZenvDir allows a custom base_dir name in the home dir" {
-    try testing.expect(
-        !try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", "venvs", "/home/u/.zenv"),
-    );
-}
-
-test "baseDirIsZenvDir ignores a trailing slash on base_dir" {
-    try testing.expect(
-        try baseDirIsZenvDir(testing.allocator, testing.io, "/home/u", ".zenv/", "/home/u/.zenv"),
-    );
+test "envDirOverlap refuses the project dir and zenv's own state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const z = "/nonexistent-zenv-test/home/u/.zenv";
+    const home = "/nonexistent-zenv-test/home/u";
+    // The default layout: <project>/.zenv/<name>.
+    try testing.expect(try envDirOverlap(a, io, home ++ "/proj/.zenv/e", home ++ "/proj", z) == null);
+    // base_dir "..": the env dir is the project dir; ".." with another name contains it not.
+    try testing.expectEqual(Overlap.project_dir, (try envDirOverlap(a, io, home ++ "/proj", home ++ "/proj", z)).?);
+    try testing.expectEqual(Overlap.project_dir, (try envDirOverlap(a, io, home, home ++ "/proj", z)).?);
+    // From $HOME with the default base_dir: <home>/.zenv/<name>, next to registry.json.
+    try testing.expectEqual(Overlap.zenv_dir, (try envDirOverlap(a, io, z ++ "/e", home, z)).?);
+    // The env named after ZENV_DIR in its parent.
+    try testing.expectEqual(Overlap.zenv_dir, (try envDirOverlap(a, io, z, home ++ "/p", z)).?);
+    try testing.expectEqual(Overlap.zenv_dir, (try envDirOverlap(a, io, z ++ "/python/3.12.0", home ++ "/p", z)).?);
+    // A dedicated envs dir inside ZENV_DIR is fine, as is a trailing slash.
+    try testing.expect(try envDirOverlap(a, io, z ++ "/envs/e", home ++ "/p", z) == null);
+    try testing.expectEqual(Overlap.zenv_dir, (try envDirOverlap(a, io, z ++ "/e/", home, z ++ "/")).?);
+    // A sibling whose name only starts like the project's.
+    try testing.expect(try envDirOverlap(a, io, home ++ "/projx", home ++ "/proj", z) == null);
 }
 
 test "findProjectRoot finds the nearest zenv.json at or above start" {

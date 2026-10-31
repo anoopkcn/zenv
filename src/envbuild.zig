@@ -27,7 +27,7 @@ const config = @import("config.zig");
 const cli = @import("cli.zig");
 const container = @import("container.zig");
 const validation = @import("validation.zig");
-const autosetup = @import("autosetup.zig");
+const sources = @import("sources.zig");
 const Flags = cli.Flags;
 const Installer = cli.Installer;
 
@@ -59,12 +59,8 @@ pub const Options = struct {
     uv_env: []const Entry = &.{},
 };
 
-pub const RequiresPython = struct {
-    /// PEP 440 specifiers, e.g. ">=3.10, <4".
-    spec: []const u8,
-    /// The pyproject.toml it came from, for messages.
-    file: []const u8,
-};
+/// The project's requires-python (see `sources.collect`).
+pub const RequiresPython = sources.RequiresPython;
 
 /// Builds the venv for `opts`. Failures are reported before returning
 /// error.ProcessError (or a specific error `errors.report` explains).
@@ -113,14 +109,14 @@ pub fn run(c: Ctx, options: Options) !void {
     // Every child runs in `env`: zenv's own environment, then the module env.
     var env = try c.env.clone(a);
     if (in_image) try useHostUvSettings(a, &env, opts.uv_env);
-    const modules_present = try loadModules(c, opts, &env);
+    const module_path = try loadModules(c, opts, &env);
 
     // Packages the venv can use without installing them: the modules' or the
     // image's.
     var module_python: ?Interpreter = null;
     var provided_pkgs: []const Package = &.{};
-    if (modules_present) {
-        module_python = try workingPython(c, &env);
+    if (module_path) |added| {
+        module_python = try workingPython(c, &env, added);
         provided_pkgs = try modulePackages(c, &env);
     }
 
@@ -186,7 +182,6 @@ pub fn run(c: Ctx, options: Options) !void {
     info(c, "Ensuring pip is {s} the venv", .{if (use_uv) "in" else "up to date in"});
     const pip_args: []const []const u8 = if (use_uv) &.{"pip"} else &.{
         "--ignore-installed",
-        "--no-build-isolation",
         "--upgrade",
         "pip",
     };
@@ -220,7 +215,7 @@ const BuildRequest = struct {
     project_dir: []const u8,
     venv_dir: []const u8,
     deps: []const []const u8,
-    /// Setup flags as command-line tokens (`autosetup.flagTokens`).
+    /// Setup flags as command-line tokens (`cli.Flags.buildTokens`).
     flags: []const []const u8,
     requires_python: ?RequiresPython = null,
     /// The host's uv, bound into the container; null installs with pip.
@@ -287,7 +282,7 @@ fn runInContainer(c: Ctx, opts: Options, ct: *const config.Container) !void {
         .project_dir = opts.project_dir,
         .venv_dir = opts.venv_dir,
         .deps = opts.deps,
-        .flags = try autosetup.flagTokens(a, opts.flags, &.{}),
+        .flags = try opts.flags.buildTokens(a, &.{}),
         .requires_python = opts.requires_python,
         .uv = uv,
         .uv_env = uv_env,
@@ -331,8 +326,8 @@ pub fn runInside(c: Ctx, request_path: []const u8) !void {
         .allocate = .alloc_always,
     }) catch return fail(c, "The build request {s} is malformed.", .{request_path});
     const config_path = try Io.Dir.path.join(a, &.{ req.project_dir, "zenv.json" });
-    const project = try validation.validateAndParse(a, c.io, config_path);
-    const env_config = project.getEnvironment(req.env_name) orelse
+    const file = try validation.load(a, c.io, config_path, .loud);
+    const env_config = file.project.getEnvironment(req.env_name) orelse
         return fail(c, "Environment '{s}' is not in {s}.", .{ req.env_name, config_path });
     try run(c, .{
         .env_config = env_config,
@@ -671,6 +666,26 @@ const path_vars = [_][]const u8{
     "PKG_CONFIG_PATH",
 };
 
+/// The PATH entries `ops` add, `:`-separated.
+fn addedPath(a: Allocator, ops: []const envspec.Op) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    for (ops) |op| if (std.mem.eql(u8, op.name, "PATH") and op.op != .unset) {
+        try parts.append(a, op.value);
+    };
+    return std.mem.join(a, ":", parts.items);
+}
+
+/// Whether directory `dir` is one of the entries of the `:`-separated `list`
+/// (a trailing '/' ignored).
+fn inPathList(dir: []const u8, list: []const u8) bool {
+    const want = std.mem.trimEnd(u8, dir, "/");
+    var it = std.mem.splitScalar(u8, list, ':');
+    while (it.next()) |entry| {
+        if (entry.len > 0 and std.mem.eql(u8, std.mem.trimEnd(u8, entry, "/"), want)) return true;
+    }
+    return false;
+}
+
 fn isOneOf(name: []const u8, list: []const []const u8) bool {
     for (list) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
@@ -749,15 +764,17 @@ fn moduleSystemAvailable(env: *const Map) bool {
 /// Makes `env` the module environment: with --reuse-module-cache (what
 /// auto-setup passes), reuses the cache when the module set and system are
 /// unchanged; otherwise purges and loads in bash and captures a new cache, so
-/// an explicit `zenv setup` picks up modules changed by site maintenance. Returns false when there is no module system.
-fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
+/// an explicit `zenv setup` picks up modules changed by site maintenance.
+/// Returns the PATH entries the modules added (`:`-separated, maybe empty), or
+/// null when there is no module system.
+fn loadModules(c: Ctx, opts: Options, env: *Map) !?[]const u8 {
     const a = c.arena;
     // The host's LMOD_CMD reaches the container, but its modules are no use
     // to the image's Python.
-    if (opts.inside_container) return false;
+    if (opts.inside_container) return null;
     if (!moduleSystemAvailable(env)) {
         info(c, "Module command not found, skipping module operations", .{});
-        return false;
+        return null;
     }
     const cfg = opts.env_config;
     const modules = cfg.modules.items;
@@ -769,20 +786,14 @@ fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
     // not purge first.
     if (cache_active and opts.flags.reuse_module_cache and !opts.flags.force_deps) reuse: {
         const cache = envspec.readModuleCache(a, c.io, opts.venv_dir) orelse break :reuse;
-        const sys = system orelse break :reuse;
-        if (cache.version != envspec.module_cache_version or cache.untrusted) break :reuse;
-        if (!std.mem.eql(u8, cache.system, sys) or !std.mem.eql(
-            u8,
-            cache.modules_sig,
-            sig,
-        )) break :reuse;
+        if (cache.unfitFor(system, sig) != null) break :reuse;
         for (cache.ops) |op| try envspec.applyOp(env, op);
         info(
             c,
             "Module set unchanged; reusing cached module environment (skipping module purge/load)",
             .{},
         );
-        return true;
+        return try addedPath(a, cache.ops);
     }
 
     const snap_path = try Io.Dir.path.join(a, &.{ opts.venv_dir, ".zenv_module_snapshot" });
@@ -796,7 +807,7 @@ fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
     const term = try runStep(c, argv, env, opts.project_dir);
     if (term == .exited and term.exited == 3) {
         info(c, "Module command not found, skipping module operations", .{});
-        return false;
+        return null;
     }
     if (!term.success()) return fail(c, "Loading modules failed ({f}).", .{term});
 
@@ -833,8 +844,9 @@ fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
             .{try std.mem.join(a, ", ", snap.failed)},
         );
     }
-    if (!cache_active) return true;
     const delta = try moduleDelta(a, snap.base, snap.loaded);
+    const added = try addedPath(a, delta.ops);
+    if (!cache_active) return added;
     const cache = envspec.ModuleCache{
         .version = envspec.module_cache_version,
         .system = system orelse "",
@@ -844,7 +856,7 @@ fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
     };
     envspec.writeModuleCache(a, c.io, opts.venv_dir, &cache) catch |err| {
         warn(c, "Failed to write the module cache: {t}", .{err});
-        return true;
+        return added;
     };
     if (cache.untrusted) {
         info(
@@ -855,16 +867,24 @@ fn loadModules(c: Ctx, opts: Options, env: *Map) !bool {
     } else {
         info(c, "Module environment cache written ({d} changes)", .{delta.ops.len});
     }
-    return true;
+    return added;
 }
 
 /// An interpreter and its `--version` output.
 const Interpreter = struct { path: []const u8, version: []const u8 };
 
 /// The python3 (else python) on the module env's PATH, if it runs.
-fn workingPython(c: Ctx, env: *const Map) !?Interpreter {
+/// The modules' Python: the first python3 (or python) on the module env's
+/// PATH, when it lies in a directory the modules added (`module_path`). One
+/// that was on PATH before, like /usr/bin/python3, is not the modules', so
+/// `fallback_python` and the pinned Python still take precedence over it.
+fn workingPython(c: Ctx, env: *const Map, module_path: []const u8) !?Interpreter {
     for ([_][]const u8{ "python3", "python" }) |name| {
         const path = try findExecutable(c, name, env.get("PATH")) orelse continue;
+        if (!inPathList(Io.Dir.path.dirname(path) orelse "", module_path)) {
+            info(c, "No Python from the loaded modules ({s} was on PATH before)", .{path});
+            return null;
+        }
         info(c, "Found Python in PATH after loading modules: {s}", .{path});
         if (capture(c, &.{ path, "--version" }, env)) |v| {
             info(c, "Python version: {s}", .{v});
@@ -1118,10 +1138,22 @@ fn venvUsable(c: Ctx, venv_dir: []const u8) !bool {
         runtime.isFile(c.io, try join(c.arena, &.{ venv_dir, "bin", "activate" }));
 }
 
-/// Keeps a working venv; otherwise clears any partial one and creates it.
-/// `system_site` (a container build) lets the venv import the base
-/// interpreter's packages; a kept venv that differs gets its pyvenv.cfg
-/// rewritten.
+/// Whether setup keeps the existing venv: it works and was made from the
+/// interpreter `chosen` resolves to (pyvenv.cfg `executable`, the realpath).
+/// A venv of another interpreter, after `fallback_python` or the Python
+/// module changed, is made again. A venv without the record, or a chosen
+/// interpreter that cannot be resolved, is kept.
+fn keepsVenv(c: Ctx, venv_dir: []const u8, chosen: Chosen) !bool {
+    if (!try venvUsable(c, venv_dir)) return false;
+    const made_from = try venv.readExecutable(c.arena, c.io, venv_dir) orelse return true;
+    const want = Io.Dir.cwd().realPathFileAlloc(c.io, chosen.path, c.arena) catch return true;
+    return std.mem.eql(u8, made_from, want);
+}
+
+/// Keeps a working venv of the chosen interpreter (`keepsVenv`); otherwise
+/// clears any old or partial one and creates it. `system_site` (a container
+/// build) lets the venv import the base interpreter's packages; a kept venv
+/// that differs gets its pyvenv.cfg rewritten.
 fn ensureVenv(
     c: Ctx,
     venv_dir: []const u8,
@@ -1129,7 +1161,7 @@ fn ensureVenv(
     env: *const Map,
     system_site: bool,
 ) !void {
-    if (try venvUsable(c, venv_dir)) {
+    if (try keepsVenv(c, venv_dir, chosen)) {
         info(c, "Using existing valid virtual environment {s}.", .{venv_dir});
         if (venv.includesSystemSite(c.arena, c.io, venv_dir) == system_site) return;
         venv.create(c.arena, c.io, chosen.path, venv_dir, env, system_site) catch |err|
@@ -1137,22 +1169,22 @@ fn ensureVenv(
         return;
     }
 
-    // A bin/ without the other parts is a Python-free env gaining Python:
-    // venv.create fills it in and keeps the user's files there.
-    if (try hasPythonVenv(c, venv_dir)) {
+    if (try venvUsable(c, venv_dir)) {
+        info(
+            c,
+            "Existing venv {s} was made with another Python; recreating it with {s} ({s}).",
+            .{ venv_dir, chosen.description, chosen.path },
+        );
+        try clearVenv(c, venv_dir);
+    } else if (try hasPythonVenv(c, venv_dir)) {
+        // (A bin/ without the other parts is a Python-free env gaining Python:
+        // venv.create fills it in and keeps the user's files there.)
         info(
             c,
             "Existing venv {s} seems corrupted/incomplete. Clearing it and recreating.",
             .{venv_dir},
         );
-        for ([_][]const u8{ "bin", "lib", "lib64", "include", "pyvenv.cfg" }) |p| {
-            const path = try Io.Dir.path.join(c.arena, &.{ venv_dir, p });
-            // A file, a link (lib64, not followed) or a directory; a missing
-            // one is fine. A part that cannot be removed would leave stale
-            // links behind, so fail instead.
-            Io.Dir.cwd().deleteTree(c.io, path) catch |err|
-                return fail(c, "Could not remove {s}: {t}", .{ path, err });
-        }
+        try clearVenv(c, venv_dir);
     }
 
     info(
@@ -1162,6 +1194,19 @@ fn ensureVenv(
     );
     venv.create(c.arena, c.io, chosen.path, venv_dir, env, system_site) catch |err|
         return fail(c, "Failed to create the virtual environment: {t}", .{err});
+}
+
+/// Removes a venv's Python parts, keeping the env's other files (the setup
+/// log, activation scripts, build record).
+fn clearVenv(c: Ctx, venv_dir: []const u8) !void {
+    for ([_][]const u8{ "bin", "lib", "lib64", "include", "pyvenv.cfg" }) |p| {
+        const path = try Io.Dir.path.join(c.arena, &.{ venv_dir, p });
+        // A file, a link (lib64, not followed) or a directory; a missing
+        // one is fine. A part that cannot be removed would leave stale
+        // links behind, so fail instead.
+        Io.Dir.cwd().deleteTree(c.io, path) catch |err|
+            return fail(c, "Could not remove {s}: {t}", .{ path, err });
+    }
 }
 
 /// Fails setup when the interpreter the venv will run on does not satisfy the
@@ -1179,7 +1224,7 @@ fn checkRequiresPython(
 ) !void {
     const a = c.arena;
     const io = c.io;
-    const kept = try venvUsable(c, opts.venv_dir);
+    const kept = try keepsVenv(c, opts.venv_dir, chosen);
     const interpreter = if (kept) try Io.Dir.path.join(
         a,
         &.{ opts.venv_dir, "bin", "python" },
@@ -1336,7 +1381,9 @@ fn installerArgv(
         if (no_cache) try argv.append(a, "--no-cache");
         try argv.append(a, "--link-mode=copy");
     } else {
-        try argv.appendSlice(a, &.{ venv_python, "-m", "pip", "install" });
+        // Builds see the module stack's PYTHONPATH, so they can use build
+        // dependencies that modules provide (see the README).
+        try argv.appendSlice(a, &.{ venv_python, "-m", "pip", "install", "--no-build-isolation" });
         if (no_cache) try argv.append(a, "--no-cache-dir");
     }
     try argv.appendSlice(a, args);
@@ -1780,16 +1827,7 @@ fn installEditable(c: Ctx, opts: Options, venv_python: []const u8, env: *const M
         );
         return;
     }
-    const args: []const []const u8 = if (opts.uv != null) &.{
-        "--editable",
-        ".",
-        "--no-deps",
-    } else &.{
-        "--no-build-isolation",
-        "--editable",
-        ".",
-        "--no-deps",
-    };
+    const args: []const []const u8 = &.{ "--editable", ".", "--no-deps" };
     const argv = try installerArgv(c.arena, venv_python, opts.uv, opts.flags.no_cache, args);
     const t = try runStep(c, argv, env, opts.project_dir);
     if (t.success()) {
@@ -2083,7 +2121,15 @@ test "installerArgv for uv and pip" {
     for (want_uv, uv) |w, g| try testing.expectEqualStrings(w, g);
 
     const pip = try installerArgv(a, "/v/bin/python", null, false, &.{ "--upgrade", "pip" });
-    const want_pip = [_][]const u8{ "/v/bin/python", "-m", "pip", "install", "--upgrade", "pip" };
+    const want_pip = [_][]const u8{
+        "/v/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--no-build-isolation",
+        "--upgrade",
+        "pip",
+    };
     try testing.expectEqual(want_pip.len, pip.len);
     for (want_pip, pip) |w, g| try testing.expectEqualStrings(w, g);
 }
@@ -2278,4 +2324,21 @@ test "runStep copies merged output and is not held up by a background child" {
     );
     try testing.expectEqual(runtime.Term{ .exited = 7 }, term);
     try testing.expect(start.untilNow(c.io, .awake).toSeconds() < 4);
+}
+
+test "addedPath and inPathList: only directories the modules put on PATH" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ops = [_]envspec.Op{
+        .{ .op = .prepend, .name = "PATH", .value = "/sw/python/3.12/bin:/sw/gcc/bin" },
+        .{ .op = .set, .name = "PYTHONPATH", .value = "/sw/lib" },
+        .{ .op = .append, .name = "PATH", .value = "/sw/tail/bin" },
+    };
+    const added = try addedPath(a, &ops);
+    try std.testing.expectEqualStrings("/sw/python/3.12/bin:/sw/gcc/bin:/sw/tail/bin", added);
+    try std.testing.expect(inPathList("/sw/python/3.12/bin", added));
+    try std.testing.expect(inPathList("/sw/tail/bin/", added));
+    try std.testing.expect(!inPathList("/usr/bin", added));
+    try std.testing.expect(!inPathList("/usr/bin", ""));
 }

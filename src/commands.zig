@@ -11,9 +11,9 @@ const paths = @import("paths.zig");
 const host = @import("host.zig");
 const deps = @import("deps.zig");
 const envbuild = @import("envbuild.zig");
+const sources = @import("sources.zig");
 const autosetup = @import("autosetup.zig");
 const manifest = @import("manifest.zig");
-const jsonc = @import("jsonc.zig");
 const python = @import("python.zig");
 const jupyter = @import("jupyter.zig");
 const config = @import("config.zig");
@@ -26,6 +26,7 @@ const activation = @import("activation.zig");
 const container = @import("container.zig");
 const venv = @import("venv.zig");
 const hook = @import("hook.zig");
+const launch = @import("launch.zig");
 const sh_quote = @import("shell.zig").sq;
 const Ctx = runtime.Ctx;
 
@@ -145,12 +146,6 @@ fn subcommandOf(
         );
         return error.ArgsError;
     };
-}
-
-/// Whether dependency file `path` is a pyproject.toml rather than a
-/// requirements file.
-fn isPyproject(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".toml");
 }
 
 /// The starter zenv.json for `zenv init`: one environment for any machine,
@@ -485,12 +480,8 @@ fn setupInit(ctx: Ctx, args: []const []const u8, flags: Flags) void {
         .exists => {
             // An existing env keeps its config; refuse rather than set up
             // something other than what --no-python asked for.
-            if (flags.no_python and !(pythonDisabled(
-                ctx.arena,
-                io,
-                "zenv.json",
-                env_name,
-            ) catch false)) {
+            // An unusable zenv.json is reported by the load after --init.
+            if (flags.no_python and pythonDisabled(ctx.arena, io, "zenv.json", env_name) == false) {
                 output.printError(
                     io,
                     "zenv.json already defines '{s}' with Python. Set \"python\": false for it in zenv.json, or pick a new name.",
@@ -519,8 +510,9 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
         std.process.exit(1);
     }
     if (flags.init_mode) setupInit(ctx, args, flags);
-    var project = try validation.validateAndParse(allocator, io, "zenv.json");
-    defer project.deinit();
+    var file = try validation.load(allocator, io, "zenv.json", .loud);
+    defer file.deinit(allocator);
+    const project = &file.project;
 
     // Log the detected flags
     if (flags.force_deps) {
@@ -544,7 +536,7 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
     }
 
     // Get and validate the environment config
-    const env_config = try selectEnv(ctx, &project, args, flags);
+    const env_config = try selectEnv(ctx, project, args, flags);
     // Non-null: selectEnv just errored otherwise.
     const env_name = positional(args, 0).?;
     try refuseAliasName(io, registry, env_name);
@@ -564,31 +556,15 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
     const setup_cwd = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(setup_cwd);
 
-    // Refuse to create an environment whose base dir resolves to the global
-    // ZENV_DIR (e.g. `zenv setup` from $HOME with default base_dir `.zenv` and
-    // ZENV_DIR unset -> ~/.zenv). That would overwrite registry.json, python
-    // installs and other global state. Guard here, before any logging or
-    // directory creation. See paths.baseDirIsZenvDir.
-    {
-        const zenv_dir = try paths.getZenvDir(allocator, ctx.env);
-        defer allocator.free(zenv_dir);
-        if (try paths.baseDirIsZenvDir(allocator, io, setup_cwd, project.base_dir, zenv_dir)) {
-            output.printError(
-                io,
-                "Refusing to set up: base directory '{s}' resolves to ZENV_DIR ('{s}').",
-                .{ project.base_dir, zenv_dir },
-            );
-            output.printError(
-                io,
-                "This would overwrite global zenv state. Run setup from a project directory, set a different 'base_dir' in zenv.json, or point ZENV_DIR elsewhere.",
-                .{},
-            );
-            return error.BaseDirIsZenvDir;
-        }
-    }
-
     const env_dir_path = try paths.venvPath(allocator, setup_cwd, project.base_dir, env_name);
     defer allocator.free(env_dir_path);
+
+    // Refuse an env directory that is, or holds, the project or zenv's global
+    // state (e.g. base_dir ".." puts the env on the project itself, and
+    // `zenv setup` from $HOME with the default base_dir would write next to
+    // registry.json). Setup would write over them and `zenv rm` delete them.
+    // Guard here, before any logging or directory creation.
+    try refuseEnvDirOverlap(ctx, env_dir_path, setup_cwd, "set up");
 
     // The env directory holds the setup log, so it is created first.
     try Io.Dir.cwd().createDirPath(io, env_dir_path);
@@ -611,153 +587,11 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
     output.print(io, "Command: {s}", .{command_str.items});
     output.print(io, "Setting up environment: {s} (Target: {s})", .{ env_name, display_target });
 
-    // 1. Combine Dependencies. The list and the strings parsed from the
-    // dependency file live in `allocator` (main's arena); config strings are borrowed.
-    var all_required_deps: std.ArrayList([]const u8) = .empty;
-
-    if (env_config.dependencies.items.len > 0) {
-        output.print(
-            io,
-            "Adding {d} dependencies from configuration:",
-            .{env_config.dependencies.items.len},
-        );
-        for (env_config.dependencies.items) |dep| {
-            output.print(io, "  - Config dependency: {s}", .{dep});
-        }
-        try all_required_deps.appendSlice(allocator, env_config.dependencies.items);
-    } else {
-        output.print(io, "No dependencies specified in configuration.", .{});
-    }
-
-    // Add development dependencies from config (e.g. those recorded by
-    // `zenv add --dev`).
-    if (env_config.dev_dependencies.items.len > 0) {
-        output.print(
-            io,
-            "Adding {d} development dependencies from configuration:",
-            .{env_config.dev_dependencies.items.len},
-        );
-        for (env_config.dev_dependencies.items) |dep| {
-            output.print(io, "  - Dev dependency: {s}", .{dep});
-        }
-        try all_required_deps.appendSlice(allocator, env_config.dev_dependencies.items);
-    }
-
-    // The project's requires-python, from a pyproject.toml dependency file;
-    // with --dev, ./pyproject.toml (the project pip installs) takes precedence.
-    var requires_python: ?envbuild.RequiresPython = null;
-
-    // Add dependencies from requirements file if specified
-    if (env_config.dependency_file) |req_file| {
-        const req_content = Io.Dir.cwd().readFileAlloc(
-            io,
-            req_file,
-            allocator,
-            .limited(1 * 1024 * 1024),
-        ) catch |err| {
-            if (err == error.FileNotFound) {
-                output.printError(
-                    io,
-                    "Requirements file specified in configuration ('{s}') not found.",
-                    .{req_file},
-                );
-                return err;
-            }
-            output.printError(io, "Failed to read file '{s}': {t}", .{ req_file, err });
-            return error.PathResolutionFailed;
-        };
-        output.print(io, "Reading dependencies from file: '{s}'", .{req_file});
-        output.print(
-            io,
-            "Successfully read file ({d} bytes). Parsing dependencies...",
-            .{req_content.len},
-        );
-
-        const is_toml = isPyproject(req_file);
-        output.print(
-            io,
-            "{s}",
-            .{
-                if (is_toml) "Detected TOML file format, parsing as pyproject.toml" else "Parsing as requirements.txt format",
-            },
-        );
-        const req_file_dep_count = if (is_toml)
-            try deps.parsePyprojectToml(allocator, io, req_content, &all_required_deps)
-        else
-            try deps.parseRequirementsTxt(allocator, io, req_content, &all_required_deps);
-        if (is_toml) if (try deps.pyprojectField(
-            allocator,
-            req_content,
-            "requires-python",
-        )) |spec| {
-            requires_python = .{ .spec = spec, .file = req_file };
-        };
-
-        if (req_file_dep_count > 0) {
-            output.print(
-                io,
-                "Added {d} dependencies from file '{s}'",
-                .{ req_file_dep_count, req_file },
-            );
-        } else {
-            output.printWarning(io, "No valid dependencies found in file '{s}'", .{req_file});
-        }
-    } else {
-        output.print(io, "No requirements file specified in configuration.", .{});
-    }
-
-    // Dependency groups named with --group (PEP 735).
-    if (groups.len > 0) {
-        const file = groupsFile(env_config.dependency_file);
-        const content = Io.Dir.cwd().readFileAlloc(
-            io,
-            file,
-            allocator,
-            .limited(10 * 1024 * 1024),
-        ) catch |err| {
-            if (err != error.FileNotFound) return err;
-            output.printError(
-                io,
-                "--group reads [dependency-groups] from '{s}', which does not exist.",
-                .{file},
-            );
-            return error.DependencyGroupNotFound;
-        };
-        const group_dep_count = try deps.parseDependencyGroups(
-            allocator,
-            io,
-            content,
-            file,
-            groups,
-            &all_required_deps,
-        );
-        output.print(
-            io,
-            "Added {d} dependencies from dependency groups in '{s}'",
-            .{ group_dep_count, file },
-        );
-    }
-
-    if (flags.dev_mode) {
-        if (Io.Dir.cwd().readFileAlloc(
-            io,
-            "pyproject.toml",
-            allocator,
-            .limited(10 * 1024 * 1024),
-        )) |content| {
-            if (try deps.pyprojectField(
-                allocator,
-                content,
-                "requires-python",
-            )) |spec| requires_python = .{
-                .spec = spec,
-                .file = "pyproject.toml",
-            };
-        } else |_| {}
-    }
-
-    output.print(io, "Combined dependency list ({d} items):", .{all_required_deps.items.len});
-    for (all_required_deps.items) |dep| {
+    // 1. Collect the dependencies. They live in `allocator` (main's arena);
+    // config strings are borrowed.
+    const collected = try sources.collect(ctx, env_config, setup_cwd, groups, flags.dev_mode);
+    output.print(io, "Combined dependency list ({d} items):", .{collected.deps.len});
+    for (collected.deps) |dep| {
         output.print(io, "  - {s}", .{dep});
     }
 
@@ -767,9 +601,9 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
         .env_name = env_name,
         .venv_dir = env_dir_path,
         .project_dir = setup_cwd,
-        .deps = all_required_deps.items,
+        .deps = collected.deps,
         .flags = flags,
-        .requires_python = requires_python,
+        .requires_python = collected.requires_python,
     });
     output.print(io, "Environment '{s}' setup completed successfully.", .{env_name});
 
@@ -787,32 +621,27 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
         env_config.target_machines.items,
     );
 
-    // Create Jupyter kernel if requested. Registry names are unique, so the
-    // entry just registered has exactly this name and venv path.
+    // Create Jupyter kernel if requested, for the entry just registered.
     if (flags.create_jupyter_kernel) {
-        jupyter.createKernel(ctx, env_name, env_dir_path, null, null) catch |err| {
+        const run_as = if (registry.find(env_name, setup_cwd)) |ref| registry.launchIdentifier(ref) else env_name;
+        jupyter.createKernel(ctx, env_name, env_dir_path, run_as, null, null) catch |err| {
             output.printError(io, "Failed to create Jupyter kernel: {t}", .{err});
         };
     }
 
-    // Record the tracked-file checksum + build flags so run/activate/cd/jupyter
-    // can detect config drift later and auto-rebuild. The anchor is setup_cwd
-    // (== the registered project_dir), so the gate's hash matches this one.
-    // Non-fatal: setup already succeeded; a missing stamp just forces the next
-    // gated command to re-setup.
-    if (autosetup.computeTrackedHash(
-        allocator,
-        io,
-        setup_cwd,
-        env_name,
-        env_config,
-    ) catch null) |tracked_hash| {
-        const flag_tokens = autosetup.flagTokens(allocator, flags, groups) catch &.{};
-        defer allocator.free(flag_tokens);
-        autosetup.writeStamp(allocator, io, env_dir_path, &tracked_hash, flag_tokens) catch |err| {
-            output.printWarning(io, "could not write setup stamp: {t}", .{err});
-        };
-    }
+    // Record the build so run/activate/cd/jupyter can detect config drift
+    // later and auto-rebuild. Non-fatal: setup already succeeded; a missing
+    // record just forces the next gated command to re-setup.
+    autosetup.recordSetup(ctx, .{
+        .project_dir = setup_cwd,
+        .env_name = env_name,
+        .venv_dir = env_dir_path,
+        .file = &file,
+        .flags = flags,
+        .groups = groups,
+    }) catch |err| {
+        output.printWarning(io, "could not write setup stamp: {t}", .{err});
+    };
 
     output.print(io,
         \\Environment '{s}' setup complete and registered in global registry.
@@ -982,6 +811,19 @@ fn explainResolveError(
 
         output.rawErr(io, "ERROR: '{s}' matches multiple environments:\n", .{identifier});
 
+        // A name several projects register: say where each lives.
+        if (cands.len > 1 and std.mem.eql(u8, cands[0].env_name, identifier) and
+            !std.mem.eql(u8, identifier, "."))
+        {
+            for (cands) |c| output.rawErr(
+                io,
+                "  - {s} in {s} (id {s})\n",
+                .{ c.env_name, c.project_dir, c.id[0..@min(c.id.len, 7)] },
+            );
+            output.rawErr(io, "Run the command inside one of these projects, or use the id.\n", .{});
+            return err;
+        }
+
         // Host framing applies only to the host-aware branches ("." and a shared
         // alias). A non-unique id-prefix is host-irrelevant — advise more characters.
         const host_relevant = std.mem.eql(
@@ -1127,7 +969,7 @@ pub fn handleActivate(
     // activate-script path that the shell sources.
     try autosetup.ensureUpToDate(ctx, registry.get(ref));
     const entry = registry.get(ref);
-    if (containerOf(ctx, entry.venv_path) != null) {
+    if (launch.containerOf(ctx, entry.venv_path) != null) {
         output.printError(
             io,
             "'{s}' runs in a container image, which activation cannot enter. For a shell in it: zenv run {s} bash",
@@ -1170,7 +1012,7 @@ fn activateAuto(
     };
     const entry = registry.get(ref);
     // A container env cannot be activated; on every cd, silence beats an error.
-    if (containerOf(ctx, entry.venv_path) != null) return;
+    if (launch.containerOf(ctx, entry.venv_path) != null) return;
     if (autosetup.isStale(ctx, entry) catch false) {
         output.rawErr(
             io,
@@ -1327,8 +1169,9 @@ fn printListEntry(ctx: Ctx, stdout: *Io.Writer, entry: *const Registry.Entry) vo
 
 pub fn handleRegister(ctx: Ctx, registry: *Registry, args: []const []const u8) !void {
     const io = ctx.io;
-    var project = try validation.validateAndParse(ctx.arena, io, "zenv.json");
-    defer project.deinit();
+    var file = try validation.load(ctx.arena, io, "zenv.json", .loud);
+    defer file.deinit(ctx.arena);
+    const project = &file.project;
     // First positional, not args[2]: `zenv register --no-host myenv` must not
     // treat the flag as the environment name.
     const env_name = positional(args, 0) orelse {
@@ -1359,6 +1202,13 @@ pub fn handleRegister(ctx: Ctx, registry: *Registry, args: []const []const u8) !
         output.printError(io, "Could not get current working directory: {t}", .{err});
         return err;
     };
+
+    try refuseEnvDirOverlap(
+        ctx,
+        try paths.venvPath(ctx.arena, cwd_path, project.base_dir, env_name),
+        cwd_path,
+        "register",
+    );
 
     // Register the environment in the global registry (persists internally).
     registry.register(
@@ -1454,6 +1304,47 @@ pub fn handlePython(ctx: Ctx, args: []const []const u8) !void {
     }
 }
 
+/// Refuses an env directory that `paths.envDirOverlap` finds clobbering the
+/// project or ZENV_DIR, saying why; `what` is the refused action.
+fn refuseEnvDirOverlap(
+    ctx: Ctx,
+    env_dir: []const u8,
+    project_dir: []const u8,
+    what: []const u8,
+) !void {
+    const io = ctx.io;
+    const zenv_dir = try paths.getZenvDir(ctx.arena, ctx.env);
+    const overlap = try paths.envDirOverlap(ctx.arena, io, env_dir, project_dir, zenv_dir) orelse return;
+    switch (overlap) {
+        .project_dir => output.printError(
+            io,
+            "Refusing to {s}: the environment directory '{s}' is or contains the project directory '{s}'.",
+            .{ what, env_dir, project_dir },
+        ),
+        .zenv_dir => output.printError(
+            io,
+            "Refusing to {s}: the environment directory '{s}' would overwrite zenv's global state in ZENV_DIR ('{s}').",
+            .{ what, env_dir, zenv_dir },
+        ),
+    }
+    output.printError(
+        io,
+        "Set a different 'base_dir' in zenv.json, run from a project directory, or point ZENV_DIR elsewhere.",
+        .{},
+    );
+    return error.EnvDirOverlap;
+}
+
+/// Whether `dir` looks like an env zenv built: it holds a file only setup
+/// writes. A missing dir counts as one (nothing to delete).
+fn isEnvDir(io: Io, allocator: Allocator, dir: []const u8) !bool {
+    if (!runtime.lexists(io, dir)) return true;
+    for ([_][]const u8{ envspec.file_name, ".zenv.stamp", "zenv_setup.log" }) |marker| {
+        if (runtime.lexists(io, try Io.Dir.path.join(allocator, &.{ dir, marker }))) return true;
+    }
+    return false;
+}
+
 pub fn handleRm(
     ctx: Ctx,
     registry: *Registry,
@@ -1462,6 +1353,25 @@ pub fn handleRm(
     const io = ctx.io;
     const allocator = ctx.arena;
     const ref = try resolveArg(ctx, registry, args, "rm <name|id>");
+
+    // Delete only what setup made: never the project or zenv's own state, and
+    // never a directory without a file setup writes (an entry registered over
+    // something else). `zenv deregister` still drops such an entry.
+    {
+        const entry = registry.get(ref);
+        refuseEnvDirOverlap(ctx, entry.venv_path, entry.project_dir, "remove") catch |err| {
+            output.printError(io, "'zenv deregister {s}' drops the entry and keeps the files.", .{entry.env_name});
+            return err;
+        };
+        if (!try isEnvDir(io, allocator, entry.venv_path)) {
+            output.printError(
+                io,
+                "Refusing to remove '{s}': it does not look like a zenv environment. 'zenv deregister {s}' drops the entry and keeps the files.",
+                .{ entry.venv_path, entry.env_name },
+            );
+            return error.EnvDirOverlap;
+        }
+    }
 
     // deregister returns the owned, detached entry, so venv_path stays
     // readable after removal.
@@ -1510,8 +1420,8 @@ pub fn handleRun(
     // The command replaces zenv (exec), so its exit status and signals reach
     // the caller as if it ran directly, and a signal sent to this pid (e.g. a
     // Jupyter kernel interrupt) reaches the command instead of ending zenv
-    // under it. execInEnv returns only when the command was not found.
-    const term = execInEnv(ctx, venv_path, command, command_args, .replace) catch |err| {
+    // under it. launch.start returns only when the command was not found.
+    const term = launch.start(ctx, venv_path, command, command_args, .replace) catch |err| {
         output.printError(io, "Failed to run command: {t}", .{err});
         return err;
     };
@@ -1574,16 +1484,25 @@ pub fn handleAdd(
         return err;
     };
 
-    // The project's zenv.json tells us which manifest (if any) backs this env.
+    // The project's zenv.json says which manifest (if any) backs this env, so
+    // it must be usable before anything is installed.
     const zenv_json_path = try Io.Dir.path.join(allocator, &.{ project_dir, "zenv.json" });
     defer allocator.free(zenv_json_path);
-
-    const info = try readEnvJson(allocator, io, zenv_json_path, env_name);
-    defer if (info.dependency_file) |df| allocator.free(df);
+    var file = try validation.load(allocator, io, zenv_json_path, .loud);
+    defer file.deinit(allocator);
+    const env_config = file.project.getEnvironment(env_name) orelse {
+        output.printError(
+            io,
+            "'{s}' is not defined in {s}, so the package cannot be recorded.",
+            .{ env_name, zenv_json_path },
+        );
+        return error.EnvironmentNotConfigured;
+    };
+    const dep_file = env_config.dependency_file;
 
     // Turning Python on is the user's call, made in zenv.json, not a side
     // effect of adding a package.
-    if (!info.python) {
+    if (!env_config.python) {
         output.printError(
             io,
             "'{s}' has no Python (\"python\": false in zenv.json), so packages cannot be added.",
@@ -1597,12 +1516,12 @@ pub fn handleAdd(
         return error.NoPython;
     }
     // A container env installs inside its image (its bin/python points there).
-    if (containerOf(ctx, entry.venv_path) != null) {
-        const record = try addRecord(
+    if (launch.containerOf(ctx, entry.venv_path) != null) {
+        const record = try sources.recordTarget(
             allocator,
             io,
             project_dir,
-            info.dependency_file,
+            dep_file,
             group,
             flags.zenv_only,
         );
@@ -1624,19 +1543,18 @@ pub fn handleAdd(
 
     // Where the package will be recorded, settled before installing so a
     // group that cannot be recorded installs nothing.
-    const record = try addRecord(
+    const record = try sources.recordTarget(
         allocator,
         io,
         project_dir,
-        info.dependency_file,
+        dep_file,
         group,
         flags.zenv_only,
     );
 
-    // Recording the package changes a tracked manifest. If the env is up to
-    // date now, the install below makes it up to date again, so the build
-    // record is renewed rather than left to trigger a rebuild on the next run.
-    const was_fresh = !(autosetup.isStale(ctx, entry) catch true);
+    // Recording the package changes a tracked manifest, and the install below
+    // makes the env match it again: an env up to date now stays so.
+    var change = try autosetup.Change.begin(ctx, entry);
 
     // 1. Install into the venv (only persist below if this succeeds).
     const uv = try envbuild.resolveUv(ctx, addInstaller(allocator, io, flags, entry.venv_path));
@@ -1645,7 +1563,7 @@ pub fn handleAdd(
     envbuild.recordAdded(allocator, io, entry.venv_path, package) catch {};
 
     // 2. Persist to the appropriate manifest.
-    persistAddedPackage(allocator, io, zenv_json_path, env_name, record, package) catch |err| {
+    sources.record(allocator, io, zenv_json_path, env_name, record, package) catch |err| {
         output.printError(
             io,
             "'{s}' is installed in '{s}', but recording it failed: {t}. Add it to the manifest by hand.",
@@ -1655,60 +1573,14 @@ pub fn handleAdd(
     };
     // A package in a dependency group survives rebuilds only if they install
     // the group, so the build record now replays it.
-    switch (record) {
-        .pyproject => |p| if (p.group) |g| {
-            if (autosetup.addReplayGroup(allocator, io, entry.venv_path, g) catch false)
-                output.print(
-                    io,
-                    "Rebuilds of '{s}' now install group '{s}'; a manual 'zenv setup' needs '--group {s}'.",
-                    .{ env_name, g, g },
-                );
-        },
-        else => {},
-    }
-    if (was_fresh) autosetup.restamp(ctx, project_dir, env_name, entry.venv_path) catch {};
+    if (record.group()) |g| if (change.replayGroup(ctx, g)) output.print(
+        io,
+        "Rebuilds of '{s}' now install group '{s}'; a manual 'zenv setup' needs '--group {s}'.",
+        .{ env_name, g, g },
+    );
+    change.finish(ctx, project_dir, env_name, entry.venv_path);
 
     output.print(io, "Added '{s}' to environment '{s}'.", .{ package, env_name });
-}
-
-/// What `add` and `jupyter create` need from an env's entry in zenv.json,
-/// read without validating the whole file.
-const EnvEntry = struct {
-    /// False only for an explicit `"python": false`.
-    python: bool = true,
-    /// Owned by the caller.
-    dependency_file: ?[]const u8 = null,
-};
-
-/// Reads `env_name`'s entry from the zenv.json at `path`. Defaults when the
-/// file, env or field is absent or unparsable: add stays best-effort and falls
-/// back to zenv.json then.
-fn readEnvJson(allocator: Allocator, io: Io, path: []const u8, env_name: []const u8) !EnvEntry {
-    const content = Io.Dir.cwd().readFileAlloc(
-        io,
-        path,
-        allocator,
-        .limited(10 * 1024 * 1024),
-    ) catch |err| {
-        if (err == error.FileNotFound) return .{};
-        return err;
-    };
-    defer allocator.free(content);
-
-    const text = try jsonc.strip(allocator, content);
-    defer allocator.free(text);
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return .{};
-    defer parsed.deinit();
-    if (parsed.value != .object) return .{};
-    const env_obj = parsed.value.object.get(env_name) orelse return .{};
-    const fields = std.json.parseFromValueLeaky(struct {
-        python: ?bool = null,
-        dependency_file: ?[]const u8 = null,
-    }, parsed.arena.allocator(), env_obj, .{ .ignore_unknown_fields = true }) catch return .{};
-    return .{
-        .python = fields.python orelse true,
-        .dependency_file = if (fields.dependency_file) |df| try allocator.dupe(u8, df) else null,
-    };
 }
 
 /// Formats `words` as a command line a shell reads back as the same words
@@ -1741,11 +1613,14 @@ test "shellWords quotes only words a shell would change" {
     try std.testing.expectEqualStrings("add e 'flask>=2.0' 'it'\\''s' --group=dev", got);
 }
 
-/// Whether zenv.json at `path` sets `"python": false` for `env_name`.
-fn pythonDisabled(allocator: Allocator, io: Io, path: []const u8, env_name: []const u8) !bool {
-    const info = try readEnvJson(allocator, io, path, env_name);
-    if (info.dependency_file) |df| allocator.free(df);
-    return !info.python;
+/// Whether the zenv.json at `path` sets `"python": false` for `env_name`:
+/// false when the file lacks the env, null when the file is missing or
+/// invalid (callers then let the loud `validation.load` say why).
+fn pythonDisabled(allocator: Allocator, io: Io, path: []const u8, env_name: []const u8) ?bool {
+    var file = validation.load(allocator, io, path, .quiet) catch return null;
+    defer file.deinit(allocator);
+    const env = file.project.getEnvironment(env_name) orelse return false;
+    return !env.python;
 }
 
 /// Whether the venv at `venv_path` has its interpreter link, bin/python.
@@ -1771,17 +1646,7 @@ fn noPython(io: Io, env_name: []const u8, why: []const u8) error{NoPython} {
 /// auto.
 fn addInstaller(allocator: Allocator, io: Io, flags: Flags, venv_path: []const u8) cli.Installer {
     if (flags.installer() != .auto) return flags.installer();
-    const stamp = autosetup.readStamp(allocator, io, venv_path) orelse return .auto;
-    defer stamp.deinit();
-    return Flags.parse(stamp.value.flags).installer();
-}
-
-/// The flags of the env's last setup (`--force`, `--no-cache`), which `zenv
-/// add` installs under too. Defaults when there is no build record.
-fn setupFlags(allocator: Allocator, io: Io, venv_path: []const u8) Flags {
-    const stamp = autosetup.readStamp(allocator, io, venv_path) orelse return .{};
-    defer stamp.deinit();
-    return Flags.parse(stamp.value.flags);
+    return autosetup.builtWith(allocator, io, venv_path).installer();
 }
 
 /// Installs `package` into the activated environment with `uv` (a path, from
@@ -1798,7 +1663,7 @@ fn installPackage(
 ) !void {
     const io = ctx.io;
     output.print(io, "Installing '{s}'...", .{package});
-    if (uv) |exe| if (try directEnv(ctx, venv_path)) |env| {
+    if (uv) |exe| if (try launch.environ(ctx, venv_path)) |env| {
         if (envbuild.addWithModules(
             ctx,
             exe,
@@ -1806,7 +1671,7 @@ fn installPackage(
             project_dir,
             &env,
             package,
-            setupFlags(ctx.arena, io, venv_path),
+            autosetup.builtWith(ctx.arena, io, venv_path),
         )) |done| {
             if (done) return;
         } else |err| {
@@ -1820,9 +1685,9 @@ fn installPackage(
     const cmd_args: []const []const u8 = if (uv != null)
         &.{ "pip", "install", package }
     else
-        &.{ "-m", "pip", "install", package };
+        &.{ "-m", "pip", "install", "--no-build-isolation", package };
 
-    const term = execInEnv(ctx, venv_path, command, cmd_args, .wait) catch |err| {
+    const term = launch.start(ctx, venv_path, command, cmd_args, .wait) catch |err| {
         output.printError(io, "Failed to run installer: {t}", .{err});
         return err;
     };
@@ -1867,76 +1732,6 @@ fn addGroup(allocator: Allocator, io: Io, args: []const []const u8, flags: Flags
     return group;
 }
 
-/// The pyproject.toml that holds an env's dependency groups, relative to the
-/// project directory: its `dependency_file` when that is a pyproject.toml,
-/// else `pyproject.toml`. `setup --group` reads the groups there.
-fn groupsFile(dep_file: ?[]const u8) []const u8 {
-    if (dep_file) |df| if (isPyproject(df)) return df;
-    return "pyproject.toml";
-}
-
-/// Where `zenv add` records a package.
-const AddRecord = union(enum) {
-    /// zenv.json `dependencies`, or `dev_dependencies` when true.
-    zenv_json: bool,
-    /// A requirements file (absolute path), for runtime dependencies.
-    requirements: struct { path: []const u8, label: []const u8 },
-    /// `[project].dependencies` when `group` is null, else that dependency group.
-    pyproject: struct { path: []const u8, label: []const u8, group: ?[]const u8 },
-};
-
-/// Picks the manifest for a package added to `group` (see `addGroup`):
-///
-/// | dependency_file   | runtime            | --dev                    | --group <other>      |
-/// |-------------------|--------------------|--------------------------|----------------------|
-/// | pyproject.toml    | [project]          | [dependency-groups].dev  | [dependency-groups]  |
-/// | requirements.txt  | requirements.txt   | zenv.json dev_deps       | ./pyproject.toml     |
-/// | none              | zenv.json deps     | zenv.json dev_deps       | ./pyproject.toml     |
-///
-/// `--zenv` sends runtime and dev packages to zenv.json and refuses another
-/// group, as does a project without the pyproject.toml it would go to.
-fn addRecord(
-    allocator: Allocator,
-    io: Io,
-    project_dir: []const u8,
-    dep_file: ?[]const u8,
-    group: ?[]const u8,
-    zenv_only: bool,
-) !AddRecord {
-    const dev = if (group) |g| deps.sameName(g, "dev") else false;
-    const toml_dep_file = if (dep_file) |df| isPyproject(df) else false;
-
-    if (group != null and !dev) {
-        if (zenv_only) {
-            output.printError(
-                io,
-                "zenv.json has no dependency groups besides dev_dependencies, so '--zenv' cannot record into group '{s}'.",
-                .{group.?},
-            );
-            return error.ArgsError;
-        }
-        const label = groupsFile(dep_file);
-        const path = try paths.resolvePath(allocator, project_dir, label);
-        if (!runtime.exists(io, path)) {
-            output.printError(
-                io,
-                "Dependency group '{s}' is recorded in pyproject.toml, but '{s}' does not exist.",
-                .{ group.?, path },
-            );
-            return error.ArgsError;
-        }
-        return .{ .pyproject = .{ .path = path, .label = label, .group = group } };
-    }
-    if (zenv_only or dep_file == null) return .{ .zenv_json = dev };
-    const path = try paths.resolvePath(allocator, project_dir, dep_file.?);
-    if (toml_dep_file) return .{
-        .pyproject = .{ .path = path, .label = dep_file.?, .group = group },
-    };
-    // requirements files have no dev concept; dev deps live in zenv.json.
-    if (dev) return .{ .zenv_json = true };
-    return .{ .requirements = .{ .path = path, .label = dep_file.? } };
-}
-
 /// `zenv add` for an env that runs in a container image, where the install has
 /// to happen: records the package first, then rebuilds the env in the image
 /// (`autosetup.ensureUpToDate`), which resolves it against the image's packages
@@ -1946,20 +1741,16 @@ fn addByRebuild(
     ctx: Ctx,
     entry: *const Registry.Entry,
     zenv_json_path: []const u8,
-    record: AddRecord,
+    record: sources.Record,
     package: []const u8,
 ) !void {
     const a = ctx.arena;
     const io = ctx.io;
     const cwd = Io.Dir.cwd();
-    // Every file the add may change (pyproject falls back to zenv.json), as it was.
+    // Every manifest the add may change (pyproject falls back to zenv.json), as it was.
     var files: std.ArrayList([]const u8) = .empty;
-    try files.appendSlice(a, &.{ zenv_json_path, try autosetup.stampPath(a, entry.venv_path) });
-    switch (record) {
-        .zenv_json => {},
-        .requirements => |r| try files.append(a, r.path),
-        .pyproject => |p| try files.append(a, p.path),
-    }
+    try files.append(a, zenv_json_path);
+    if (record.file()) |f| try files.append(a, f);
     const saved = try a.alloc(?[]const u8, files.items.len);
     for (files.items, saved) |path, *s| {
         s.* = cwd.readFileAlloc(io, path, a, .limited(64 * 1024 * 1024)) catch null;
@@ -1973,21 +1764,18 @@ fn addByRebuild(
             }
         }
     }.all;
+    var change = try autosetup.Change.begin(ctx, entry);
 
-    persistAddedPackage(a, io, zenv_json_path, entry.env_name, record, package) catch |err| {
+    sources.record(a, io, zenv_json_path, entry.env_name, record, package) catch |err| {
         restore(io, files.items, saved);
         output.printError(io, "Recording '{s}' failed: {t}.", .{ package, err });
         return error.RecordFailed;
     };
     // The rebuild installs a dependency group only if it replays it.
-    switch (record) {
-        .pyproject => |p| if (p.group) |g| {
-            _ = autosetup.addReplayGroup(a, io, entry.venv_path, g) catch false;
-        },
-        else => {},
-    }
+    if (record.group()) |g| _ = change.replayGroup(ctx, g);
     autosetup.ensureUpToDate(ctx, entry) catch |err| {
         restore(io, files.items, saved);
+        change.abort(ctx);
         output.printError(
             io,
             "Installing '{s}' in the container image failed; the manifest is unchanged.",
@@ -1998,117 +1786,12 @@ fn addByRebuild(
     output.print(io, "Added '{s}' to environment '{s}'.", .{ package, entry.env_name });
 }
 
-/// Records the installed `package` where `record` says.
-fn persistAddedPackage(
-    allocator: Allocator,
-    io: Io,
-    zenv_json_path: []const u8,
-    env_name: []const u8,
-    record: AddRecord,
-    package: []const u8,
-) !void {
-    switch (record) {
-        .zenv_json => |dev| {
-            try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, dev);
-            output.print(
-                io,
-                "Recorded in zenv.json ({s}).",
-                .{if (dev) "dev_dependencies" else "dependencies"},
-            );
-        },
-        .requirements => |r| {
-            try manifest.addToRequirementsTxt(allocator, io, r.path, package);
-            output.print(io, "Recorded in {s}.", .{r.label});
-        },
-        .pyproject => |p| {
-            if (try manifest.addToPyproject(allocator, io, p.path, package, p.group)) {
-                if (p.group) |g|
-                    output.print(io, "Recorded in {s} ([dependency-groups].{s}).", .{ p.label, g })
-                else
-                    output.print(io, "Recorded in {s} ([project].dependencies).", .{p.label});
-            } else {
-                // Runtime case with no [project] table: fall back to zenv.json.
-                output.print(
-                    io,
-                    "Could not locate [project] in {s}; recording in zenv.json instead.",
-                    .{p.label},
-                );
-                try manifest.addToZenvJson(allocator, io, zenv_json_path, env_name, package, false);
-            }
-        },
-    }
-}
-
-/// How execInEnv starts the command: as a child it waits for, or in place of
-/// zenv (exec), in which case it returns only if the command did not start.
-const Launch = enum { wait, replace };
-
-/// Starts `command` inside the environment at `venv_path` with inherited stdio,
-/// as `launch` says; with `.wait` it returns the command's `Term`. An env with
-/// a container is started in its image (`execInContainer`). Otherwise uses the
-/// direct launch when `zenv-env.json` can reproduce activation, else sources
-/// activate.sh through bash.
-fn execInEnv(
-    ctx: Ctx,
-    venv_path: []const u8,
-    command: []const u8,
-    command_args: []const []const u8,
-    launch: Launch,
-) !runtime.Term {
-    if (!container.inside(ctx.env)) if (containerOf(ctx, venv_path)) |img| {
-        return execInContainer(ctx, img, venv_path, command, command_args, launch);
-    };
-    if (try execDirect(ctx, venv_path, command, command_args, launch)) |term| return term;
-
-    const activate_path = try Io.Dir.path.join(
-        ctx.arena,
-        &.{ venv_path, activation.fileName(.sh) },
-    );
-    const argv = try buildRunArgv(ctx.arena, activate_path, command, command_args);
-    return startCommand(ctx.io, argv, .{}, launch);
-}
-
-/// The container an env runs in, from its `zenv-env.json`; null for an env
-/// without one (or without a readable spec). Allocated in the arena.
-fn containerOf(ctx: Ctx, venv_path: []const u8) ?container.Image {
-    // Not deinit: the image's strings live on in the arena.
-    const parsed = envspec.read(ctx.arena, ctx.io, venv_path) orelse return null;
-    return parsed.value.container;
-}
-
-/// Starts `command` in the env's container: `zenv __exec` there applies the
-/// env to the container's environment and starts it (`handleExecInside`).
-/// The host's Python settings stay outside (`container.hostEnv`).
-fn execInContainer(
-    ctx: Ctx,
-    img: container.Image,
-    venv_path: []const u8,
-    command: []const u8,
-    command_args: []const []const u8,
-    launch: Launch,
-) !runtime.Term {
-    const a = ctx.arena;
-    const io = ctx.io;
-    const self_exe = try std.process.executablePathAlloc(io, a);
-    const inner = try std.mem.concat(a, []const u8, &.{
-        &.{ self_exe, "__exec", venv_path, command },
-        command_args,
-    });
-    const argv = try container.execArgv(a, io, img, &.{ img.project_dir, venv_path, self_exe }, inner);
-    var env = try container.hostEnv(a, ctx.env);
-    const exe = try envspec.resolveCommand(a, io, argv[0], env.get("PATH")) orelse {
-        output.printError(io, "apptainer: command not found (the environment runs in {s})", .{img.image});
-        return .{ .exited = 127 };
-    };
-    return startCommand(io, argv, .{ .environ_map = &env, .exe_path = exe }, launch);
-}
-
-/// `zenv __exec <venv> <command> [args...]`, run by `execInContainer` inside
+/// `zenv __exec <venv> <command> [args...]`, run by `launch.start` inside
 /// an env's container: starts the command with the env applied, as `zenv run`
 /// does outside one.
 pub fn handleExecInside(ctx: Ctx, args: []const []const u8) !void {
     if (args.len < 4) return error.ArgsError;
-    const term = execInEnv(ctx, args[2], args[3], args[4..], .replace) catch |err| {
+    const term = launch.start(ctx, args[2], args[3], args[4..], .replace) catch |err| {
         output.printError(ctx.io, "Failed to run command: {t}", .{err});
         return err;
     };
@@ -2117,108 +1800,7 @@ pub fn handleExecInside(ctx: Ctx, args: []const []const u8) !void {
         else => std.process.exit(1),
     }
 }
-
-fn startCommand(
-    io: Io,
-    argv: []const []const u8,
-    opts: runtime.ExecOptions,
-    launch: Launch,
-) !runtime.Term {
-    return switch (launch) {
-        .wait => runtime.exec(io, argv, opts),
-        .replace => runtime.replace(io, argv, opts),
-    };
-}
-
-/// Direct launch: copy this process's environment, apply `zenv-env.json`,
-/// resolve `command` against the resulting PATH and start it, no shell
-/// involved. Returns null (caller falls back to bash) when the spec is missing
-/// or `envspec.directReason` reports a blocker, or when ZENV_RUN_SHELL=1.
-fn execDirect(
-    ctx: Ctx,
-    venv_path: []const u8,
-    command: []const u8,
-    command_args: []const []const u8,
-    launch: Launch,
-) !?runtime.Term {
-    const io = ctx.io;
-    const allocator = ctx.arena;
-    if (ctx.getEnv("ZENV_RUN_SHELL")) |v| {
-        if (std.mem.eql(u8, v, "1")) {
-            output.debug(io, "run: ZENV_RUN_SHELL=1, using activate.sh", .{});
-            return null;
-        }
-    }
-    var child_env = try directEnv(ctx, venv_path) orelse return null;
-
-    const exe = try envspec.resolveCommand(allocator, io, command, child_env.get("PATH")) orelse {
-        // Same status bash's `exec` gives for an unknown command.
-        output.printError(io, "{s}: command not found", .{command});
-        return .{ .exited = 127 };
-    };
-    output.debug(io, "run: direct launch of {s}", .{exe});
-
-    const argv = try std.mem.concat(allocator, []const u8, &.{ &.{command}, command_args });
-    return try startCommand(io, argv, .{ .environ_map = &child_env, .exe_path = exe }, launch);
-}
-
-/// This process's environment with `zenv-env.json` applied: what a direct
-/// launch in the env runs with. Null when the spec is missing or
-/// `envspec.directReason` reports a blocker (activate.sh is needed then).
-fn directEnv(ctx: Ctx, venv_path: []const u8) !?std.process.Environ.Map {
-    const io = ctx.io;
-    const allocator = ctx.arena;
-    const parsed = envspec.read(allocator, io, venv_path) orelse {
-        output.debug(io, "run: no usable {s}, using activate.sh", .{envspec.file_name});
-        return null;
-    };
-    defer parsed.deinit();
-    const spec = &parsed.value;
-
-    // Only the module cache needs the system identity; skip the lookup otherwise.
-    const system: ?[]const u8 = if (spec.modules.len > 0) envspec.currentSystem(
-        allocator,
-        io,
-        ctx.env,
-    ) catch null else null;
-    if (envspec.directReason(spec, system)) |reason| {
-        output.debug(io, "run: {s}, using activate.sh", .{reason});
-        return null;
-    }
-
-    var env = try ctx.env.clone(allocator);
-    try envspec.apply(&env, spec);
-    return env;
-}
-
-/// Shell snippet passed to `bash -c`. It sources the activation script (passed
-/// as the first positional parameter `$1`), drops it from the positionals, then
-/// `exec`s the user command (`$@`) so the command replaces the shell. Sourcing
-/// honors `module load` and any activate hooks; `exec` makes the command's exit
-/// status and signal disposition propagate directly back to zenv.
-const run_runner = "set -e; source \"$1\"; shift; exec \"$@\"";
-
-/// Builds the argv for `zenv run`: the user command and its arguments are passed
-/// to `bash -c` as positional parameters, never interpolated into a script. Because
-/// bash receives them as distinct argv entries it never re-parses them, so there is
-/// no quoting/escaping or command-injection surface (e.g. a backtick or `$VAR` in an
-/// argument stays literal). Caller owns the returned slice (free with `allocator.free`);
-/// the element strings are borrowed from the inputs and must outlive it.
-fn buildRunArgv(
-    allocator: Allocator,
-    activate_path: []const u8,
-    command: []const u8,
-    command_args: []const []const u8,
-) ![]const []const u8 {
-    // `zenv` becomes $0 (used only in any bash error message); activate_path is $1.
-    return std.mem.concat(
-        allocator,
-        []const u8,
-        &.{ &.{ "/bin/bash", "-c", run_runner, "zenv", activate_path, command }, command_args },
-    );
-}
-
-test "pythonDisabled reads only an explicit false" {
+test "pythonDisabled reads only an explicit false in a valid zenv.json" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     const cwd = Io.Dir.cwd();
@@ -2228,45 +1810,16 @@ test "pythonDisabled reads only an explicit false" {
     try cwd.createDirPath(io, root);
     const path = root ++ "/zenv.json";
     try cwd.writeFile(io, .{ .sub_path = path, .data =
-        \\{ "base_dir": ".zenv", "off": { "python": false, "dependency_file": "r.txt" }, "on": { "python": true }, "unset": {}, "nulls": { "python": null, "dependency_file": null } }
+        \\{ "base_dir": ".zenv", "off": { "target_machines": ["*"], "python": false }, "on": { "target_machines": ["*"], "python": true }, "unset": { "target_machines": ["*"] }, "nulls": { "target_machines": ["*"], "python": null, "dependency_file": null } }
     });
-    try std.testing.expect(try pythonDisabled(a, io, path, "off"));
-    try std.testing.expect(!try pythonDisabled(a, io, path, "on"));
-    try std.testing.expect(!try pythonDisabled(a, io, path, "unset"));
-    try std.testing.expect(!try pythonDisabled(a, io, path, "nulls"));
-    try std.testing.expect(!try pythonDisabled(a, io, path, "missing"));
-    try std.testing.expect(!try pythonDisabled(a, io, root ++ "/nope.json", "off"));
-    const off = try readEnvJson(a, io, path, "off");
-    defer a.free(off.dependency_file.?);
-    try std.testing.expectEqualStrings("r.txt", off.dependency_file.?);
-}
-
-test "buildRunArgv passes command and args through verbatim" {
-    const allocator = std.testing.allocator;
-    // An argument crafted to trigger shell expansion if it were ever re-parsed.
-    const nasty = "`whoami`$HOME \"q\" ; rm -rf /";
-    const args = [_][]const u8{ "pip", "install", nasty };
-    const argv = try buildRunArgv(allocator, "/envs/foo/activate.sh", "uv", &args);
-    defer allocator.free(argv);
-
-    const expected = [_][]const u8{
-        "/bin/bash", "-c", run_runner, "zenv",
-        "/envs/foo/activate.sh", // $1: sourced
-        "uv", // the command
-        "pip", "install", nasty, // args, untouched
-    };
-    try std.testing.expectEqual(expected.len, argv.len);
-    for (expected, argv) |e, a| try std.testing.expectEqualStrings(e, a);
-}
-
-test "buildRunArgv handles a command with no extra args" {
-    const allocator = std.testing.allocator;
-    const args = [_][]const u8{};
-    const argv = try buildRunArgv(allocator, "/a.sh", "python", &args);
-    defer allocator.free(argv);
-
-    try std.testing.expectEqual(@as(usize, 6), argv.len);
-    try std.testing.expectEqualStrings("python", argv[5]);
+    try std.testing.expectEqual(@as(?bool, true), pythonDisabled(a, io, path, "off"));
+    try std.testing.expectEqual(@as(?bool, false), pythonDisabled(a, io, path, "on"));
+    try std.testing.expectEqual(@as(?bool, false), pythonDisabled(a, io, path, "unset"));
+    try std.testing.expectEqual(@as(?bool, false), pythonDisabled(a, io, path, "nulls"));
+    try std.testing.expectEqual(@as(?bool, false), pythonDisabled(a, io, path, "missing"));
+    try std.testing.expectEqual(@as(?bool, null), pythonDisabled(a, io, root ++ "/nope.json", "off"));
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "{ bad" });
+    try std.testing.expectEqual(@as(?bool, null), pythonDisabled(a, io, path, "off"));
 }
 
 pub fn handleLog(
@@ -2319,13 +1872,14 @@ pub fn handleValidate(ctx: Ctx, args: []const []const u8) !void {
         std.process.exit(1);
     }
 
-    // validateAndParse prints what it finds; any finding or failure exits 1.
-    var project = validation.validateAndParse(
+    // load prints what it finds; any finding or failure exits 1.
+    var file = validation.load(
         ctx.arena,
         io,
         validate_config_path,
+        .loud,
     ) catch std.process.exit(1);
-    project.deinit();
+    file.deinit(ctx.arena);
     output.print(io, "Configuration file is valid!", .{});
 }
 
@@ -2380,8 +1934,9 @@ fn handleAliasCreate(
     // Owned: addAlias re-reads the registry, which frees the entry's strings.
     const target_env_name = try allocator.dupe(u8, registry.get(target_ref).env_name);
     defer allocator.free(target_env_name);
+    const target_id = try allocator.dupe(u8, registry.get(target_ref).id);
 
-    registry.addAlias(alias_name, target_env_name) catch |err| {
+    registry.addAlias(alias_name, target_id) catch |err| {
         switch (err) {
             error.EnvironmentNotFound => output.printError(
                 io,
@@ -2532,7 +2087,11 @@ fn handleJupyterCreate(
     const ref = try resolve(ctx, registry, identifier);
     const entry = registry.get(ref);
     const zenv_json_path = try Io.Dir.path.join(ctx.arena, &.{ entry.project_dir, "zenv.json" });
-    if (try pythonDisabled(ctx.arena, io, zenv_json_path, entry.env_name)) return noPython(
+    // With an unusable zenv.json the env is used as last built (the gate says
+    // so); whether it has Python is then read off its venv.
+    const disabled = pythonDisabled(ctx.arena, io, zenv_json_path, entry.env_name) orelse
+        !runtime.lexists(io, try Io.Dir.path.join(ctx.arena, &.{ entry.venv_path, "bin", "python" }));
+    if (disabled) return noPython(
         io,
         entry.env_name,
         "a Jupyter kernel needs Python",
@@ -2545,6 +2104,7 @@ fn handleJupyterCreate(
         ctx,
         entry.env_name,
         entry.venv_path,
+        registry.launchIdentifier(ref),
         custom_name,
         custom_display_name,
     );
@@ -2596,12 +2156,11 @@ pub fn handleRename(
     // Everything that can refuse the rename is checked before anything moves.
     // The name becomes a directory next to the venv, so it must not be a path.
     try requireValidEnvName(io, new_name);
-    if (registry.nameTaken(new_name)) {
+    var ref = try resolve(ctx, registry, old_identifier);
+    if (registry.nameTaken(new_name, registry.get(ref).project_dir)) {
         output.printError(io, "'{s}' is already an environment name, alias or id.", .{new_name});
         return error.EnvironmentAlreadyExists;
     }
-
-    var ref = try resolve(ctx, registry, old_identifier);
 
     // Owned copies: the FS orchestration and rollback messages need these to
     // outlive registry.rename (which frees the entry's copies).
@@ -2611,6 +2170,22 @@ pub fn handleRename(
     defer allocator.free(old_venv_path);
     const project_dir = try allocator.dupe(u8, registry.get(ref).project_dir);
     defer allocator.free(project_dir);
+
+    // The project's zenv.json gets the new name too, so it must not define
+    // that name already (the env would then run with the other entry's config).
+    {
+        const config_path = try Io.Dir.path.join(allocator, &.{ project_dir, "zenv.json" });
+        if (manifest.ZenvJson.read(allocator, io, config_path)) |file| {
+            if (file.root.contains(new_name)) {
+                output.printError(
+                    io,
+                    "{s} already defines '{s}'. Pick another name, or remove that entry first.",
+                    .{ config_path, new_name },
+                );
+                return error.EnvironmentAlreadyExists;
+            }
+        } else |_| {}
+    }
 
     const parent_dir = std.Io.Dir.path.dirname(old_venv_path) orelse {
         output.printError(io, "Invalid virtual environment path", .{});
@@ -2639,7 +2214,7 @@ pub fn handleRename(
 
     // An env that is up to date now must not rebuild after the rename: the
     // build record hashes the env's name.
-    const was_fresh = !(autosetup.isStale(ctx, registry.get(ref)) catch true);
+    const change = try autosetup.Change.begin(ctx, registry.get(ref));
     const has_jupyter_kernel = jupyter.hasKernel(ctx, old_name);
 
     output.print(io, "Renaming environment '{s}' to '{s}'...", .{ old_name, new_name });
@@ -2695,12 +2270,12 @@ pub fn handleRename(
     updateLocalConfigs(ctx, old_name, new_name, project_dir) catch |err| {
         output.printError(
             io,
-            "Environment renamed successfully, but failed to update local config files: {t}",
-            .{err},
+            "Environment renamed, but {s}/zenv.json could not be updated ({t}): rename '{s}' to '{s}' there by hand.",
+            .{ project_dir, err, old_name, new_name },
         );
-        return;
+        return error.RecordFailed;
     };
-    if (was_fresh) autosetup.restamp(ctx, project_dir, new_name, new_venv_path) catch {};
+    change.finish(ctx, project_dir, new_name, new_venv_path);
 }
 
 /// Rolls back a rename's directory move: moves the venv back to `old_venv_path`

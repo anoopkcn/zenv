@@ -25,7 +25,7 @@ pub fn report(io: Io, err: anyerror) noreturn {
             "Environment name not found in configuration or argument missing",
             .{},
         ),
-        // validation.validateAndParse has printed why: the file is missing, its
+        // validation.load has printed why: the file is missing, its
         // JSON is broken, or a field is wrong.
         error.InvalidFormat => output.printError(
             io,
@@ -100,11 +100,12 @@ pub fn report(io: Io, err: anyerror) noreturn {
         // that refused); just exit (no message).
         error.ProcessError,
         error.AutoSetupFailed,
-        error.BaseDirIsZenvDir,
+        error.EnvDirOverlap,
         error.NoPython,
         error.EnvironmentNotRegistered,
         error.AmbiguousIdentifier,
         error.EnvironmentAlreadyExists,
+        error.EnvironmentNotConfigured,
         error.InvalidEnvironmentName,
         error.AliasAlreadyExists,
         error.AliasNotFound,
@@ -114,6 +115,7 @@ pub fn report(io: Io, err: anyerror) noreturn {
         error.MissingEnvSpec,
         error.DependencyGroupNotFound,
         error.InvalidDependencyGroup,
+        error.InvalidPyproject,
         error.RecordFailed,
         error.ContainerEnv,
         => {},

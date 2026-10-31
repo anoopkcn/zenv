@@ -60,6 +60,31 @@ pub const ModuleCache = struct {
     untrusted: bool,
     modules_sig: []const u8 = "",
     ops: []const Op,
+
+    /// Why this cache must never be replayed (another format, an untrusted
+    /// capture), or null.
+    pub fn defect(self: *const ModuleCache) ?[]const u8 {
+        if (self.version != module_cache_version) return "module cache version mismatch";
+        if (self.untrusted) return "module cache is marked untrusted";
+        return null;
+    }
+
+    /// Why this cache must not be replayed on `system` (null: unknown, which
+    /// is refused), or for the module list `modules_sig` (null: not checked),
+    /// or null when it may be. Every replay decision goes through here or
+    /// `defect`.
+    pub fn unfitFor(
+        self: *const ModuleCache,
+        system: ?[]const u8,
+        modules_sig: ?[]const u8,
+    ) ?[]const u8 {
+        if (self.defect()) |why| return why;
+        const sys = system orelse return "cannot determine the current system";
+        if (!std.mem.eql(u8, sys, self.system)) return "module cache was captured on another system";
+        if (modules_sig) |sig| if (!std.mem.eql(u8, sig, self.modules_sig))
+            return "module cache was captured for other modules";
+        return null;
+    }
 };
 
 pub const Spec = struct {
@@ -94,7 +119,7 @@ pub const Spec = struct {
     pub fn usableModuleCache(self: *const Spec) ?ModuleCache {
         if (self.modules.len == 0 or !self.module_cache_enabled) return null;
         const cache = self.module_cache orelse return null;
-        if (cache.version != module_cache_version or cache.untrusted) return null;
+        if (cache.defect() != null) return null;
         return cache;
     }
 };
@@ -296,13 +321,28 @@ pub fn build(
     };
 }
 
-/// `value` moved from under `old_dir` to `new_dir` when it is that directory or
-/// a path inside it; otherwise `value` itself.
+/// `value` with every whole path that is `old_dir` or inside it moved to
+/// `new_dir`, wherever it stands (`/opt/x:<old>/lib`, `--prefix=<old>`);
+/// `value` itself when there is none.
 fn movePath(a: Allocator, value: []const u8, old_dir: []const u8, new_dir: []const u8) ![]const u8 {
-    const rest = std.mem.cutPrefix(u8, value, old_dir) orelse return value;
-    if (rest.len == 0) return new_dir;
-    if (rest[0] != '/') return value;
-    return std.mem.concat(a, u8, &.{ new_dir, rest });
+    var out: std.ArrayList(u8) = .empty;
+    var from: usize = 0;
+    var i: usize = 0;
+    while (std.mem.findPos(u8, value, i, old_dir)) |at| {
+        const end = at + old_dir.len;
+        i = at + 1;
+        // Whole paths only: `/p/.zenv/older` and `/x/p/.zenv/old` stay.
+        const starts_ok = at == 0 or std.mem.findScalar(u8, ":= ,;\"'", value[at - 1]) != null;
+        const ends_ok = end == value.len or value[end] == '/' or value[end] == ':';
+        if (!starts_ok or !ends_ok) continue;
+        try out.appendSlice(a, value[from..at]);
+        try out.appendSlice(a, new_dir);
+        from = end;
+        i = end;
+    }
+    if (from == 0) return value;
+    try out.appendSlice(a, value[from..]);
+    return out.items;
 }
 
 /// `spec` for a venv moved from `old_venv` to `new_venv` and renamed to
@@ -395,14 +435,7 @@ pub fn directReason(spec: *const Spec, current_system: ?[]const u8) ?[]const u8 
     if (spec.hasActivateHooks()) return "activate hooks are configured";
     if (spec.modules.len > 0) {
         const cache = spec.module_cache orelse return "no module cache data";
-        if (cache.version != module_cache_version) return "module cache version mismatch";
-        if (cache.untrusted) return "module cache is marked untrusted";
-        const sys = current_system orelse return "cannot determine the current system";
-        if (!std.mem.eql(
-            u8,
-            sys,
-            cache.system,
-        )) return "module cache was captured on another system";
+        if (cache.unfitFor(current_system, null)) |why| return why;
     }
     return null;
 }
@@ -614,7 +647,11 @@ test "relocate moves venv paths and the name, nothing else" {
     spec.ops = try std.mem.concat(
         a,
         Op,
-        &.{ spec.ops, &.{.{ .op = .set, .name = "OTHER", .value = "/p/.zenv/older" }} },
+        &.{ spec.ops, &.{
+            .{ .op = .set, .name = "OTHER", .value = "/p/.zenv/older" },
+            .{ .op = .prepend, .name = "LIBS", .value = "/opt/x:/p/.zenv/old/lib:/q/p/.zenv/old" },
+            .{ .op = .set, .name = "CFG", .value = "--prefix=/p/.zenv/old" },
+        } },
     );
     const moved = try relocate(a, &spec, "/p/.zenv/old", "/p/.zenv/new", "new");
     try testing.expectEqualStrings("new", moved.name);
@@ -626,6 +663,8 @@ test "relocate moves venv paths and the name, nothing else" {
         "/p/.zenv/older",
         moved.ops[6].value,
     ); // a sibling path is not "inside"
+    try testing.expectEqualStrings("/opt/x:/p/.zenv/new/lib:/q/p/.zenv/old", moved.ops[7].value);
+    try testing.expectEqualStrings("--prefix=/p/.zenv/new", moved.ops[8].value);
     try testing.expectEqualStrings(
         "/p/.zenv/new/scripts/activate_hook.sh",
         moved.activate_script.?,
@@ -812,4 +851,27 @@ test "resolveCommand searches PATH and passes paths through" {
     try testing.expect(std.mem.endsWith(u8, default_path, "/sh"));
     // A directory on PATH named like the command is skipped.
     try testing.expect((try resolveCommand(a, io, "bin", "/")) == null);
+}
+
+test "ModuleCache.unfitFor checks format, trust, system and module list" {
+    const ok = ModuleCache{
+        .version = module_cache_version,
+        .system = "jureca",
+        .untrusted = false,
+        .modules_sig = "sig",
+        .ops = &.{},
+    };
+    try testing.expect(ok.defect() == null);
+    try testing.expect(ok.unfitFor("jureca", "sig") == null);
+    try testing.expect(ok.unfitFor("jureca", null) == null);
+    try testing.expect(ok.unfitFor(null, "sig") != null);
+    try testing.expect(ok.unfitFor("juwels", "sig") != null);
+    try testing.expect(ok.unfitFor("jureca", "other") != null);
+
+    var bad = ok;
+    bad.untrusted = true;
+    try testing.expectEqualStrings("module cache is marked untrusted", bad.unfitFor("jureca", "sig").?);
+    bad = ok;
+    bad.version = 1;
+    try testing.expectEqualStrings("module cache version mismatch", bad.defect().?);
 }

@@ -121,7 +121,7 @@ uv does not see packages outside the venv, so with modules that put Python packa
 }
 ```
 
-Check the [Configuration Reference](#configuration-reference) for the full list of keys. The optional `dependency_file` can be a `requirements.txt` or a `pyproject.toml` file; `zenv init` fills it in from what it finds in the project.
+Check the [Configuration Reference](#configuration-reference) for the full list of keys. The optional `dependency_file` can be a `requirements.txt` or a `pyproject.toml` file; `zenv init` fills it in from what it finds in the project. A requirements file may use `\` continuations (hash-pinned files) and option lines such as `-r base.txt`, `-c constraints.txt`, `-e .` and `--index-url`/`--extra-index-url`; relative paths in them are read from the file's directory. Two entries for one package are both kept when their environment markers differ (`numpy<2; python_version<'3.9'` and `numpy>=2; python_version>='3.9'`). A `pyproject.toml` that cannot be parsed stops setup.
 
 ### Listing environments
 
@@ -251,6 +251,8 @@ zenv run test vim
 `zenv add` installs a package into an existing environment **and** records it in the
 project's manifest, so the dependency persists and is reinstalled on the next setup/rebuild.
 The package is installed first; the manifest is only updated if the install succeeds.
+`zenv.json` must be valid and define the environment: otherwise `zenv add` shows what is wrong
+and installs nothing.
 
 ```bash
 zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]
@@ -320,7 +322,7 @@ The environment must already be built (`zenv setup <name>`); `zenv add` does not
 
 ### Automatic rebuilds
 
-`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), and the `dependency_file`, `modules_file` and `setup.script` that entry names. If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--pip`, `--dev`, `--group`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
+`zenv run`, `zenv activate`, `zenv cd` and `zenv jupyter create` first check that the environment matches its configuration: its own entry in `zenv.json` (plus `base_dir`), the `dependency_file`, `modules_file` and `setup.script` that entry names, and the project's `pyproject.toml` when the build reads it without it being the `dependency_file` (for `--group` with a requirements file, or for `--dev`). If any of them changed since the last `zenv setup`, zenv runs the setup again, with the same build flags (`--uv`, `--pip`, `--dev`, `--group`, `--python`, `--force`, `--no-cache`), before the command continues. Editing another environment in the same `zenv.json` does not rebuild this one.
 
 A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<name>' (...; auto-setup)...` and a completion line). It is on stderr deliberately: `zenv activate` and `zenv cd` put their shell-eval payload on stdout (`source $(zenv activate <name>)`), and stderr does not corrupt that capture while still being visible in your terminal. A routine command with no changes stays silent. If the rebuild fails, its errors are printed and the command stops, except `zenv cd`, which still prints the project directory so you can go fix `zenv.json`.
 
@@ -333,7 +335,7 @@ A rebuild prints a short notice on **stderr** (`zenv: rebuilding environment '<n
 
 zenv keeps a record of every environment in `ZENV_DIR/registry.json`, which is what lets you use an environment by name from any directory. `ZENV_DIR` defaults to `$HOME/.zenv`; set it to any writable directory to keep the registry elsewhere.
 
-`zenv setup <name>` registers the environment for you. To register one by hand:
+`zenv setup <name>` registers the environment for you. The same name may be registered by several projects, such as two clones or worktrees of one repository: inside a project the name means that project's environment, and outside all of them it is ambiguous, so use the id (`zenv ls --all` shows it). Setup refuses an environment directory that is, or contains, the project directory or ZENV_DIR's own files (a `base_dir` of `..`, say), and `zenv rm` only deletes a directory that setup built. To register one by hand:
 
 ```bash
 zenv register <name>
@@ -349,7 +351,7 @@ zenv deregister <name>     # Remove by name or ID
 
 The default priority of the Python is as follows:
 
-1. Module-provided Python (if HPC modules are loaded)
+1. Module-provided Python: a Python the env's modules put on `PATH` (a `python3` that was on `PATH` already, such as `/usr/bin/python3`, does not count)
 2. Explicitly configured 'fallback_python' from zenv.json (if not null)
 3. zenv-managed pinned Python
 4. System python3
@@ -361,8 +363,9 @@ If the project's `pyproject.toml` declares `requires-python` and zenv reads it (
 `dependency_file`, or `--dev` installs the project), setup checks the selected Python against it
 before creating the venv. When it does not match, setup stops and says how to make a matching
 Python the one zenv selects: a Python module, `fallback_python`, or a zenv-installed Python you pin.
-An existing venv built with a non-matching Python is reported too; remove it with `zenv rm <name>`
-and set it up again.
+When the selected Python changes (a new `fallback_python`, another Python module), setup makes the
+venv again with it and reinstalls the packages. An existing venv of the selected Python that does
+not match `requires-python` is reported; remove it with `zenv rm <name>` and set it up again.
 
 If you would like to use zenv-managed default Python for the environment, run:
 
@@ -720,7 +723,7 @@ Options for 'zenv add <name> <package>':
 
 [b] Python Priority List (for 'zenv setup' without '--python' flag):
   zenv attempts to find a Python interpreter in the following order:
-  1. HPC module-provided Python (if HPC environment modules are loaded).
+  1. A Python the loaded HPC modules put on PATH.
   2. Path explicitly specified by the 'fallback_python' key in zenv.json.
   3. zenv-pinned Python (set via 'zenv python pin <version>').
   4. System Python.

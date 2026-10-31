@@ -8,20 +8,47 @@ const toml = @import("toml");
 /// version constraint, extras, marker, or surrounding whitespace. Used for
 /// case-insensitive duplicate detection — e.g. "Flask[async] >= 2.0; python_version<'3.12'"
 /// and "flask==3.1" both reduce to a name that compares equal via `samePackage`.
-/// The returned slice points INTO `spec` (no allocation).
+/// Empty for a line without a name: an option (`-r base.txt`), or a bare URL
+/// or path (`git+ssh://git@host/repo.git`, `./pkg`). The returned slice
+/// points INTO `spec` (no allocation).
 fn packageBaseName(spec: []const u8) []const u8 {
-    // The name ends at the first version operator, extras bracket, marker
-    // separator, URL ('@'), or whitespace.
-    const end = std.mem.findAny(u8, spec, "<>=~!@;[ \t") orelse spec.len;
-    return std.mem.trim(u8, spec[0..end], " \t");
+    const s = std.mem.trim(u8, spec, " \t\r");
+    if (s.len == 0 or !std.ascii.isAlphanumeric(s[0])) return "";
+    var end: usize = 0;
+    while (end < s.len and (std.ascii.isAlphanumeric(s[end]) or isNameSeparator(s[end]))) end += 1;
+    // `git+https://...`, `https://...`, `pkg/sub`: a URL or path, not a name.
+    if (end < s.len and (s[end] == ':' or s[end] == '+' or s[end] == '/')) return "";
+    return s[0..end];
+}
+
+/// The environment marker of a requirement (after `;`), or "".
+fn markerOf(spec: []const u8) []const u8 {
+    const i = std.mem.findScalar(u8, spec, ';') orelse return "";
+    return std.mem.trim(u8, spec[i + 1 ..], " \t\r");
+}
+
+/// Whether two markers are the same text, ignoring whitespace.
+fn sameMarker(x: []const u8, y: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        while (i < x.len and std.ascii.isWhitespace(x[i])) i += 1;
+        while (j < y.len and std.ascii.isWhitespace(y[j])) j += 1;
+        if (i == x.len or j == y.len) return i == x.len and j == y.len;
+        if (x[i] != y[j]) return false;
+        i += 1;
+        j += 1;
+    }
 }
 
 /// True when two requirement specs name the same package, ignoring
 /// version/extras/markers. Names compare as PEP 503 normalizes them:
 /// case-insensitively, with any run of '-', '_' and '.' equal to one '-'
-/// (`Flask_Login` is `flask-login`). Allocation-free.
+/// (`Flask_Login` is `flask-login`). Lines without a name never match.
+/// Allocation-free.
 pub fn samePackage(a: []const u8, b: []const u8) bool {
-    return sameName(packageBaseName(a), packageBaseName(b));
+    const x = packageBaseName(a);
+    return x.len > 0 and sameName(x, packageBaseName(b));
 }
 
 /// True when two project or dependency group names are equal once PEP 503
@@ -66,12 +93,15 @@ pub fn canonicalName(a: Allocator, name: []const u8) ![]const u8 {
 /// kept verbatim (version specifiers and extras preserved) and duped into `allocator`;
 /// the caller owns the appended strings. Returns the number of dependencies appended.
 ///
-/// zig-toml is strict: a malformed document fails as a whole. We keep that non-fatal
-/// here (warn and return 0) so `zenv setup` still proceeds, matching prior behavior.
+/// zig-toml is strict: a malformed document fails as a whole, and so does
+/// setup (error.InvalidPyproject, after saying so). Going on would build the
+/// env without the project's dependencies and skip its requires-python.
+/// `file` names it in messages.
 pub fn parsePyprojectToml(
     allocator: Allocator,
     io: Io,
     content: []const u8,
+    file: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
     output.print(io, "Parsing pyproject.toml for dependencies...", .{});
@@ -80,8 +110,12 @@ pub fn parsePyprojectToml(
     defer parser.deinit();
 
     var parsed = parser.parseString(content) catch |err| {
-        output.printError(io, "Failed to parse pyproject.toml: {t}", .{err});
-        return 0;
+        output.printError(
+            io,
+            "Failed to parse {s}: {t}. Setup stops rather than build the environment without its dependencies.",
+            .{ file, err },
+        );
+        return error.InvalidPyproject;
     };
     // The parse arena owns every parsed string; dupe what we keep before it is freed.
     defer parsed.deinit();
@@ -265,42 +299,84 @@ pub fn pyprojectField(allocator: Allocator, content: []const u8, key: []const u8
     return try allocator.dupe(u8, trimmed);
 }
 
-/// Parse dependencies from requirements.txt format content
-/// Returns the number of dependencies found
+/// Appends the lines of requirements file `content` to `deps_list`, duped
+/// into `allocator`, and returns how many. Lines continued with a trailing
+/// `\` (hash-pinned files) are joined. Option lines (`-r`, `-c`, `-e`,
+/// `--index-url`, ...) are kept, since pip and uv read them from the install
+/// file too; the local paths of `-r`/`-c`/`-e`/`-f` are anchored at `base_dir`,
+/// the file's directory, because the install file lives in the venv.
 pub fn parseRequirementsTxt(
     allocator: Allocator,
     io: Io,
     content: []const u8,
+    base_dir: []const u8,
     deps_list: *std.ArrayList([]const u8),
 ) !usize {
     output.print(io, "Parsing requirements.txt for dependencies...", .{});
     var count: usize = 0;
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(allocator);
 
-    // Split lines more efficiently with iterator directly
     var line_iter = std.mem.splitScalar(u8, content, '\n');
+    while (line_iter.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \t\r");
+        if (std.mem.endsWith(u8, line, "\\")) {
+            try joined.appendSlice(allocator, line[0 .. line.len - 1]);
+            try joined.append(allocator, ' ');
+            if (line_iter.peek() != null) continue;
+        } else try joined.appendSlice(allocator, line);
 
-    while (line_iter.next()) |line| {
-        const trimmed_line = std.mem.trim(u8, line, " \t\r");
-        if (trimmed_line.len == 0 or trimmed_line[0] == '#') {
-            continue;
-        }
+        const entry = std.mem.trim(u8, joined.items, " \t");
+        defer joined.clearRetainingCapacity();
+        if (entry.len == 0 or entry[0] == '#') continue;
 
-        // For valid dependencies, add directly
-        output.print(io, "  - Requirements file dependency: {s}", .{trimmed_line});
-
-        // Create a duplicate of the trimmed line
-        const trimmed_dupe = try allocator.dupe(u8, trimmed_line);
-
-        // Add the dependency
-        try deps_list.append(allocator, trimmed_dupe);
+        const dep = if (entry[0] == '-')
+            try anchorOption(allocator, entry, base_dir)
+        else
+            try allocator.dupe(u8, entry);
+        output.print(io, "  - Requirements file {s}: {s}", .{
+            if (entry[0] == '-') "option" else "dependency",
+            dep,
+        });
+        try deps_list.append(allocator, dep);
         count += 1;
     }
     output.print(io, "Found {d} dependencies in requirements.txt format", .{count});
     return count;
 }
 
+/// Option line `line` of a requirements file in `base_dir`, with the local
+/// path of `-r`/`--requirement`, `-c`/`--constraint`, `-e`/`--editable` and
+/// `-f`/`--find-links` made absolute. URLs and absolute paths stay.
+fn anchorOption(allocator: Allocator, line: []const u8, base_dir: []const u8) ![]const u8 {
+    const options = [_][2][]const u8{
+        .{ "-r", "--requirement" },
+        .{ "-c", "--constraint" },
+        .{ "-e", "--editable" },
+        .{ "-f", "--find-links" },
+    };
+    for (options) |names| for (names) |name| {
+        if (!std.mem.startsWith(u8, line, name)) continue;
+        const rest = line[name.len..];
+        // `-r x`, `-rx`, `--requirement x`, `--requirement=x`
+        const sep: []const u8 = if (rest.len > 0 and (rest[0] == ' ' or rest[0] == '\t' or rest[0] == '='))
+            rest[0..1]
+        else if (name.len == 2) "" else continue;
+        const value = std.mem.trim(u8, rest[sep.len..], " \t");
+        if (value.len == 0 or std.fs.path.isAbsolute(value) or
+            std.mem.find(u8, value, "://") != null or std.mem.startsWith(u8, value, "git+"))
+            return allocator.dupe(u8, line);
+        const abs = try std.fs.path.join(allocator, &.{ base_dir, value });
+        return std.mem.concat(allocator, u8, &.{ name, if (sep.len == 0) " " else sep, abs });
+    };
+    return allocator.dupe(u8, line);
+}
+
 /// Drops empty entries, entries without a project name, and later duplicates
-/// of a package (by `samePackage`). The returned list borrows from `raw_deps`.
+/// of a package: the same name (by `samePackage`) with the same environment
+/// marker, so `numpy<2; python_version<'3.9'` and `numpy>=2; python_version>='3.9'`
+/// both stay. Option lines (`-r`, `--index-url`, ...) and bare URLs or paths
+/// are kept unless repeated exactly. The returned list borrows from `raw_deps`.
 pub fn validateDependencies(
     allocator: Allocator,
     io: Io,
@@ -311,7 +387,8 @@ pub fn validateDependencies(
     var valid_deps: std.ArrayList([]const u8) = .empty;
     errdefer valid_deps.deinit(allocator);
 
-    next: for (raw_deps) |dep| {
+    next: for (raw_deps) |raw| {
+        const dep = std.mem.trim(u8, raw, " \t\r");
         if (dep.len == 0) {
             output.printWarning(io, "Skipping empty dependency", .{});
             continue;
@@ -321,7 +398,9 @@ pub fn validateDependencies(
         // (specifiers like `!=1.0` or `==1.0.*`, extras, markers, `name @ url`)
         // is left for pip/uv, which validate it properly at install time.
         const name = packageBaseName(dep);
-        if (name.len == 0 or !std.ascii.isAlphanumeric(name[0])) {
+        const unnamed = dep[0] == '-' or std.mem.find(u8, dep, "://") != null or
+            dep[0] == '.' or dep[0] == '/';
+        if (name.len == 0 and !unnamed) {
             output.printWarning(
                 io,
                 "Skipping invalid dependency (no project name): '{s}'",
@@ -331,7 +410,11 @@ pub fn validateDependencies(
         }
 
         for (valid_deps.items) |seen| {
-            if (!samePackage(seen, dep)) continue;
+            const duplicate = if (name.len == 0)
+                std.mem.eql(u8, seen, dep)
+            else
+                samePackage(seen, dep) and sameMarker(markerOf(seen), markerOf(dep));
+            if (!duplicate) continue;
             output.printWarning(
                 io,
                 "Skipping duplicate package '{s}' (already included in dependencies)",
@@ -366,7 +449,7 @@ test "parsePyprojectToml: extracts deps from a standalone dependencies array" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, testing.io, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, "pyproject.toml", &deps);
     try testing.expect(count >= 2);
     var has_req = false;
     var has_flask = false;
@@ -391,7 +474,7 @@ test "parseRequirementsTxt: skips comments and blank lines" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parseRequirementsTxt(a, testing.io, content, &deps);
+    const count = try parseRequirementsTxt(a, testing.io, content, "/proj", &deps);
     try testing.expectEqual(@as(usize, 2), count);
 }
 
@@ -428,20 +511,67 @@ test "validateDependencies keeps any PEP 508 line that starts with a name" {
         "requests ; python_version<'3.12'",
         "pkg @ https://example.com/pkg-1.0-py3-none-any.whl",
         "FLASK>=1", // duplicate of flask (case-insensitive)
-        "-e .", // not a requirement name
+        "-e .", // an option line: kept for pip/uv
         "",
         "flask_login",
         "Flask.Login>=0.6", // duplicate of flask_login (PEP 503)
+        "=bad", // no name
     };
     var valid = try validateDependencies(a, testing.io, &raw, "test");
     defer valid.deinit(a);
-    try std.testing.expectEqual(@as(usize, 6), valid.items.len);
+    try std.testing.expectEqual(@as(usize, 7), valid.items.len);
     try std.testing.expectEqualStrings("flask!=2.0", valid.items[0]);
     try std.testing.expectEqualStrings(
         "pkg @ https://example.com/pkg-1.0-py3-none-any.whl",
         valid.items[4],
     );
-    try std.testing.expectEqualStrings("flask_login", valid.items[5]);
+    try std.testing.expectEqualStrings("-e .", valid.items[5]);
+    try std.testing.expectEqualStrings("flask_login", valid.items[6]);
+}
+
+test "validateDependencies keeps marker-split pins and distinct URLs" {
+    const a = testing.allocator;
+    const raw = [_][]const u8{
+        "numpy<2; python_version < '3.9'",
+        "numpy>=2; python_version >= '3.9'",
+        "numpy>=2 ; python_version>='3.9'", // same marker, spacing aside
+        "git+ssh://git@github.com/org/repo1.git",
+        "git+ssh://git@github.com/org/repo2.git",
+        "git+ssh://git@github.com/org/repo2.git",
+        "--extra-index-url https://download.pytorch.org/whl/cu121",
+    };
+    var valid = try validateDependencies(a, testing.io, &raw, "test");
+    defer valid.deinit(a);
+    try testing.expectEqual(@as(usize, 5), valid.items.len);
+    try testing.expectEqualStrings("numpy>=2; python_version >= '3.9'", valid.items[1]);
+    try testing.expectEqualStrings("git+ssh://git@github.com/org/repo2.git", valid.items[3]);
+}
+
+test "parseRequirementsTxt joins continuations and anchors option paths" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const content =
+        \\six==1.16.0 \
+        \\    --hash=sha256:aaa \
+        \\    --hash=sha256:bbb
+        \\-r base.txt
+        \\--constraint=c.txt
+        \\-e ./pkg
+        \\-e git+https://example.com/x.git#egg=x
+        \\--index-url https://download.pytorch.org/whl/cu121
+        \\-r /abs/other.txt
+        \\
+    ;
+    var deps: std.ArrayList([]const u8) = .empty;
+    try testing.expectEqual(@as(usize, 7), try parseRequirementsTxt(a, testing.io, content, "/proj", &deps));
+    try testing.expectEqualStrings("six==1.16.0      --hash=sha256:aaa      --hash=sha256:bbb", deps.items[0]);
+    try testing.expectEqualStrings("-r /proj/base.txt", deps.items[1]);
+    try testing.expectEqualStrings("--constraint=/proj/c.txt", deps.items[2]);
+    try testing.expectEqualStrings("-e /proj/./pkg", deps.items[3]);
+    try testing.expectEqualStrings("-e git+https://example.com/x.git#egg=x", deps.items[4]);
+    try testing.expectEqualStrings("--index-url https://download.pytorch.org/whl/cu121", deps.items[5]);
+    try testing.expectEqualStrings("-r /abs/other.txt", deps.items[6]);
 }
 
 test "validateDependencies keeps multi-constraint specifiers" {
@@ -473,7 +603,7 @@ test "parsePyprojectToml: single-line dependencies array does not swallow later 
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, testing.io, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, "pyproject.toml", &deps);
     try testing.expectEqual(@as(usize, 2), count);
     for (deps.items) |d| {
         try testing.expect(std.mem.find(u8, d, "proj") == null);
@@ -495,7 +625,7 @@ test "parsePyprojectToml: keeps comma+space multi-constraint specifier" {
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, testing.io, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, "pyproject.toml", &deps);
     try testing.expect(count >= 1);
     var found = false;
     for (deps.items) |d| {
@@ -554,7 +684,7 @@ test "parsePyprojectToml: extracts [project].dependencies from a realistic full 
         for (deps.items) |d| a.free(d);
         deps.deinit(a);
     }
-    const count = try parsePyprojectToml(a, testing.io, content, &deps);
+    const count = try parsePyprojectToml(a, testing.io, content, "pyproject.toml", &deps);
     // Exactly the three [project].dependencies entries — not the optional-deps or tool config.
     try testing.expectEqual(@as(usize, 3), count);
     try testing.expectEqualStrings("requests>=2.28.0", deps.items[0]);
@@ -680,5 +810,16 @@ test "parseDependencyGroups: missing group, missing table and cycles are errors"
             &.{"dev"},
             &list,
         ),
+    );
+}
+
+test "parsePyprojectToml: a document that does not parse is an error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var deps: std.ArrayList([]const u8) = .empty;
+    try testing.expectError(
+        error.InvalidPyproject,
+        parsePyprojectToml(a, testing.io, "[project\ndependencies = [\"six\"]\n", "pyproject.toml", &deps),
     );
 }

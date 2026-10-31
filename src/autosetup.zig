@@ -14,6 +14,13 @@
 //! state, and — by setting the child's cwd to the project dir — reproduces the
 //! original resolution of a relative `base_dir`/`dependency_file` exactly. `registry.register()` updates
 //! in place by env_name, so re-setup never duplicates the registry entry.
+//!
+//! The stamp is the env's build record: the checksum of what it was built
+//! from and the setup flags to replay. Only this module reads or writes it.
+//! Setup records a build (`recordSetup`); commands that change tracked files
+//! themselves (`add`, `rename`) do so inside a `Change`, which keeps an env
+//! that was up to date from rebuilding; `builtWith` gives the flags of the
+//! last build.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -31,6 +38,7 @@ const cli = @import("cli.zig");
 const deps = @import("deps.zig");
 const container = @import("container.zig");
 const jsonc = @import("jsonc.zig");
+const sources = @import("sources.zig");
 
 const stamp_name = ".zenv.stamp";
 const stamp_version = 1;
@@ -112,26 +120,34 @@ fn foldEnvConfig(
     }
 }
 
-/// Lowercase-hex SHA-1 over what `env_name` is built from, in a fixed order:
-/// its part of zenv.json (always), then dependency_file, modules_file and
-/// setup.script when configured. `anchor_dir` is the setup cwd when recording the stamp and the
-/// entry's project_dir when checking — these are the same directory, which is
-/// what makes the two call sites agree.
-pub fn computeTrackedHash(
-    allocator: Allocator,
-    io: Io,
-    anchor_dir: []const u8,
-    env_name: []const u8,
-    env_config: *const config.Env,
-) ![40]u8 {
-    const path = try Io.Dir.path.join(allocator, &.{ anchor_dir, "zenv.json" });
-    defer allocator.free(path);
-    const content = readTracked(allocator, io, path);
-    defer if (content) |c| allocator.free(c) else |_| {};
-    return hashTracked(allocator, io, anchor_dir, env_name, env_config, content);
+/// What a build read besides its config: the `--group` dependency groups and
+/// `--dev`, from the setup flags. They decide whether the project's
+/// ./pyproject.toml is tracked (`sources.readsProjectPyproject`).
+const Build = struct {
+    groups: []const []const u8 = &.{},
+    dev: bool = false,
+};
+
+/// The `Build` that setup flag tokens (`cli.Flags.buildTokens`) describe.
+/// Groups borrow from `tokens`; the list is allocated with `allocator`.
+fn buildOf(allocator: Allocator, tokens: []const []const u8) !Build {
+    var groups: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i + 1 < tokens.len) : (i += 1) {
+        if (std.mem.eql(u8, tokens[i], "--group")) try groups.append(allocator, tokens[i + 1]);
+    }
+    return .{ .groups = try groups.toOwnedSlice(allocator), .dev = cli.Flags.parse(tokens).dev_mode };
 }
 
-/// `computeTrackedHash` for zenv.json content the caller has already read.
+/// Lowercase-hex SHA-1 over what `env_name` is built from, in a fixed order:
+/// its part of zenv.json (`zenv_json`: the content, or why it could not be
+/// read), then dependency_file, modules_file and setup.script when
+/// configured, a local container image, and the project's ./pyproject.toml
+/// when `build` reads it as well. `anchor_dir` is the setup cwd when
+/// recording the stamp and the entry's project_dir when checking — these are
+/// the same directory, which is what makes the two call sites agree. A part
+/// that does not apply is not folded at all, so envs it does not concern
+/// keep their digest.
 fn hashTracked(
     allocator: Allocator,
     io: Io,
@@ -139,6 +155,7 @@ fn hashTracked(
     env_name: []const u8,
     env_config: *const config.Env,
     zenv_json: anyerror![]const u8,
+    build: Build,
 ) ![40]u8 {
     var sha: std.crypto.hash.Sha1 = .init(.{});
     foldEnvConfig(allocator, &sha, zenv_json, env_name);
@@ -164,6 +181,11 @@ fn hashTracked(
         defer if (fp) |f| allocator.free(f);
         foldBytes(&sha, fp orelse "A");
     };
+    if (sources.readsProjectPyproject(env_config, build.groups, build.dev)) {
+        const p = try paths.resolvePath(allocator, anchor_dir, "pyproject.toml");
+        defer allocator.free(p);
+        foldFile(allocator, io, &sha, "project_pyproject", p);
+    }
 
     return std.fmt.bytesToHex(sha.finalResult(), .lower);
 }
@@ -178,19 +200,19 @@ fn readTracked(allocator: Allocator, io: Io, path: []const u8) ![]u8 {
 // ===========================================================================
 
 /// The stamp file's contents. `readStamp` returns it parsed.
-pub const Stamp = struct {
+const Stamp = struct {
     version: u32,
     hash: []const u8,
     flags: []const []const u8 = &.{},
 };
 
-pub fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
+fn stampPath(allocator: Allocator, venv_dir: []const u8) ![]u8 {
     return Io.Dir.path.join(allocator, &.{ venv_dir, stamp_name });
 }
 
 /// Writes `<venv_dir>/.zenv.stamp` atomically. `flags` are the build-affecting
 /// setup flags to replay on a future auto-setup.
-pub fn writeStamp(
+fn writeStamp(
     allocator: Allocator,
     io: Io,
     venv_dir: []const u8,
@@ -206,7 +228,7 @@ pub fn writeStamp(
 /// Reads `<venv_dir>/.zenv.stamp`. Returns null (never errors) when the stamp is
 /// absent, unreadable, malformed, or a different format version — every such
 /// case means "treat as changed" and force a re-setup. Caller must `deinit`.
-pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parsed(Stamp) {
+fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parsed(Stamp) {
     const path = stampPath(allocator, venv_dir) catch return null;
     defer allocator.free(path);
 
@@ -233,42 +255,28 @@ pub fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parse
 // Flag replay
 // ===========================================================================
 
-/// Canonical tokens for the build-affecting flags of a setup invocation, to be
-/// replayed on a future auto-setup. Excludes `--no-host` and
-/// `--reuse-module-cache` (the gate always re-adds them), `--init` and `--no-python` (one-time bootstrap: zenv.json
-/// then records the choice) and `--jupyter` (the kernel
-/// already targets the unchanged venv). `--uv`/`--pip` appear only when given:
-/// without either, each rebuild picks the installer again (uv when found).
-/// Each of `groups` becomes `--group <name>`. Items are static literals or
-/// borrowed from `groups` — the caller frees only the returned slice.
-pub fn flagTokens(
-    allocator: Allocator,
-    f: cli.Flags,
-    groups: []const []const u8,
-) ![]const []const u8 {
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer list.deinit(allocator);
-    if (f.force_deps) try list.append(allocator, "--force");
-    if (f.use_default_python) try list.append(allocator, "--python");
-    if (f.dev_mode) try list.append(allocator, "--dev");
-    if (f.use_uv) try list.append(allocator, "--uv");
-    if (f.use_pip) try list.append(allocator, "--pip");
-    if (f.no_cache) try list.append(allocator, "--no-cache");
-    for (groups) |g| try list.appendSlice(allocator, &.{ "--group", g });
-    return list.toOwnedSlice(allocator);
+/// The flags of the env's last setup that shape its builds (`--uv`, `--pip`,
+/// `--force`, `--no-cache`, `--dev`, ...), which a command installing into
+/// the env (`zenv add`) uses too. Defaults when there is no build record.
+pub fn builtWith(allocator: Allocator, io: Io, venv_path: []const u8) cli.Flags {
+    const stamp = readStamp(allocator, io, venv_path) orelse return .{};
+    defer stamp.deinit();
+    return cli.Flags.parse(stamp.value.flags);
 }
+
+/// What `addReplayGroup` did.
+const ReplayGroup = enum { no_record, already, added };
 
 /// Adds `--group <group>` to the replay flags of the env's stamp, keeping its
 /// hash, so rebuilds install a group that `add` just recorded a package in.
-/// Returns false when the env has no stamp (its next rebuild replays nothing);
-/// true when the group was already replayed or has been added.
-pub fn addReplayGroup(
+/// `.no_record` when the env has no stamp (its next rebuild replays nothing).
+fn addReplayGroup(
     allocator: Allocator,
     io: Io,
     venv_path: []const u8,
     group: []const u8,
-) !bool {
-    const stamp = readStamp(allocator, io, venv_path) orelse return false;
+) !ReplayGroup {
+    const stamp = readStamp(allocator, io, venv_path) orelse return .no_record;
     defer stamp.deinit();
     const old_flags = stamp.value.flags;
     var i: usize = 0;
@@ -277,7 +285,7 @@ pub fn addReplayGroup(
             u8,
             old_flags[i],
             "--group",
-        ) and deps.sameName(old_flags[i + 1], group)) return true;
+        ) and deps.sameName(old_flags[i + 1], group)) return .already;
     }
     const new_flags = try std.mem.concat(
         allocator,
@@ -286,7 +294,7 @@ pub fn addReplayGroup(
     );
     defer allocator.free(new_flags);
     try writeStamp(allocator, io, venv_path, stamp.value.hash, new_flags);
-    return true;
+    return .added;
 }
 
 // ===========================================================================
@@ -364,37 +372,33 @@ const Drift = union(enum) {
     unstamped,
 };
 
-/// A project's zenv.json: its text, and what it builds.
-const Loaded = struct {
-    content: []u8,
-    project: config.Project,
-
-    fn deinit(self: *Loaded, allocator: Allocator) void {
-        self.project.deinit();
-        allocator.free(self.content);
-    }
-};
-
 /// The zenv.json in `project_dir`, parsed and validated WITHOUT printing the
 /// validation errors: the gate runs before commands that must keep working
 /// while zenv.json is missing or mid-edit. Null when the file is absent;
-/// error.ConfigInvalid when it does not validate.
-fn loadConfigQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?Loaded {
+/// error.InvalidFormat when it does not validate.
+fn loadQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?validation.ProjectFile {
     const config_path = try Io.Dir.path.join(allocator, &.{ project_dir, "zenv.json" });
     defer allocator.free(config_path);
-    const content = readTracked(allocator, io, config_path) catch |err| {
-        if (err == error.FileNotFound) return null;
-        return err;
+    return validation.load(allocator, io, config_path, .quiet) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
     };
-    errdefer allocator.free(content);
-    switch (try validation.loadConfig(allocator, content)) {
-        .config => |c| return .{ .content = content, .project = c },
-        .errors => |errs| {
-            var list = errs;
-            validation.freeErrors(allocator, &list);
-            return error.ConfigInvalid;
-        },
-    }
+}
+
+/// The hash `stamp`'s env would get now, for env `env_name` of the project
+/// `file` was loaded from, with the stamp's own replay flags.
+fn currentHash(
+    allocator: Allocator,
+    io: Io,
+    project_dir: []const u8,
+    env_name: []const u8,
+    file: *const validation.ProjectFile,
+    stamp: *const Stamp,
+) !?[40]u8 {
+    const env_cfg = file.project.getEnvironment(env_name) orelse return null;
+    const build = try buildOf(allocator, stamp.flags);
+    defer allocator.free(build.groups);
+    return try hashTracked(allocator, io, project_dir, env_name, env_cfg, file.content, build);
 }
 
 /// A removed/broken config, or an env it no longer defines, counts as no drift:
@@ -402,8 +406,8 @@ fn loadConfigQuiet(allocator: Allocator, io: Io, project_dir: []const u8) !?Load
 fn drift(ctx: Ctx, entry: *const Registry.Entry) !Drift {
     const allocator = ctx.arena;
     const io = ctx.io;
-    var loaded = (loadConfigQuiet(allocator, io, entry.project_dir) catch |err| {
-        if (err == error.ConfigInvalid) {
+    var file = (loadQuiet(allocator, io, entry.project_dir) catch |err| {
+        if (err == error.InvalidFormat) {
             output.rawErr(
                 io,
                 "zenv: {s}/zenv.json is invalid ('zenv validate' shows why); using '{s}' as last built.\n",
@@ -412,21 +416,21 @@ fn drift(ctx: Ctx, entry: *const Registry.Entry) !Drift {
         }
         return .none;
     }) orelse return .none;
-    defer loaded.deinit(allocator);
+    defer file.deinit(allocator);
 
-    const env_cfg = loaded.project.getEnvironment(entry.env_name) orelse return .none;
+    if (file.project.getEnvironment(entry.env_name) == null) return .none;
 
     // Stamp first: without one, the hash would be computed for nothing.
     const stamp = readStamp(allocator, io, entry.venv_path) orelse return .unstamped;
     errdefer stamp.deinit();
-    const current = try hashTracked(
+    const current = (try currentHash(
         allocator,
         io,
         entry.project_dir,
         entry.env_name,
-        env_cfg,
-        loaded.content,
-    );
+        &file,
+        &stamp.value,
+    )).?;
 
     if (std.mem.eql(u8, stamp.value.hash, &current)) {
         stamp.deinit();
@@ -458,29 +462,6 @@ pub fn ensureUpToDate(ctx: Ctx, entry: *const Registry.Entry) !void {
     }
 }
 
-/// Re-records the build stamp after a command changed an up-to-date env's
-/// tracked files itself (`add` recording a package it already installed,
-/// `rename` renaming the env), so the next gated command does not rebuild what
-/// is already done. Keeps the stamp's replay flags. Does nothing when the env
-/// has no stamp, or zenv.json is missing, invalid or lacks the env.
-pub fn restamp(
-    ctx: Ctx,
-    project_dir: []const u8,
-    env_name: []const u8,
-    venv_path: []const u8,
-) !void {
-    const allocator = ctx.arena;
-    const io = ctx.io;
-    var loaded = (loadConfigQuiet(allocator, io, project_dir) catch return) orelse return;
-    defer loaded.deinit(allocator);
-    const env_cfg = loaded.project.getEnvironment(env_name) orelse return;
-    const stamp = readStamp(allocator, io, venv_path) orelse return;
-    defer stamp.deinit();
-
-    const hash = try hashTracked(allocator, io, project_dir, env_name, env_cfg, loaded.content);
-    try writeStamp(allocator, io, venv_path, &hash, stamp.value.flags);
-}
-
 /// True when the gate would rebuild the env. Never builds: for callers that
 /// must stay fast and side-effect free, like `activate --auto` on every cd.
 pub fn isStale(ctx: Ctx, entry: *const Registry.Entry) !bool {
@@ -492,6 +473,118 @@ pub fn isStale(ctx: Ctx, entry: *const Registry.Entry) !bool {
         },
         .unstamped => return true,
     }
+}
+
+// ===========================================================================
+// Recording builds
+// ===========================================================================
+
+/// A finished `zenv setup`, as the build record keeps it.
+pub const Setup = struct {
+    /// The project directory, where zenv.json is (setup's cwd).
+    project_dir: []const u8,
+    env_name: []const u8,
+    venv_dir: []const u8,
+    /// The zenv.json setup built from.
+    file: *const validation.ProjectFile,
+    flags: cli.Flags,
+    /// The `--group` names.
+    groups: []const []const u8,
+};
+
+/// Records a finished setup, so run/activate/cd/jupyter can detect config
+/// drift later and rebuild with the same flags.
+pub fn recordSetup(ctx: Ctx, setup: Setup) !void {
+    const allocator = ctx.arena;
+    const env_cfg = setup.file.project.getEnvironment(setup.env_name) orelse
+        return error.EnvironmentNotFound;
+    const hash = try hashTracked(
+        allocator,
+        ctx.io,
+        setup.project_dir,
+        setup.env_name,
+        env_cfg,
+        setup.file.content,
+        .{ .groups = setup.groups, .dev = setup.flags.dev_mode },
+    );
+    const tokens = try setup.flags.buildTokens(allocator, setup.groups);
+    defer allocator.free(tokens);
+    try writeStamp(allocator, ctx.io, setup.venv_dir, &hash, tokens);
+}
+
+/// A change a command makes to an env's tracked files itself, such as `add`
+/// recording a package it installed or `rename` renaming the env (the hash
+/// covers the name). `begin` it before touching anything. If the env was up
+/// to date then, `finish` re-records the build afterwards, so the next gated
+/// command does not rebuild what the command already did; a stale env stays
+/// stale. `abort` restores the build record instead.
+pub const Change = struct {
+    /// Up to date at `begin`, and nothing since made a rebuild necessary.
+    fresh: bool,
+    venv_path: []const u8,
+    /// The stamp file as it was at `begin`; null when there was none.
+    saved: ?[]const u8,
+
+    /// Starts a change to `entry`'s tracked files. Allocates with `ctx.arena`.
+    pub fn begin(ctx: Ctx, entry: *const Registry.Entry) !Change {
+        const path = try stampPath(ctx.arena, entry.venv_path);
+        return .{
+            .fresh = !(isStale(ctx, entry) catch true),
+            .venv_path = try ctx.arena.dupe(u8, entry.venv_path),
+            .saved = Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(1024 * 1024)) catch null,
+        };
+    }
+
+    /// Has rebuilds install dependency group `group` too, as `add` needs after
+    /// recording a package in it. False when the env has no build record (its
+    /// next rebuild replays nothing); true when the group was replayed already
+    /// or now is. A group new to the build has packages the env never got, so
+    /// the env is left stale for the next gated command to install them.
+    pub fn replayGroup(self: *Change, ctx: Ctx, group: []const u8) bool {
+        const result = addReplayGroup(ctx.arena, ctx.io, self.venv_path, group) catch return false;
+        if (result == .added) self.fresh = false;
+        return result != .no_record;
+    }
+
+    /// Ends the change. `project_dir`, `env_name` and `venv_path` are the env's
+    /// after it (`rename` moves the env). Best effort: a build record that
+    /// cannot be renewed only costs a rebuild.
+    pub fn finish(
+        self: *const Change,
+        ctx: Ctx,
+        project_dir: []const u8,
+        env_name: []const u8,
+        venv_path: []const u8,
+    ) void {
+        if (self.fresh) rehash(ctx, project_dir, env_name, venv_path) catch {};
+    }
+
+    /// Puts the build record back as it was at `begin`.
+    pub fn abort(self: *const Change, ctx: Ctx) void {
+        const path = stampPath(ctx.arena, self.venv_path) catch return;
+        if (self.saved) |data| {
+            Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = data }) catch {};
+        } else Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+    }
+};
+
+/// Re-records the build stamp's hash for the env's current files, keeping its
+/// replay flags. Does nothing when the env has no stamp, or zenv.json is
+/// missing, invalid or lacks the env.
+fn rehash(
+    ctx: Ctx,
+    project_dir: []const u8,
+    env_name: []const u8,
+    venv_path: []const u8,
+) !void {
+    const allocator = ctx.arena;
+    const io = ctx.io;
+    var file = (loadQuiet(allocator, io, project_dir) catch return) orelse return;
+    defer file.deinit(allocator);
+    const stamp = readStamp(allocator, io, venv_path) orelse return;
+    defer stamp.deinit();
+    const hash = (try currentHash(allocator, io, project_dir, env_name, &file, &stamp.value)) orelse return;
+    try writeStamp(allocator, io, venv_path, &hash, stamp.value.flags);
 }
 
 // ===========================================================================
@@ -537,6 +630,22 @@ fn recordingRun(
 
 fn recordingExec(_: Io, _: []const []const u8, _: runtime.ExecOptions) anyerror!runtime.Term {
     return .{ .exited = 0 };
+}
+
+/// The hash of env `env_name` in `dir`/zenv.json, built without `--group`
+/// or `--dev`.
+fn computeTrackedHash(
+    allocator: Allocator,
+    io: Io,
+    dir: []const u8,
+    env_name: []const u8,
+    env_config: *const config.Env,
+) ![40]u8 {
+    const path = try Io.Dir.path.join(allocator, &.{ dir, "zenv.json" });
+    defer allocator.free(path);
+    const content = readTracked(allocator, io, path);
+    defer if (content) |c| allocator.free(c) else |_| {};
+    return hashTracked(allocator, io, dir, env_name, env_config, content, .{});
 }
 
 /// An empty, absolute scratch directory (tracked paths are anchored at it).
@@ -719,10 +828,10 @@ test "addReplayGroup appends a group once and keeps the hash" {
     const dir = try testDir(a, "replaygroup");
     defer cleanup(a, dir);
 
-    try testing.expect(!try addReplayGroup(a, testing.io, dir, "demo")); // no stamp yet
+    try testing.expectEqual(ReplayGroup.no_record, try addReplayGroup(a, testing.io, dir, "demo"));
     try writeStamp(a, testing.io, dir, "deadbeef", &.{ "--uv", "--group", "dev" });
-    try testing.expect(try addReplayGroup(a, testing.io, dir, "Dev")); // same group, normalized
-    try testing.expect(try addReplayGroup(a, testing.io, dir, "demo"));
+    try testing.expectEqual(ReplayGroup.already, try addReplayGroup(a, testing.io, dir, "Dev")); // normalized
+    try testing.expectEqual(ReplayGroup.added, try addReplayGroup(a, testing.io, dir, "demo"));
 
     const got = readStamp(a, testing.io, dir).?;
     defer got.deinit();
@@ -732,40 +841,10 @@ test "addReplayGroup appends a group once and keeps the hash" {
     try testing.expectEqualStrings("demo", got.value.flags[4]);
 
     try writeStamp(a, testing.io, dir, "deadbeef", &.{}); // a stamp without flags
-    try testing.expect(try addReplayGroup(a, testing.io, dir, "demo"));
+    try testing.expectEqual(ReplayGroup.added, try addReplayGroup(a, testing.io, dir, "demo"));
     const only = readStamp(a, testing.io, dir).?;
     defer only.deinit();
     try testing.expectEqual(@as(usize, 2), only.value.flags.len);
-}
-
-test "flagTokens emits only build-affecting flags" {
-    const a = testing.allocator;
-    const f = cli.Flags{
-        .use_uv = true,
-        .no_cache = true,
-        .skip_hostname_check = true, // --no-host: excluded
-        .create_jupyter_kernel = true, // --jupyter: excluded
-        .init_mode = true, // --init: excluded
-        .no_python = true, // --no-python: excluded
-        .reuse_module_cache = true, // --reuse-module-cache: excluded
-    };
-    const toks = try flagTokens(a, f, &.{ "dev", "demo" });
-    defer a.free(toks);
-    try testing.expectEqual(@as(usize, 6), toks.len);
-    try testing.expectEqualStrings("--uv", toks[0]);
-    try testing.expectEqualStrings("--no-cache", toks[1]);
-    try testing.expectEqualStrings("--group", toks[2]);
-    try testing.expectEqualStrings("dev", toks[3]);
-    try testing.expectEqualStrings("demo", toks[5]);
-
-    const pip = try flagTokens(a, .{ .use_pip = true }, &.{});
-    defer a.free(pip);
-    try testing.expectEqual(@as(usize, 1), pip.len);
-    try testing.expectEqualStrings("--pip", pip[0]);
-
-    const auto = try flagTokens(a, .{}, &.{});
-    defer a.free(auto);
-    try testing.expectEqual(@as(usize, 0), auto.len);
 }
 
 test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
@@ -788,9 +867,9 @@ test "ensureUpToDate: no-op on match, re-setup on drift, error on failure" {
     {
         const cfg_path = try Io.Dir.path.join(a, &.{ proj, "zenv.json" });
         defer a.free(cfg_path);
-        var cfg = try validation.validateAndParse(a, testing.io, cfg_path);
-        defer cfg.deinit();
-        const env_cfg = cfg.getEnvironment("zenv-test").?;
+        var file = try validation.load(a, testing.io, cfg_path, .quiet);
+        defer file.deinit(a);
+        const env_cfg = file.project.getEnvironment("zenv-test").?;
         const h = &try computeTrackedHash(a, testing.io, proj, "zenv-test", env_cfg);
         try writeStamp(a, testing.io, venv, h, &.{});
     }
@@ -855,14 +934,14 @@ test "isStale reports drift without spawning setup" {
     {
         const cfg_path = try Io.Dir.path.join(a, &.{ proj, "zenv.json" });
         defer a.free(cfg_path);
-        var cfg = try validation.validateAndParse(a, testing.io, cfg_path);
-        defer cfg.deinit();
+        var file = try validation.load(a, testing.io, cfg_path, .quiet);
+        defer file.deinit(a);
         const h = &try computeTrackedHash(
             a,
             testing.io,
             proj,
             "zenv-test",
-            cfg.getEnvironment("zenv-test").?,
+            file.project.getEnvironment("zenv-test").?,
         );
         try writeStamp(a, testing.io, venv, h, &.{});
     }
@@ -871,4 +950,125 @@ test "isStale reports drift without spawning setup" {
     try writeAt(a, proj, "zenv.json", test_config_b);
     try testing.expect(try isStale(ctx, &entry)); // config drifted
     try testing.expect(!test_spawned);
+}
+
+test "the gate watches ./pyproject.toml for replayed groups, not otherwise" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const proj = try testDir(a, "groups_proj");
+    defer Io.Dir.cwd().deleteTree(io, proj) catch {};
+    const venv = try testDir(a, "groups_venv");
+    defer Io.Dir.cwd().deleteTree(io, venv) catch {};
+    try writeAt(a, proj, "zenv.json",
+        \\{ "zenv-test": { "target_machines": ["*"], "dependency_file": "r.txt" } }
+    );
+    try writeAt(a, proj, "r.txt", "six\n");
+    try writeAt(a, proj, "pyproject.toml", "[dependency-groups]\ndemo = [\"idna\"]\n");
+
+    var entry = try makeEntry(a, "zenv-test", proj, venv);
+    const ctx = test_support.ctx(a, &test_support.no_env);
+    const path = try Io.Dir.path.join(a, &.{ proj, "zenv.json" });
+    var file = try validation.load(a, io, path, .quiet);
+
+    // Built without groups: editing ./pyproject.toml is not drift.
+    try recordSetup(ctx, .{
+        .project_dir = proj,
+        .env_name = "zenv-test",
+        .venv_dir = venv,
+        .file = &file,
+        .flags = .{ .use_uv = true },
+        .groups = &.{},
+    });
+    try writeAt(a, proj, "pyproject.toml", "[dependency-groups]\ndemo = [\"idna\", \"attrs\"]\n");
+    try testing.expect(!try isStale(ctx, &entry));
+
+    // Built with --group demo: it is.
+    try recordSetup(ctx, .{
+        .project_dir = proj,
+        .env_name = "zenv-test",
+        .venv_dir = venv,
+        .file = &file,
+        .flags = .{ .use_uv = true },
+        .groups = &.{"demo"},
+    });
+    try testing.expect(!try isStale(ctx, &entry));
+    try writeAt(a, proj, "pyproject.toml", "[dependency-groups]\ndemo = [\"idna\"]\n");
+    try testing.expect(try isStale(ctx, &entry));
+    try testing.expect(builtWith(a, io, venv).use_uv);
+    _ = &entry;
+}
+
+test "Change keeps a fresh env fresh, leaves a stale one stale, and aborts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const proj = try testDir(a, "change_proj");
+    defer Io.Dir.cwd().deleteTree(io, proj) catch {};
+    const venv = try testDir(a, "change_venv");
+    defer Io.Dir.cwd().deleteTree(io, venv) catch {};
+    try writeAt(a, proj, "zenv.json", test_config_a);
+    var entry = try makeEntry(a, "zenv-test", proj, venv);
+    const ctx = test_support.ctx(a, &test_support.no_env);
+    var file = try validation.load(a, io, try Io.Dir.path.join(a, &.{ proj, "zenv.json" }), .quiet);
+    try recordSetup(ctx, .{
+        .project_dir = proj,
+        .env_name = "zenv-test",
+        .venv_dir = venv,
+        .file = &file,
+        .flags = .{},
+        .groups = &.{},
+    });
+
+    // Fresh: the change is absorbed.
+    var change = try Change.begin(ctx, &entry);
+    try writeAt(a, proj, "zenv.json", test_config_b);
+    change.finish(ctx, proj, "zenv-test", venv);
+    try testing.expect(!try isStale(ctx, &entry));
+
+    // A group new to the build was never installed: the env stays stale.
+    change = try Change.begin(ctx, &entry);
+    try testing.expect(change.replayGroup(ctx, "demo"));
+    change.finish(ctx, proj, "zenv-test", venv);
+    try testing.expect(try isStale(ctx, &entry));
+    try testing.expectEqual(@as(usize, 2), (readStamp(a, io, venv).?).value.flags.len);
+    file = try validation.load(a, io, try Io.Dir.path.join(a, &.{ proj, "zenv.json" }), .quiet);
+    try recordSetup(ctx, .{
+        .project_dir = proj,
+        .env_name = "zenv-test",
+        .venv_dir = venv,
+        .file = &file,
+        .flags = .{},
+        .groups = &.{"demo"},
+    });
+    // A group the build already installs keeps it fresh.
+    change = try Change.begin(ctx, &entry);
+    try testing.expect(change.replayGroup(ctx, "demo"));
+    change.finish(ctx, proj, "zenv-test", venv);
+    try testing.expect(!try isStale(ctx, &entry));
+
+    // Stale before: still stale after.
+    try writeAt(a, proj, "zenv.json", test_config_a);
+    change = try Change.begin(ctx, &entry);
+    change.finish(ctx, proj, "zenv-test", venv);
+    try testing.expect(try isStale(ctx, &entry));
+
+    // Abort restores the record, and removes one that did not exist.
+    change = try Change.begin(ctx, &entry);
+    try writeStamp(a, io, venv, "other", &.{});
+    change.abort(ctx);
+    try testing.expectEqualStrings(change.saved.?, try Io.Dir.cwd().readFileAlloc(
+        io,
+        try stampPath(a, venv),
+        a,
+        .limited(1024 * 1024),
+    ));
+    Io.Dir.cwd().deleteFile(io, try stampPath(a, venv)) catch {};
+    change = try Change.begin(ctx, &entry);
+    try writeStamp(a, io, venv, "other", &.{});
+    change.abort(ctx);
+    try testing.expect(readStamp(a, io, venv) == null);
+    _ = &entry;
 }

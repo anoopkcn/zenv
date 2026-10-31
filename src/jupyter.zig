@@ -95,6 +95,8 @@ pub fn createKernel(
     ctx: Ctx,
     env_name: []const u8,
     venv_path: []const u8,
+    /// What the kernel passes to `zenv run` (`Registry.launchIdentifier`).
+    run_as: []const u8,
     custom_name: ?[]const u8,
     custom_display_name: ?[]const u8,
 ) !void {
@@ -130,7 +132,11 @@ pub fn createKernel(
     };
     cwd.createDir(io, kernel_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {
-            output.printError(io, "Kernel '{s}' already exists", .{kernel_name});
+            output.printError(
+                io,
+                "Kernel '{s}' already exists. Pick another with 'zenv jupyter create {s} --name <kernel>'.",
+                .{ kernel_name, run_as },
+            );
             return error.KernelExists;
         },
         else => {
@@ -140,7 +146,7 @@ pub fn createKernel(
     };
     errdefer cwd.deleteTree(io, kernel_dir) catch {};
 
-    const kernel_json = try kernelJson(a, display_name, env_name, try zenvLauncher(ctx));
+    const kernel_json = try kernelJson(a, display_name, run_as, try zenvLauncher(ctx));
     cwd.writeFile(
         io,
         .{

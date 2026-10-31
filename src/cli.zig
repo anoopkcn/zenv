@@ -83,6 +83,31 @@ pub const Flags = struct {
         if (f.use_pip) return .pip;
         return .auto;
     }
+
+    /// Canonical tokens for the build-affecting flags of a setup invocation, which
+    /// the build record replays on a rebuild and a container build passes on. Excludes `--no-host` and
+    /// `--reuse-module-cache` (the gate always re-adds them), `--init` and `--no-python` (one-time bootstrap: zenv.json
+    /// then records the choice) and `--jupyter` (the kernel
+    /// already targets the unchanged venv). `--uv`/`--pip` appear only when given:
+    /// without either, each rebuild picks the installer again (uv when found).
+    /// Each of `group_names` becomes `--group <name>`. Items are static literals
+    /// or borrowed from `group_names` — the caller frees only the returned slice.
+    pub fn buildTokens(
+        f: Flags,
+        allocator: std.mem.Allocator,
+        group_names: []const []const u8,
+    ) ![]const []const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer list.deinit(allocator);
+        if (f.force_deps) try list.append(allocator, "--force");
+        if (f.use_default_python) try list.append(allocator, "--python");
+        if (f.dev_mode) try list.append(allocator, "--dev");
+        if (f.use_uv) try list.append(allocator, "--uv");
+        if (f.use_pip) try list.append(allocator, "--pip");
+        if (f.no_cache) try list.append(allocator, "--no-cache");
+        for (group_names) |g| try list.appendSlice(allocator, &.{ "--group", g });
+        return list.toOwnedSlice(allocator);
+    }
 };
 
 /// Which tool installs packages: `auto` uses uv when it is on PATH, else pip.
@@ -330,4 +355,34 @@ test "positional skips flags regardless of position" {
     const args5 = [_][]const u8{ "zenv", "add", "--group", "demo", "myenv", "--group=x", "openai" };
     try testing.expectEqualStrings("myenv", positional(&args5, 0).?);
     try testing.expectEqualStrings("openai", positional(&args5, 1).?);
+}
+
+test "buildTokens emits only build-affecting flags" {
+    const a = testing.allocator;
+    const f = Flags{
+        .use_uv = true,
+        .no_cache = true,
+        .skip_hostname_check = true, // --no-host: excluded
+        .create_jupyter_kernel = true, // --jupyter: excluded
+        .init_mode = true, // --init: excluded
+        .no_python = true, // --no-python: excluded
+        .reuse_module_cache = true, // --reuse-module-cache: excluded
+    };
+    const toks = try f.buildTokens(a, &.{ "dev", "demo" });
+    defer a.free(toks);
+    try testing.expectEqual(@as(usize, 6), toks.len);
+    try testing.expectEqualStrings("--uv", toks[0]);
+    try testing.expectEqualStrings("--no-cache", toks[1]);
+    try testing.expectEqualStrings("--group", toks[2]);
+    try testing.expectEqualStrings("dev", toks[3]);
+    try testing.expectEqualStrings("demo", toks[5]);
+
+    const pip = try (Flags{ .use_pip = true }).buildTokens(a, &.{});
+    defer a.free(pip);
+    try testing.expectEqual(@as(usize, 1), pip.len);
+    try testing.expectEqualStrings("--pip", pip[0]);
+
+    const auto = try (Flags{}).buildTokens(a, &.{});
+    defer a.free(auto);
+    try testing.expectEqual(@as(usize, 0), auto.len);
 }

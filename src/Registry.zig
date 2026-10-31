@@ -81,9 +81,9 @@ const EntryJson = struct {
 };
 
 /// An environment's id: SHA-1 of (name, project dir, targets), NUL-separated so
-/// field boundaries cannot shift. Env names are unique in the registry, so ids
-/// are too, and they are reproducible: re-registering the same env gives the
-/// same id, so a remembered id prefix keeps working.
+/// field boundaries cannot shift. A (name, project dir) pair is registered
+/// once, so ids are unique, and they are reproducible: re-registering the same
+/// env gives the same id, so a remembered id prefix keeps working.
 fn envId(
     allocator: Allocator,
     env_name: []const u8,
@@ -247,9 +247,10 @@ pub fn register(
     try self.save();
 }
 
-/// In-memory part of register: an existing entry keeps its name, id and
-/// aliases and takes the new location, description and targets; otherwise
-/// a new entry is appended.
+/// In-memory part of register: the entry of `env_name` in `project_dir`
+/// keeps its name, id and aliases and takes the new location, description and
+/// targets; otherwise a new entry is appended. The same name may be
+/// registered for several projects (clones, worktrees of one repo).
 fn upsert(
     self: *Registry,
     env_name: []const u8,
@@ -274,7 +275,7 @@ fn upsert(
     new.venv_path = try paths.venvPath(a, project_dir, base_dir, env_name);
 
     for (self.entries.items) |*entry| {
-        if (!matches(entry.*, .name, env_name)) continue;
+        if (!matches(entry.*, .name, env_name) or !std.mem.eql(u8, entry.project_dir, project_dir)) continue;
         // `new` takes the replaced strings and frees them.
         std.mem.swap([]const u8, &entry.project_dir, &new.project_dir);
         std.mem.swap(?[]const u8, &entry.description, &new.description);
@@ -341,23 +342,36 @@ fn tally(self: *const Registry, kind: MatchKind, key: []const u8, on_host: ?[]co
     return t;
 }
 
-/// The one entry matching (kind, key), or null when none does. Names and
-/// ids are unique, so the first match wins. Several project_dir or alias
-/// matches (per-machine envs sharing a project or an alias) are narrowed to
-/// the one whose target_machines matches `hostname`; a tie the host cannot
-/// break (null hostname, 0 or >1 survivors) is `AmbiguousIdentifier`, and
-/// so is a 7+ char id prefix matching several ids (host-blind, a typo case).
+/// The one entry matching (kind, key), or null when none does. Ids are
+/// unique, so the first match wins. A name registered for several projects
+/// is narrowed to the one of project `cwd` (when known). Several name,
+/// project_dir or alias matches (per-machine envs sharing a project or an
+/// alias) are narrowed to the one whose target_machines matches `hostname`;
+/// a tie these cannot break (null hostname, 0 or >1 survivors) is
+/// `AmbiguousIdentifier`, and so is a 7+ char id prefix matching several ids
+/// (host-blind, a typo case).
 fn unique(
     self: *const Registry,
     kind: MatchKind,
     key: []const u8,
+    cwd: ?[]const u8,
     hostname: ?[]const u8,
 ) error{AmbiguousIdentifier}!?Ref {
     const all = self.tally(kind, key, null);
-    if (all.count <= 1 or kind == .name or kind == .id) return if (all.first) |i| .{
+    if (all.count <= 1 or kind == .id) return if (all.first) |i| .{
         .idx = i,
     } else null;
     if (kind == .id_prefix) return error.AmbiguousIdentifier;
+    if (kind == .name) if (cwd) |dir| {
+        var found: ?usize = null;
+        var count: usize = 0;
+        for (self.entries.items, 0..) |entry, i| {
+            if (!matches(entry, .name, key) or !std.mem.eql(u8, entry.project_dir, dir)) continue;
+            count += 1;
+            found = i;
+        }
+        if (count == 1) return .{ .idx = found.? };
+    };
     const on_host = self.tally(kind, key, hostname orelse return error.AmbiguousIdentifier);
     if (on_host.count != 1) return error.AmbiguousIdentifier;
     return .{ .idx = on_host.first.? };
@@ -367,7 +381,8 @@ fn unique(
 /// identifier to exactly one entry index, applying the load-bearing order:
 ///   "." (project_dir == cwd) -> name -> alias -> exact id -> unique 7+ prefix.
 /// `cwd` is the project directory "." names (see `dotProjectDir`); it must
-/// be non-null when `identifier` is "."; pass null otherwise.
+/// be non-null when `identifier` is ".". For a name it breaks a tie between
+/// projects registering that name; null leaves such a tie to the host.
 /// `hostname`, when non-null, breaks a tie in the host-aware branches ("." and
 /// a shared alias), see `unique`. Ambiguity (a prefix matching >1, or a
 /// "."/alias the host can't narrow to one) is distinct from not-found.
@@ -379,10 +394,10 @@ fn resolveAgainstCwd(
 ) error{ EnvironmentNotRegistered, AmbiguousIdentifier }!Ref {
     if (std.mem.eql(u8, identifier, ".")) {
         const dir = cwd orelse return error.EnvironmentNotRegistered;
-        return try self.unique(.project_dir, dir, hostname) orelse error.EnvironmentNotRegistered;
+        return try self.unique(.project_dir, dir, null, hostname) orelse error.EnvironmentNotRegistered;
     }
     for ([_]MatchKind{ .name, .alias, .id, .id_prefix }) |kind| {
-        if (try self.unique(kind, identifier, hostname)) |ref| return ref;
+        if (try self.unique(kind, identifier, cwd, hostname)) |ref| return ref;
     }
     return error.EnvironmentNotRegistered;
 }
@@ -427,10 +442,42 @@ fn resolveWithHost(
 ) !Ref {
     return self.resolveAgainstCwd(identifier, cwd, null) catch |e| {
         if (e != error.AmbiguousIdentifier) return e;
+        // A name several projects register: the one of the project the cwd is
+        // in wins, as "." would pick it.
+        var dir = cwd;
+        var owned: ?[]u8 = null;
+        defer if (owned) |o| allocator.free(o);
+        if (dir == null) {
+            owned = dotProjectDir(allocator, self.io) catch null;
+            dir = owned;
+            if (dir != null) {
+                if (self.resolveAgainstCwd(identifier, dir, null)) |ref| return ref else |e2| {
+                    if (e2 != error.AmbiguousIdentifier) return e2;
+                }
+            }
+        }
         const hn = host.getSystemHostname(allocator, self.io, self.env) catch return e;
         defer allocator.free(hn);
-        return self.resolveAgainstCwd(identifier, cwd, hn);
+        return self.resolveAgainstCwd(identifier, dir, hn);
     };
+}
+
+/// The entry of env `env_name` in project `project_dir`, or null.
+pub fn find(self: *const Registry, env_name: []const u8, project_dir: []const u8) ?Ref {
+    for (self.entries.items, 0..) |entry, i| {
+        if (matches(entry, .name, env_name) and std.mem.eql(u8, entry.project_dir, project_dir))
+            return .{ .idx = i };
+    }
+    return null;
+}
+
+/// What reaches the env at `ref` from any directory, e.g. in a Jupyter
+/// kernel's `zenv run`: its name, or its id when other projects register
+/// the name too. Registry-owned.
+pub fn launchIdentifier(self: *const Registry, ref: Ref) []const u8 {
+    const entry = self.get(ref);
+    if (self.tally(.name, entry.env_name, null).count > 1) return entry.id;
+    return entry.env_name;
 }
 
 /// Just-in-time borrow through a handle. The returned pointer/slices are
@@ -445,6 +492,8 @@ pub fn get(self: *const Registry, ref: Ref) *const Entry {
 pub const Candidate = struct {
     env_name: []const u8,
     target_machines: []const u8,
+    project_dir: []const u8,
+    id: []const u8,
 };
 
 /// Names the candidates an ambiguous identifier matched, for the call-site
@@ -465,30 +514,35 @@ pub fn candidates(
         self.io,
     ) catch return list.toOwnedSlice(allocator) else null;
     defer if (cwd) |dir| allocator.free(dir);
-    // "." lists the envs of this project; anything else a shared alias's
-    // holders, or failing that the ids a non-unique 7+ prefix matches.
-    const kinds: []const MatchKind = if (dot) &.{.project_dir} else &.{ .alias, .id_prefix };
+    // "." lists the envs of this project; anything else the projects
+    // registering a name, a shared alias's holders, or failing that the ids
+    // a non-unique 7+ prefix matches.
+    const kinds: []const MatchKind = if (dot) &.{.project_dir} else &.{ .name, .alias, .id_prefix };
     for (kinds) |kind| {
         for (self.entries.items) |entry| {
             if (matches(entry, kind, cwd orelse identifier))
-                try list.append(
-                    allocator,
-                    .{ .env_name = entry.env_name, .target_machines = entry.target_machines_str },
-                );
+                try list.append(allocator, .{
+                    .env_name = entry.env_name,
+                    .target_machines = entry.target_machines_str,
+                    .project_dir = entry.project_dir,
+                    .id = entry.id,
+                });
         }
-        if (list.items.len > 0) break;
+        // One name match is no ambiguity of its own; an alias may still be.
+        if (list.items.len > @intFromBool(kind == .name)) break;
+        list.clearRetainingCapacity();
     }
     return list.toOwnedSlice(allocator);
 }
 
 // Alias management methods
 
-/// Attaches `alias_name` to the env named `env_name` and persists, on the
+/// Attaches `alias_name` to the env with id `env_id` and persists, on the
 /// registry as it is on disk now (see beginUpdate).
-pub fn addAlias(self: *Registry, alias_name: []const u8, env_name_in: []const u8) !void {
+pub fn addAlias(self: *Registry, alias_name: []const u8, env_id: []const u8) !void {
     if (!paths.isValidEnvName(alias_name)) return error.InvalidEnvironmentName;
-    // env_name_in may be borrowed from an entry, which beginUpdate frees.
-    const env_name = try self.allocator.dupe(u8, env_name_in);
+    // env_id may be borrowed from an entry, which beginUpdate frees.
+    const env_name = try self.allocator.dupe(u8, env_id);
     defer self.allocator.free(env_name);
     const lock = try self.beginUpdate();
     defer lock.close(self.io);
@@ -497,7 +551,8 @@ pub fn addAlias(self: *Registry, alias_name: []const u8, env_name_in: []const u8
     try self.save();
 }
 
-/// In-memory part of addAlias.
+/// In-memory part of addAlias. `env_name` is the env's id, or (in tests) its
+/// name, of which the first entry is used.
 fn attachAlias(self: *Registry, alias_name: []const u8, env_name: []const u8) !void {
     // Reject an alias that would shadow an existing environment name. Resolution
     // is name-first, so without this guard such an alias would be unreachable
@@ -510,16 +565,16 @@ fn attachAlias(self: *Registry, alias_name: []const u8, env_name: []const u8) !v
     // shared across several environments — host-aware resolution disambiguates
     // by the current machine (see resolveAgainstCwd) — so an alias already used
     // by ANOTHER entry is not rejected; only re-adding it to the SAME entry is.
-    for (self.entries.items) |*entry| {
-        if (matches(entry.*, .name, env_name)) {
-            if (matches(entry.*, .alias, alias_name)) return error.AliasAlreadyExists;
-            const alias_name_owned = try self.allocator.dupe(u8, alias_name);
-            errdefer self.allocator.free(alias_name_owned);
-            try entry.aliases.append(self.allocator, alias_name_owned);
-            return;
-        }
-    }
-    return error.EnvironmentNotFound;
+    const target = for (self.entries.items, 0..) |entry, i| {
+        if (matches(entry, .id, env_name)) break i;
+    } else for (self.entries.items, 0..) |entry, i| {
+        if (matches(entry, .name, env_name)) break i;
+    } else null;
+    const entry = &self.entries.items[target orelse return error.EnvironmentNotFound];
+    if (matches(entry.*, .alias, alias_name)) return error.AliasAlreadyExists;
+    const alias_name_owned = try self.allocator.dupe(u8, alias_name);
+    errdefer self.allocator.free(alias_name_owned);
+    try entry.aliases.append(self.allocator, alias_name_owned);
 }
 
 /// Removes the alias from EVERY environment that holds it (a shared alias spans
@@ -575,20 +630,22 @@ pub fn rename(self: *Registry, ref: *Ref, new_name: []const u8) !void {
     try self.save();
 }
 
-/// Whether `name` already resolves to an entry (name, alias, exact id, or
-/// unique prefix). Host-blind (null hostname): a rename target must be free
-/// on every host. Only a clean not-found means the name is available; an
-/// AmbiguousIdentifier (e.g. `name` equals an alias shared by several envs)
-/// means it is taken, or an env_name could collide with an alias.
-pub fn nameTaken(self: *const Registry, name: []const u8) bool {
-    _ = self.resolveAgainstCwd(name, null, null) catch |e| return e == error.AmbiguousIdentifier;
-    return true;
+/// Whether `name` cannot become the name of an env of project `project_dir`:
+/// another env of that project has it, or it is an alias or (a 7+ character
+/// prefix of) an id. Host-blind: a rename target must be free on every host.
+/// Envs of other projects may share it.
+pub fn nameTaken(self: *const Registry, name: []const u8, project_dir: []const u8) bool {
+    for (self.entries.items) |entry| {
+        if (matches(entry, .name, name) and std.mem.eql(u8, entry.project_dir, project_dir)) return true;
+        if (matches(entry, .alias, name) or matches(entry, .id, name) or matches(entry, .id_prefix, name)) return true;
+    }
+    return false;
 }
 
 /// In-memory part of rename, on an up-to-date registry: uniqueness check,
 /// then the new name, venv path and id.
 fn renameAt(self: *Registry, ref: Ref, new_name: []const u8) !void {
-    if (self.nameTaken(new_name)) return error.EnvironmentAlreadyExists;
+    if (self.nameTaken(new_name, self.entries.items[ref.idx].project_dir)) return error.EnvironmentAlreadyExists;
     const a = self.allocator;
     const entry = &self.entries.items[ref.idx];
     const parent_dir = Io.Dir.path.dirname(entry.venv_path) orelse return error.InvalidPath;
@@ -861,8 +918,12 @@ test "upsert: a new env cannot take a name that is an alias" {
     try tAppend(&reg, "aaaaaaa1111111111111111111111111111111111", "web", "/p/web");
     try reg.attachAlias("dev", "web");
     try testing.expectError(error.AliasAlreadyExists, reg.upsert("dev", "/p/dev", ".zenv", null, &.{"*"}));
-    try reg.upsert("web", "/p/web2", ".zenv", null, &.{"*"}); // an existing env is updated
-    try testing.expectEqualStrings("/p/web2", reg.entries.items[0].project_dir);
+    try reg.upsert("web", "/p/web", "envs", null, &.{"*"}); // the project's env is updated
+    try testing.expectEqualStrings("/p/web/envs/web", reg.entries.items[0].venv_path);
+    try testing.expectEqual(@as(usize, 1), reg.entries.items.len);
+    try reg.upsert("web", "/p/web2", ".zenv", null, &.{"*"}); // another project's is added
+    try testing.expectEqual(@as(usize, 2), reg.entries.items.len);
+    try testing.expectEqualStrings("/p/web", reg.entries.items[0].project_dir);
 }
 
 test "removeAlias: drops a shared alias from every holder" {
@@ -1002,4 +1063,25 @@ test "deregister(ref) transfers ownership; rename(ref) keeps the ref valid" {
     removed.deinit(a);
     try testing.expectEqual(@as(usize, 1), reg.entries.items.len);
     try testing.expectEqualStrings("web2", reg.get(.{ .idx = 0 }).env_name);
+}
+
+test "a name registered by two projects resolves by the cwd's project" {
+    const a = testing.allocator;
+    var reg = Registry.init(a, testing.io, &test_support.no_env);
+    defer reg.deinit();
+    try reg.upsert("dev", "/p/a", ".zenv", null, &.{"*"});
+    try reg.upsert("dev", "/p/b", ".zenv", null, &.{"*"});
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", null, null));
+    try testing.expectError(error.AmbiguousIdentifier, reg.resolveAgainstCwd("dev", "/elsewhere", "h"));
+    const b = try reg.resolveAgainstCwd("dev", "/p/b", null);
+    try testing.expectEqualStrings("/p/b/.zenv/dev", reg.get(b).venv_path);
+    // The ids differ, so each is reachable by id.
+    const by_id = try reg.resolveAgainstCwd(reg.entries.items[0].id, null, null);
+    try testing.expectEqualStrings("/p/a", reg.get(by_id).project_dir);
+    // A name another project uses is free here; one this project uses is not.
+    try testing.expect(!reg.nameTaken("dev", "/p/c"));
+    try testing.expect(reg.nameTaken("dev", "/p/a"));
+    // An alias goes to the env whose id is given.
+    try reg.attachAlias("al", reg.entries.items[1].id);
+    try testing.expectEqualStrings("/p/b", reg.get(try reg.resolveAgainstCwd("al", null, null)).project_dir);
 }

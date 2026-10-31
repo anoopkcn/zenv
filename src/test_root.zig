@@ -23,4 +23,6 @@ test {
     _ = @import("commands.zig");
     _ = @import("container.zig");
     _ = @import("jsonc.zig");
+    _ = @import("sources.zig");
+    _ = @import("launch.zig");
 }

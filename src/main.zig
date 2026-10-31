@@ -188,7 +188,7 @@ fn printUsage(io: Io) void {
         \\
         \\[b] Python Priority List (for 'zenv setup' without '--python' flag):
         \\  zenv attempts to find a Python interpreter in the following order:
-        \\  1. HPC module-provided Python (if HPC environment modules are loaded).
+        \\  1. A Python the loaded HPC modules put on PATH.
         \\  2. Path explicitly specified by the 'fallback_python' key in zenv.json.
         \\  3. zenv-pinned Python (set via 'zenv python pin <version>').
         \\  4. System Python.

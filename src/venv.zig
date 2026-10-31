@@ -265,7 +265,7 @@ pub fn create(
 }
 
 /// Fields extracted from a pyvenv.cfg body. Slices point INTO the input.
-const PyvenvFields = struct { version: ?[]const u8, path: ?[]const u8 };
+const PyvenvFields = struct { version: ?[]const u8, path: ?[]const u8, executable: ?[]const u8 = null };
 
 /// Pure parser for pyvenv.cfg contents. `version` is the `version =` value.
 /// `path` is the best-available interpreter path across Python versions:
@@ -302,7 +302,20 @@ fn parsePyvenvCfg(content: []const u8) PyvenvFields {
     }
     if (path == null) path = home;
 
-    return .{ .version = version, .path = path };
+    return .{ .version = version, .path = path, .executable = executable };
+}
+
+/// The `executable =` of <venv_path>/pyvenv.cfg: the resolved interpreter the
+/// venv was made from (`create` writes it). Null when the file or the key is
+/// missing. Caller owns the result.
+pub fn readExecutable(allocator: Allocator, io: Io, venv_path: []const u8) !?[]u8 {
+    const cfg_path = try Io.Dir.path.join(allocator, &.{ venv_path, "pyvenv.cfg" });
+    defer allocator.free(cfg_path);
+    const content = Io.Dir.cwd().readFileAlloc(io, cfg_path, allocator, .limited(64 * 1024)) catch
+        return null;
+    defer allocator.free(content);
+    const executable = parsePyvenvCfg(content).executable orelse return null;
+    return try allocator.dupe(u8, executable);
 }
 
 /// Reads <venv_path>/pyvenv.cfg and returns the Python that built the venv: its

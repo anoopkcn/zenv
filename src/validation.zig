@@ -711,33 +711,55 @@ fn printProblems(io: Io, errors: []const Problem) void {
     }
 }
 
-/// Reads `config_path` and returns the built `config.Project`, or prints positioned
-/// errors and fails. The production parse path (setup/register): a single call
-/// to the parse-and-validate seam — one read, one parse, one walk.
-pub fn validateAndParse(allocator: Allocator, io: Io, config_path: []const u8) !config.Project {
+/// A project's zenv.json as `load` read it: its text (which the build record
+/// hashes) and what it builds.
+pub const ProjectFile = struct {
+    content: []u8,
+    project: config.Project,
+
+    pub fn deinit(self: *ProjectFile, allocator: Allocator) void {
+        self.project.deinit();
+        allocator.free(self.content);
+    }
+};
+
+/// Whether `load` prints why a zenv.json cannot be used.
+pub const Report = enum {
+    /// Prints nothing, for callers that must keep working while zenv.json is
+    /// missing or mid-edit (the rebuild gate).
+    quiet,
+    /// Prints the positioned problems, or that the file is missing.
+    loud,
+};
+
+/// Reads the zenv.json at `config_path` and validates it: one read, one parse,
+/// one walk. A file that does not validate is error.InvalidFormat. A missing
+/// one is error.FileNotFound when `.quiet`, and error.InvalidFormat after
+/// saying so when `.loud`.
+pub fn load(allocator: Allocator, io: Io, config_path: []const u8, report: Report) !ProjectFile {
     const content = Io.Dir.cwd().readFileAlloc(
         io,
         config_path,
         allocator,
         .limited(10 * 1024 * 1024),
     ) catch |err| {
-        if (err == error.FileNotFound) {
+        if (err == error.FileNotFound and report == .loud) {
             output.printError(io, "Configuration file not found", .{});
             output.printError(io, "Context: {s}", .{config_path});
             return error.InvalidFormat;
         }
         return err;
     };
-    defer allocator.free(content);
+    errdefer allocator.free(content);
 
     switch (try loadConfig(allocator, content)) {
         .errors => |errs| {
             var e = errs;
             defer freeErrors(allocator, &e);
-            printProblems(io, e.items);
+            if (report == .loud) printProblems(io, e.items);
             return error.InvalidFormat;
         },
-        .config => |c| return c,
+        .config => |c| return .{ .content = content, .project = c },
     }
 }
 
