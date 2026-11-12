@@ -519,7 +519,8 @@ fn buildHook(
 }
 
 /// Validates+builds the optional `container` object: `image` (required string),
-/// `options` and `bind` (arrays of strings). Absent or null is no container.
+/// `runtime` ("apptainer", the default, or "docker"), `options` and `bind`
+/// (arrays of strings). Absent or null is no container.
 fn buildContainer(
     allocator: Allocator,
     errors: *ErrorList,
@@ -544,7 +545,7 @@ fn buildContainer(
         try addProblem(
             allocator,
             errors,
-            "In environment '{s}', 'container.image' must be the image path or URI (a non-empty string)",
+            "In environment '{s}', 'container.image' must be the image path, URI or reference (a non-empty string)",
             .{env_name},
             "{s}.container{s}",
             .{ env_name, if (image != null) ".image" else "" },
@@ -552,17 +553,32 @@ fn buildContainer(
         return null;
     }
 
-    var ct: config.Container = .{ .image = try allocator.dupe(u8, image.?.string) };
+    var kind: config.Container.Runtime = .apptainer;
+    if (v.object.get("runtime")) |r| {
+        const named = if (r == .string) std.meta.stringToEnum(config.Container.Runtime, r.string) else null;
+        if (named) |k| {
+            kind = k;
+        } else try addProblem(
+            allocator,
+            errors,
+            "In environment '{s}', 'container.runtime' must be \"apptainer\" or \"docker\"",
+            .{env_name},
+            "{s}.container.runtime",
+            .{env_name},
+        );
+    }
+
+    var ct: config.Container = .{ .runtime = kind, .image = try allocator.dupe(u8, image.?.string) };
     errdefer ct.deinit(allocator);
     try buildField(allocator, errors, v, env_name, "container.options", &ct.options);
     try buildField(allocator, errors, v, env_name, "container.bind", &ct.bind);
     for (v.object.keys()) |key| {
-        for ([_][]const u8{ "image", "options", "bind" }) |a| {
+        for ([_][]const u8{ "image", "runtime", "options", "bind" }) |a| {
             if (std.mem.eql(u8, key, a)) break;
         } else try addProblem(
             allocator,
             errors,
-            "In environment '{s}', 'container.{s}' is not a recognized field (image, options, bind).",
+            "In environment '{s}', 'container.{s}' is not a recognized field (image, runtime, options, bind).",
             .{ env_name, key },
             "{s}.container.{s}",
             .{ env_name, key },
@@ -1154,7 +1170,8 @@ test "loadConfig: container builds image, options and bind" {
     const a = testing.allocator;
     const content =
         \\{ "e": { "target_machines": ["*"], "container": {
-        \\  "image": "py.sif", "options": ["--nv"], "bind": ["/data:/data:ro"] } } }
+        \\  "image": "py.sif", "options": ["--nv"], "bind": ["/data:/data:ro"] } },
+        \\  "d": { "target_machines": ["*"], "container": { "runtime": "docker", "image": "python:3.13-slim" } } }
     ;
     var result = try loadConfig(a, content);
     switch (result) {
@@ -1168,6 +1185,8 @@ test "loadConfig: container builds image, options and bind" {
             try testing.expectEqualStrings("py.sif", ct.image);
             try testing.expectEqualStrings("--nv", ct.options.items[0]);
             try testing.expectEqualStrings("/data:/data:ro", ct.bind.items[0]);
+            try testing.expectEqual(config.Container.Runtime.apptainer, ct.runtime);
+            try testing.expectEqual(config.Container.Runtime.docker, cfg.getEnvironment("d").?.container.?.runtime);
         },
     }
 }
@@ -1197,6 +1216,12 @@ test "validateJsonContent: container needs an image and excludes modules and fal
             \\{ "e": { "target_machines": ["*"], "fallback_python": "/usr/bin/python3", "container": { "image": "a.sif" } } }
             ,
             .needle = "'fallback_python' cannot be used with 'container'",
+        },
+        .{
+            .content =
+            \\{ "e": { "target_machines": ["*"], "container": { "image": "a.sif", "runtime": "podman" } } }
+            ,
+            .needle = "'container.runtime' must be",
         },
         .{
             .content =

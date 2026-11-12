@@ -106,7 +106,7 @@ pub const Spec = struct {
     activate_commands: []const []const u8 = &.{},
     /// activate.script, copied into `<venv>/scripts/` at setup (sh code).
     activate_script: ?[]const u8 = null,
-    /// The Apptainer image the env runs in; commands are started inside it.
+    /// The container image the env runs in; commands are started inside it.
     container: ?container.Image = null,
 
     pub fn hasActivateHooks(self: *const Spec) bool {
@@ -157,6 +157,13 @@ pub fn plainOps(allocator: Allocator, venv_path: []const u8) ![]const Op {
         .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path },
     });
 }
+
+/// What every container env sets, before the env's own `env` entries. Its
+/// venv imports the image's packages (include-system-site-packages), which
+/// also turns on the user site: without PYTHONNOUSERSITE, packages in a bound
+/// home directory (`~/.local/lib/pythonX.Y/site-packages`, installed for the
+/// host) would be importable in the image and count as installed for pip.
+pub const container_ops = [_]Op{.{ .op = .set, .name = "PYTHONNOUSERSITE", .value = "1" }};
 
 /// `value` with `${ZENV_ENV_DIR}` and `${ZENV_PROJECT_DIR}` replaced by the
 /// env and project directories. Anything else, `$HOME` included, stays
@@ -309,7 +316,11 @@ pub fn build(
         .ops = try std.mem.concat(
             allocator,
             Op,
-            &.{ venv_ops, try userOps(allocator, env_config, venv_path, project_dir) },
+            &.{
+                venv_ops,
+                if (env_config.container != null) &container_ops else &.{},
+                try userOps(allocator, env_config, venv_path, project_dir),
+            },
         ),
         .activate_commands = env_config.activate.commands.items,
         .activate_script = activate_script,
@@ -614,6 +625,27 @@ test "expandValue replaces only the two zenv directories" {
         "/p",
     );
     try testing.expectEqualStrings("/p/data:/p/.zenv/demo/bin:$HOME/${OTHER}:/p/.zenv/demo", out);
+}
+
+test "build keeps the user site out of a container env, before the env's own entries" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg = config.Env.init(a);
+    try testing.expect(!hasOp((try build(a, testing.io, &cfg, "demo", "/p/.zenv/demo", "/p", null)).ops, "PYTHONNOUSERSITE"));
+
+    cfg.container = .{ .image = "py.sif" };
+    try cfg.env.append(a, .{ .name = "PYTHONNOUSERSITE", .value = "" });
+    const ops = (try build(a, testing.io, &cfg, "demo", "/p/.zenv/demo", "/p", null)).ops;
+    // zenv's entry, then the env's own, which therefore wins.
+    try testing.expectEqualStrings("PYTHONNOUSERSITE", ops[ops.len - 2].name);
+    try testing.expectEqualStrings("1", ops[ops.len - 2].value);
+    try testing.expectEqualStrings("", ops[ops.len - 1].value);
+}
+
+fn hasOp(ops: []const Op, name: []const u8) bool {
+    for (ops) |op| if (std.mem.eql(u8, op.name, name)) return true;
+    return false;
 }
 
 test "build appends env entries after the venv ops, expanded" {

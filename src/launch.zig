@@ -1,8 +1,8 @@
 //! Starting a command inside an env, the way `zenv run` does.
 //!
 //! One interface, `start`, over three adapters, picked per env:
-//!   - container: the env runs in an Apptainer image, so `zenv __exec` is
-//!     started there and applies the env inside it;
+//!   - container: the env runs in a container image, so the runtime starts
+//!     a shell there that sources the env's activate.sh and execs the command;
 //!   - direct: this process's environment with `zenv-env.json` applied, the
 //!     command resolved on the resulting PATH, no shell;
 //!   - activate.sh: bash sources the env's activation script, then execs the
@@ -36,9 +36,9 @@ pub fn start(
     command_args: []const []const u8,
     mode: Mode,
 ) !runtime.Term {
-    if (!container.inside(ctx.env)) if (containerOf(ctx, venv_path)) |img| {
+    if (containerOf(ctx, venv_path)) |img| {
         return execInContainer(ctx, img, venv_path, command, command_args, mode);
-    };
+    }
     if (try execDirect(ctx, venv_path, command, command_args, mode)) |term| return term;
 
     const activate_path = try Io.Dir.path.join(
@@ -57,9 +57,33 @@ pub fn containerOf(ctx: Ctx, venv_path: []const u8) ?container.Image {
     return parsed.value.container;
 }
 
-/// Starts `command` in the env's container: `zenv __exec` there applies the
-/// env to the container's environment and starts it (`commands.handleExecInside`).
-/// The host's Python settings stay outside (`container.hostEnv`).
+/// `run_runner` for a container: the activation script is "$1", the command
+/// what follows. ZENV_CONTAINER tells activate.sh that it is sourced in the
+/// image, where alone it activates a container env.
+const container_runner = "[ -r \"$1\" ] || { echo \"zenv: cannot read $1\" >&2; exit 1; }; " ++
+    "ZENV_CONTAINER=1; export ZENV_CONTAINER; . \"$1\" || :; shift; " ++
+    // The shell's own message would be about `exec`.
+    "command -v \"$1\" >/dev/null 2>&1 || { echo \"zenv: $1: command not found\" >&2; exit 127; }; " ++
+    "exec \"$@\"";
+
+/// The argv the image runs for `command`: no zenv is needed in there.
+fn containerArgv(
+    a: Allocator,
+    activate_path: []const u8,
+    command: []const u8,
+    command_args: []const []const u8,
+) ![]const []const u8 {
+    return std.mem.concat(a, []const u8, &.{
+        &.{ "/bin/sh", "-c", container.pick_shell, container_runner, activate_path, command },
+        command_args,
+    });
+}
+
+/// Starts `command` in the env's container image, with the env applied there
+/// by its activate.sh. The project, the env directory and the working
+/// directory are bound; the host's Python settings stay outside
+/// (`container.hostEnv`). Docker gets the terminal only when zenv has one, so
+/// pipes into and out of the command keep working.
 fn execInContainer(
     ctx: Ctx,
     img: container.Image,
@@ -70,15 +94,29 @@ fn execInContainer(
 ) !runtime.Term {
     const a = ctx.arena;
     const io = ctx.io;
-    const self_exe = try std.process.executablePathAlloc(io, a);
-    const inner = try std.mem.concat(a, []const u8, &.{
-        &.{ self_exe, "__exec", venv_path, command },
-        command_args,
-    });
-    const argv = try container.execArgv(a, io, img, &.{ img.project_dir, venv_path, self_exe }, inner);
+    const activate_path = try Io.Dir.path.join(a, &.{ venv_path, activation.fileName(.sh) });
+    var paths: std.ArrayList([]const u8) = .empty;
+    try paths.appendSlice(a, &.{ img.project_dir, venv_path });
+    var cmd: container.Command = .{
+        .argv = try containerArgv(a, activate_path, command, command_args),
+    };
+    if (img.runtime == .docker) {
+        // Apptainer starts in the host's working directory and binds it;
+        // Docker has to be told both. "/" cannot be bound.
+        const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+        if (!std.mem.eql(u8, here, "/")) {
+            try paths.append(a, here);
+            cmd.cwd = here;
+        }
+        cmd.stdin = true;
+        cmd.tty = (Io.File.stdin().isTty(io) catch false) and (Io.File.stdout().isTty(io) catch false);
+        if (cmd.tty and ctx.getEnv("TERM") != null) cmd.env = &.{"TERM"};
+    }
+    cmd.paths = paths.items;
+    const argv = try container.hostArgv(a, io, img, cmd);
     var env = try container.hostEnv(a, ctx.env);
     const exe = try envspec.resolveCommand(a, io, argv[0], env.get("PATH")) orelse {
-        output.printError(io, "apptainer: command not found (the environment runs in {s})", .{img.image});
+        output.printError(io, "{s}: command not found (the environment runs in {s})", .{ argv[0], img.image });
         return .{ .exited = 127 };
     };
     return startCommand(io, argv, .{ .environ_map = &env, .exe_path = exe }, mode);

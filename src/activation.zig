@@ -288,9 +288,10 @@ fn renderSh(a: Allocator, spec: *const Spec) ![]u8 {
         \\# Use from bash or zsh: source $(zenv activate {s})
         \\
     , .{ spec.name, envspec.file_name, spec.name });
-    // Only zenv inside the env's container sources it (for activate hooks).
+    // `zenv run` sources it in the env's image (`launch.execInContainer`) and
+    // says so with ZENV_CONTAINER; a shell on the host is refused.
     if (spec.container != null) try w.print(
-        \\if [ -z "${{APPTAINER_CONTAINER:-}}" ] ; then
+        \\if [ -z "${{ZENV_CONTAINER:-}}" ] ; then
         \\    echo "{s}" >&2
         \\    return 1 2> /dev/null || exit 1
         \\fi

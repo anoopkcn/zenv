@@ -28,15 +28,19 @@ pub const EnvVar = struct {
     pub const Kind = enum { set, prepend, append };
 };
 
-/// An env's `container`: the Apptainer image the env runs in (see
-/// container.zig).
+/// An env's `container`: the image the env runs in and the runtime that runs
+/// it (see container.zig).
 pub const Container = struct {
-    /// A path (relative to zenv.json) or an Apptainer URI (`docker://...`), as written.
+    runtime: Runtime = .apptainer,
+    /// As written. For Apptainer a path (relative to zenv.json) or a URI
+    /// (`docker://...`); for Docker an image reference (`pytorch/pytorch:2.5.1`).
     image: []const u8,
-    /// Extra `apptainer exec` options, e.g. "--nv".
+    /// Extra options of `apptainer exec` or `docker run`, e.g. "--nv".
     options: ArrayList([]const u8) = .empty,
     /// Extra bind specs, `src[:dest[:opts]]`, beyond the paths zenv binds itself.
     bind: ArrayList([]const u8) = .empty,
+
+    pub const Runtime = enum { apptainer, docker };
 
     pub fn deinit(self: *Container, allocator: Allocator) void {
         allocator.free(self.image);
@@ -75,7 +79,7 @@ pub const Env = struct {
     /// deactivate restores.
     env: ArrayList(EnvVar) = .empty,
     /// When set, the env's Python, installs, hooks and commands run inside
-    /// this Apptainer image.
+    /// this container image.
     container: ?Container = null,
 
     pub fn init(allocator: Allocator) Env {

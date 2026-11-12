@@ -59,10 +59,6 @@ pub const Command = enum {
     @"--version",
     @"-h",
     @"--help",
-    /// Internal, run inside an env's container (container.zig): setup's
-    /// build (`envbuild.runInside`) and a command in the env (`handleExecInside`).
-    __build,
-    __exec,
 };
 
 /// The flags each command takes (see help.zig).
@@ -537,6 +533,7 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
         if (groups.len > 0) return noPython(io, env_name, "--group installs packages into it");
         if (flags.create_jupyter_kernel) return noPython(io, env_name, "--jupyter needs Python");
     }
+    if (flags.create_jupyter_kernel and runsInDocker(env_config)) return noDockerKernel(io, env_name);
 
     const targets = env_config.target_machines.items;
     const display_target = if (targets.len > 0) targets[0] else "any";
@@ -633,10 +630,17 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
         output.printWarning(io, "could not write setup stamp: {t}", .{err});
     };
 
-    output.print(io,
-        \\Environment '{s}' setup complete and registered in global registry.
-        \\Usage: source $(zenv activate {s})
-    , .{ env_name, env_name });
+    output.print(io, "Environment '{s}' setup complete and registered in global registry.", .{env_name});
+    printUsage(io, env_config, env_name);
+}
+
+/// How to use the env: a container env cannot be activated.
+fn printUsage(io: Io, env_config: *const config.Env, env_name: []const u8) void {
+    if (env_config.container != null) {
+        output.print(io, "Usage: zenv run {s} <command>", .{env_name});
+    } else {
+        output.print(io, "Usage: source $(zenv activate {s})", .{env_name});
+    }
 }
 
 /// The config of the environment named by the first positional argument, with
@@ -1212,10 +1216,8 @@ pub fn handleRegister(ctx: Ctx, registry: *Registry, args: []const []const u8) !
         return err;
     };
 
-    output.print(io,
-        \\Environment '{s}' registered successfully.
-        \\Usage: source $(zenv activate {s})
-    , .{ env_name, env_name });
+    output.print(io, "Environment '{s}' registered successfully.", .{env_name});
+    printUsage(io, env_config, env_name);
 }
 
 pub fn handleDeregister(
@@ -1621,6 +1623,21 @@ fn venvHasPython(allocator: Allocator, io: Io, venv_path: []const u8) !bool {
     return runtime.exists(io, py);
 }
 
+fn runsInDocker(env_config: *const config.Env) bool {
+    return if (env_config.container) |ct| ct.runtime == .docker else false;
+}
+
+/// Jupyter talks to a kernel over ports on the host's loopback address and a
+/// connection file in the user's home, and a Docker container has neither.
+fn noDockerKernel(io: Io, env_name: []const u8) error{ContainerEnv} {
+    output.printError(
+        io,
+        "'{s}' runs in a Docker image, where a Jupyter kernel cannot be reached from the host; zenv creates no kernel for it.",
+        .{env_name},
+    );
+    return error.ContainerEnv;
+}
+
 /// Refuses a Python-only action on a Python-free env, saying how to enable it.
 fn noPython(io: Io, env_name: []const u8, why: []const u8) error{NoPython} {
     output.printError(
@@ -1885,7 +1902,10 @@ pub fn handleRemove(
             "'{s}' stays installed: it is still recorded in {s}.",
             .{ package, e.where },
         );
-    } else if (try venvHasPython(allocator, io, entry.venv_path)) {
+    } else if (launch.containerOf(ctx, entry.venv_path) != null or
+        try venvHasPython(allocator, io, entry.venv_path))
+    {
+        // (A container env's interpreter link resolves only in its image.)
         // The venv's record of its requirements; the next add resolves with it.
         envbuild.recordRemoved(allocator, io, entry.venv_path, package) catch {};
         if (try uninstallPackage(ctx, entry.venv_path, package, flags)) output.print(
@@ -1997,20 +2017,6 @@ fn uninstallPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, flags:
     return true;
 }
 
-/// `zenv __exec <venv> <command> [args...]`, run by `launch.start` inside
-/// an env's container: starts the command with the env applied, as `zenv run`
-/// does outside one.
-pub fn handleExecInside(ctx: Ctx, args: []const []const u8) !void {
-    if (args.len < 4) return error.ArgsError;
-    const term = launch.start(ctx, args[2], args[3], args[4..], .replace) catch |err| {
-        output.printError(ctx.io, "Failed to run command: {t}", .{err});
-        return err;
-    };
-    switch (term) {
-        .exited => |code| std.process.exit(code),
-        else => std.process.exit(1),
-    }
-}
 test "pythonDisabled reads only an explicit false in a valid zenv.json" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -2310,6 +2316,9 @@ fn handleJupyterCreate(
     // Rebuild the env first if its config/dependency files changed (silent), so
     // the kernel is created against an up-to-date environment.
     try autosetup.ensureUpToDate(ctx, entry);
+    if (launch.containerOf(ctx, entry.venv_path)) |img| {
+        if (img.runtime == .docker) return noDockerKernel(io, entry.env_name);
+    }
 
     try jupyter.createKernel(
         ctx,

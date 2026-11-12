@@ -318,7 +318,8 @@ const notes =
     \\  In an environment, "python": false builds it without a Python venv, and "env" sets
     \\  environment variables ("NAME": "value", or {"prepend": ...} / {"append": ...}).
     \\  "container": {"image": "path.sif", "options": [...], "bind": [...]} runs it in an
-    \\  Apptainer image: setup and 'zenv run' happen inside it, and activation is refused.
+    \\  Apptainer image, and with "runtime": "docker" and an image reference in a Docker image:
+    \\  setup and 'zenv run' start their commands inside it, and activation is refused.
     \\
     \\[a] Registry (ZENV_DIR/registry.json):
     \\  A global JSON file (path in ZENV_DIR environment variable, typically $HOME/.zenv)
@@ -396,7 +397,7 @@ pub fn requested(command: Command, args: []const []const u8) bool {
     if (args.len < 3) return false;
     switch (command) {
         // `zenv help <command>` is the caller's to resolve.
-        .help, .@"-h", .@"--help", .__build, .__exec => return false,
+        .help, .@"-h", .@"--help" => return false,
         // Here the first argument is a subcommand, so the word is free.
         // Elsewhere it would be an environment named "help".
         .alias, .jupyter, .python => if (std.mem.eql(u8, args[2], "help")) return true,
@@ -424,7 +425,6 @@ test "requested: help flags and the help word" {
 
 test "every public command has a topic" {
     for (std.enums.values(Command)) |command| {
-        const internal = command == .__build or command == .__exec;
-        try std.testing.expectEqual(!internal, topicOf(command) != null);
+        try std.testing.expect(topicOf(command) != null);
     }
 }

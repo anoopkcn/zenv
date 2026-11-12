@@ -33,8 +33,10 @@ A command changing an env's tracked files itself (`add`, `remove`, `rename`). An
 when the change began is re-recorded at its end, so it does not rebuild.
 
 **Launch** (`launch.zig`)
-Starting a command inside an env: directly with `zenv-env.json` applied, through
-`activate.sh`, or in the env's container image.
+Starting a command inside an env: directly with `zenv-env.json` applied, through `activate.sh`, or in the env's container image, where the runtime starts a shell that sources `activate.sh`.
+
+**Runtime** (`container.zig`)
+The program that runs a container env's image: Apptainer or Docker. zenv stays on the host and starts every command of such an env through it, both setup's steps and the command of `zenv run`.
 
 **Module cache**
 The environment `module load` produced at setup, replayed instead of running Lmod again.

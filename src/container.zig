@@ -1,16 +1,17 @@
-//! Apptainer support. An env with `container` in zenv.json runs inside that
+//! Container support. An env with `container` in zenv.json runs inside that
 //! image: its venv is built on the image's Python with the image's packages
 //! visible (include-system-site-packages), and `zenv run` starts commands in
-//! the image. zenv stays on the host for what needs no Python (registry,
-//! activation files, rebuild checks) and re-runs itself inside the image for
-//! the rest: `zenv __build` for setup (envbuild.zig) and `zenv __exec` for
-//! commands (commands.zig). Inside, those take the same code paths as an env
-//! without a container.
+//! the image. zenv itself always stays on the host and only starts commands in
+//! the image through the runtime, Apptainer or Docker: setup's steps
+//! (envbuild.zig) and the command of `zenv run` (launch.zig). The venv lives
+//! in the env directory on the host, which is bound into the image at the
+//! same path.
 //!
-//! Apptainer passes the host environment in, except PATH (the image's own) and
-//! LD_LIBRARY_PATH. It binds $HOME, /tmp and the working directory by default;
-//! zenv binds the other paths it needs itself, so a site's bind configuration
-//! is a convenience it does not rely on.
+//! Apptainer passes the host environment in, except PATH (the image's own)
+//! and LD_LIBRARY_PATH, and binds $HOME, /tmp and the working directory by
+//! default. Docker passes nothing in and binds nothing. zenv binds the paths
+//! it needs itself with both, so a site's bind configuration is a convenience
+//! it does not rely on.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -19,9 +20,15 @@ const Map = std.process.Environ.Map;
 const config = @import("config.zig");
 const runtime = @import("runtime.zig");
 
-/// The container part of `zenv-env.json`: the image, resolved against the
-/// project directory, and the env's extra options and binds.
+/// The program that runs the image.
+pub const Runtime = config.Container.Runtime;
+
+/// The container part of `zenv-env.json`: the image and the env's extra
+/// options and binds.
 pub const Image = struct {
+    runtime: Runtime = .apptainer,
+    /// For Apptainer a path, resolved against the project directory, or a URI
+    /// (`docker://...`); for Docker an image reference as written.
     image: []const u8,
     options: []const []const u8 = &.{},
     bind: []const []const u8 = &.{},
@@ -29,21 +36,15 @@ pub const Image = struct {
     project_dir: []const u8 = "",
 };
 
-/// Whether this process runs inside an Apptainer container, which sets
-/// APPTAINER_CONTAINER to the image.
-pub fn inside(env: *const Map) bool {
-    return env.get("APPTAINER_CONTAINER") != null;
-}
-
-/// `cfg` with its image resolved: a URI (`docker://...`) or an absolute path
-/// as written, a relative path against `project_dir`.
+/// `cfg` with its image resolved. A Docker reference, a URI (`docker://...`)
+/// and an absolute path stay as written; a relative Apptainer path is taken
+/// against `project_dir`.
 pub fn fromConfig(a: Allocator, cfg: *const config.Container, project_dir: []const u8) !Image {
-    const image = if (isUri(cfg.image) or Io.Dir.path.isAbsolute(cfg.image))
-        cfg.image
-    else
-        try Io.Dir.path.resolve(a, &.{ project_dir, cfg.image });
+    const as_written = cfg.runtime == .docker or isUri(cfg.image) or
+        Io.Dir.path.isAbsolute(cfg.image);
     return .{
-        .image = image,
+        .runtime = cfg.runtime,
+        .image = if (as_written) cfg.image else try Io.Dir.path.resolve(a, &.{ project_dir, cfg.image }),
         .options = cfg.options.items,
         .bind = cfg.bind.items,
         .project_dir = project_dir,
@@ -54,34 +55,81 @@ pub fn isUri(image: []const u8) bool {
     return std.mem.find(u8, image, "://") != null;
 }
 
-/// The argv that runs `inner` in `img`: `apptainer exec`, the env's options,
-/// a bind for each of `paths` that exists (Apptainer refuses a missing
-/// source) and is not inside an earlier one, the env's own binds, the image,
-/// then `inner`.
-pub fn execArgv(
-    a: Allocator,
-    io: Io,
-    img: Image,
-    paths: []const []const u8,
-    inner: []const []const u8,
-) ![]const []const u8 {
+/// One command to run in an image.
+pub const Command = struct {
+    /// Host paths the command needs, bound at the same path. One that does
+    /// not exist, or lies inside an earlier one, is left out.
+    paths: []const []const u8 = &.{},
+    /// The working directory inside. Null: the runtime's own choice, which is
+    /// the host's working directory for Apptainer and the image's for Docker.
+    cwd: ?[]const u8 = null,
+    /// Docker only: connect the command to zenv's stdin, and to its terminal.
+    /// Apptainer always does both.
+    stdin: bool = false,
+    tty: bool = false,
+    /// Docker only: `NAME` or `NAME=value` variables to set inside.
+    env: []const []const u8 = &.{},
+    argv: []const []const u8,
+};
+
+/// The host argv that runs `cmd` in `img`. The runtime's name is argv[0], to
+/// be resolved on the host's PATH. The env's own options and binds come after
+/// zenv's, so they win where the runtime lets the last one win.
+pub fn hostArgv(a: Allocator, io: Io, img: Image, cmd: Command) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ "apptainer", "exec" });
-    try argv.appendSlice(a, img.options);
     var bound: std.ArrayList([]const u8) = .empty;
-    for (paths) |p| {
+    for (cmd.paths) |p| {
+        // Both runtimes refuse or misread a missing source.
         if (covered(bound.items, p) or !runtime.exists(io, p)) continue;
         try bound.append(a, p);
-        try argv.appendSlice(a, &.{ "--bind", p });
     }
-    for (img.bind) |b| try argv.appendSlice(a, &.{ "--bind", b });
+    switch (img.runtime) {
+        .apptainer => {
+            try argv.appendSlice(a, &.{ "apptainer", "exec" });
+            if (cmd.cwd) |dir| try argv.appendSlice(a, &.{ "--pwd", dir });
+            for (bound.items) |p| try argv.appendSlice(a, &.{ "--bind", p });
+            try argv.appendSlice(a, img.options);
+            for (img.bind) |b| try argv.appendSlice(a, &.{ "--bind", b });
+        },
+        .docker => {
+            // --init: the command would otherwise be PID 1, which ignores
+            // SIGINT and SIGTERM unless it handles them. The empty entrypoint
+            // makes the image run the command itself, as `apptainer exec`
+            // does, not hand it to the image's entrypoint script.
+            try argv.appendSlice(a, &.{ "docker", "run", "--rm", "--init", "--entrypoint", "" });
+            if (cmd.stdin) try argv.append(a, "-i");
+            if (cmd.tty) try argv.append(a, "-t");
+            if (cmd.cwd) |dir| try argv.appendSlice(a, &.{ "-w", dir });
+            for (bound.items) |p| {
+                try argv.appendSlice(a, &.{ "-v", try std.fmt.allocPrint(a, "{s}:{s}", .{ p, p }) });
+            }
+            for (cmd.env) |e| try argv.appendSlice(a, &.{ "-e", e });
+            try argv.appendSlice(a, img.options);
+            for (img.bind) |b| {
+                // A bare path is a bind at the same path for Apptainer, but
+                // an anonymous volume for Docker.
+                const spec = if (std.mem.findScalar(u8, b, ':') == null)
+                    try std.fmt.allocPrint(a, "{s}:{s}", .{ b, b })
+                else
+                    b;
+                try argv.appendSlice(a, &.{ "-v", spec });
+            }
+        },
+    }
     try argv.append(a, img.image);
-    try argv.appendSlice(a, inner);
+    try argv.appendSlice(a, cmd.argv);
     return argv.items;
 }
 
+/// A script for `/bin/sh -c` in an image, with the script to run as its "$0"
+/// and that script's arguments after it. It hands over to bash when the image
+/// has one, since hooks are written for bash, and to sh otherwise. The script
+/// then finds "zenv" as its own "$0".
+pub const pick_shell = "if command -v bash >/dev/null 2>&1; then exec bash -c \"$0\" zenv \"$@\"; " ++
+    "else exec sh -c \"$0\" zenv \"$@\"; fi";
+
 /// Whether `path` is one of `dirs` or inside one.
-fn covered(dirs: []const []const u8, path: []const u8) bool {
+pub fn covered(dirs: []const []const u8, path: []const u8) bool {
     for (dirs) |d| {
         const rest = std.mem.cutPrefix(u8, path, d) orelse continue;
         if (rest.len == 0 or rest[0] == '/' or std.mem.endsWith(u8, d, "/")) return true;
@@ -103,8 +151,8 @@ const host_only = [_][]const u8{
 };
 
 /// `env` without the host-only variables, nor the bash functions the host
-/// exports (`BASH_FUNC_module%%`, Lmod's `module`): what a container is
-/// started with.
+/// exports (`BASH_FUNC_module%%`, Lmod's `module`): what the runtime is
+/// started with. Apptainer passes it on into the container.
 pub fn hostEnv(a: Allocator, env: *const Map) !Map {
     var out = try env.clone(a);
     for (host_only) |name| _ = out.orderedRemove(name);
@@ -122,19 +170,37 @@ pub fn hostEnv(a: Allocator, env: *const Map) !Map {
     return out;
 }
 
-/// A cheap identity of a local image file for the rebuild check: its size
-/// and modification time (hashing a multi-gigabyte image on every `zenv run`
-/// would be too slow). Null for a URI or a file that cannot be read.
-pub fn fingerprint(a: Allocator, io: Io, image: []const u8) !?[]const u8 {
-    if (isUri(image)) return null;
-    const st = Io.Dir.cwd().statFile(io, image, .{}) catch return null;
-    return try std.fmt.allocPrint(a, "{d}:{d}", .{ st.size, st.mtime.nanoseconds });
+/// A cheap identity of an image for the rebuild check, so a replaced image
+/// rebuilds the env. For a local Apptainer image file it is the size and
+/// modification time (hashing a multi-gigabyte image on every `zenv run`
+/// would be too slow), for a Docker image the ID its reference stands for
+/// now. Null for an Apptainer URI, a file that cannot be read, and a Docker
+/// image that is not pulled or a daemon that does not answer.
+pub fn fingerprint(a: Allocator, io: Io, kind: Runtime, image: []const u8) !?[]const u8 {
+    switch (kind) {
+        .apptainer => {
+            if (isUri(image)) return null;
+            const st = Io.Dir.cwd().statFile(io, image, .{}) catch return null;
+            return try std.fmt.allocPrint(a, "{d}:{d}", .{ st.size, st.mtime.nanoseconds });
+        },
+        .docker => {
+            const res = runtime.run(a, io, &.{ "docker", "image", "inspect", "--format", "{{.Id}}", image }, .{
+                .stdout_limit = .limited(4096),
+                .stderr_limit = .limited(64 * 1024),
+            }) catch return null;
+            defer a.free(res.stdout);
+            defer a.free(res.stderr);
+            const id = std.mem.trim(u8, res.stdout, " \r\n");
+            if (!res.term.success() or id.len == 0) return null;
+            return try a.dupe(u8, id);
+        },
+    }
 }
 
 // ============================ Tests ============================
 const testing = std.testing;
 
-test "fromConfig resolves a relative image against the project" {
+test "fromConfig resolves a relative Apptainer image against the project" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -148,7 +214,21 @@ test "fromConfig resolves a relative image against the project" {
     try testing.expectEqualStrings(cfg.image, (try fromConfig(a, &cfg, "/p/proj")).image);
 }
 
-test "execArgv binds existing paths once, then the env's binds and the image" {
+test "fromConfig keeps a Docker image reference as written" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg: config.Container = .{ .runtime = .docker, .image = "pytorch/pytorch:2.5.1" };
+    const img = try fromConfig(arena.allocator(), &cfg, "/p/proj");
+    try testing.expectEqual(Runtime.docker, img.runtime);
+    try testing.expectEqualStrings("pytorch/pytorch:2.5.1", img.image);
+}
+
+fn expectArgv(want: []const []const u8, got: []const []const u8) !void {
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "hostArgv binds existing paths once, then the env's options, binds and the image" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -158,25 +238,38 @@ test "execArgv binds existing paths once, then the env's binds and the image" {
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try cwd.createDirPath(io, root ++ "/proj/.zenv/e");
+    const paths: []const []const u8 = &.{ root ++ "/proj", root ++ "/proj/.zenv/e", root ++ "/missing", root ++ "/proj" };
 
-    const img: Image = .{
+    try expectArgv(&.{
+        "apptainer", "exec",           "--pwd",    "/w", "--bind", root ++ "/proj", "--nv",
+        "--bind",    "/data:/data:ro", "/img.sif", "sh", "-c",     "true",
+    }, try hostArgv(a, io, .{
         .image = "/img.sif",
         .options = &.{"--nv"},
         .bind = &.{"/data:/data:ro"},
-    };
-    const argv = try execArgv(
-        a,
-        io,
-        img,
-        &.{ root ++ "/proj", root ++ "/proj/.zenv/e", root ++ "/missing", root ++ "/proj" },
-        &.{ "/zenv", "__exec" },
+    }, .{ .paths = paths, .cwd = "/w", .stdin = true, .tty = true, .argv = &.{ "sh", "-c", "true" } }));
+
+    try expectArgv(&.{
+        "docker", "run",               "--rm",   "--init", "--entrypoint", "",
+        "-i",     "-t",                "-w",     "/w",     "-v",           root ++ "/proj:" ++ root ++ "/proj",
+        "-e",     "TERM",              "--gpus", "all",    "-v",           "/data:/data:ro",
+        "-v",     "/scratch:/scratch", "py:3",   "python",
+    }, try hostArgv(a, io, .{
+        .runtime = .docker,
+        .image = "py:3",
+        .options = &.{ "--gpus", "all" },
+        .bind = &.{ "/data:/data:ro", "/scratch" },
+    }, .{ .paths = paths, .cwd = "/w", .stdin = true, .tty = true, .env = &.{"TERM"}, .argv = &.{"python"} }));
+
+    try expectArgv(
+        &.{ "docker", "run", "--rm", "--init", "--entrypoint", "", "py:3", "python" },
+        try hostArgv(a, io, .{ .runtime = .docker, .image = "py:3" }, .{ .argv = &.{"python"} }),
     );
-    const want = [_][]const u8{
-        "apptainer", "exec",           "--nv",     "--bind", root ++ "/proj",
-        "--bind",    "/data:/data:ro", "/img.sif", "/zenv",  "__exec",
-    };
-    try testing.expectEqual(want.len, argv.len);
-    for (want, argv) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "fingerprint of an Apptainer image: null for a URI or a missing file" {
+    try testing.expect(try fingerprint(testing.allocator, testing.io, .apptainer, "docker://python:3") == null);
+    try testing.expect(try fingerprint(testing.allocator, testing.io, .apptainer, "/no/such/image.sif") == null);
 }
 
 test "covered matches a directory and its children, not a sibling prefix" {

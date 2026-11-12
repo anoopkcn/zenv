@@ -115,7 +115,7 @@ Only `target_machines` is required. These are the keys you will use most:
 | `modules` | HPC modules to load. |
 | `setup`, `activate` | Shell commands to run when the environment is built or activated. |
 | `python` | Set it to `false` for an environment without Python. |
-| `container` | An Apptainer image to run the environment in. |
+| `container` | An Apptainer or Docker image to run the environment in. |
 
 The file may contain `//` and `/* */` comments. After you edit it, `zenv validate` checks it and reports any mistake with its line number. There are more keys than this table shows, and `zenv help` describes them.
 
@@ -196,7 +196,7 @@ Set `"python": false` to get an environment with only modules, variables and she
 
 ### Containers
 
-With `container`, an environment runs inside an [Apptainer](https://apptainer.org) image. This suits software that ships as a container, such as a PyTorch image. zenv installs only the packages that the image does not already have, and `zenv run` starts your command inside the image.
+With `container`, an environment runs inside an [Apptainer](https://apptainer.org) or [Docker](https://www.docker.com) image. This suits software that ships as a container, such as a PyTorch image. zenv builds the venv on the image's Python and installs only the packages that the image does not already have, so `import torch` gets the image's copy. `zenv run` starts your command inside the image.
 
 ```json
 {
@@ -204,9 +204,27 @@ With `container`, an environment runs inside an [Apptainer](https://apptainer.or
     "target_machines": ["jupiter"],
     "container": { "image": "containers/pytorch.sif", "options": ["--nv"] },
     "dependency_file": "pyproject.toml"
+  },
+  "laptop": {
+    "target_machines": ["my-laptop"],
+    "container": { "runtime": "docker", "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime" },
+    "dependency_file": "pyproject.toml"
   }
 }
 ```
+
+`runtime` is `apptainer` (the default) or `docker`. For Apptainer, `image` is a `.sif` file or a URI such as `docker://...`. For Docker it is an image reference, which `docker run` pulls when it is missing. `options` are passed to `apptainer exec` or `docker run`, and `bind` adds `src[:dest[:opts]]` binds.
+
+zenv itself stays on the host and only starts commands in the image, so the image needs nothing from zenv. It needs `sh` and `env`, and for a Python environment `python3` with `pip`. The project directory, the environment directory and the directory you run from are bound into the image at the same paths. The image is only read, and a newer image under the same name rebuilds the environment on its next use.
+
+A few things differ from other environments:
+
+- A container environment cannot be activated. Use `zenv run <name> <command>`, or `zenv run <name> bash` for a shell.
+- Packages are installed with the host's uv when the host runs Linux, and with the image's pip otherwise (on macOS the host's uv cannot run in a Linux image).
+- A requirement that needs another version of a package the image provides fails setup. `--force` installs every dependency into the venv instead.
+- zenv sets `PYTHONNOUSERSITE=1` in a container environment. Apptainer binds your home directory, and without the variable the packages in `~/.local/lib/pythonX.Y/site-packages` on the host would be importable in the image. An `env` entry in `zenv.json` can set it to another value.
+- Docker passes no host variables into the image and runs the image's default user, which is usually root. On a Linux host with rootful Docker the files in the environment directory are then owned by root, unless you add `"options": ["--user", "<uid>:<gid>"]`.
+- `zenv jupyter create` refuses a Docker environment, because Jupyter cannot reach a kernel inside the container.
 
 ### Jupyter kernels
 

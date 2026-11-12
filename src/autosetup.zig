@@ -170,14 +170,17 @@ fn hashTracked(
         defer allocator.free(p);
         foldFile(allocator, io, &sha, key, p);
     }
-    // A local image by size and modification time, so a re-pulled image
-    // rebuilds the env; hashing gigabytes on every run would be too slow.
-    // Folded only for container envs, so other envs keep their digest.
-    if (env_config.container) |ct| if (!container.isUri(ct.image)) {
+    // The image by a cheap identity (`container.fingerprint`), so a re-pulled
+    // image rebuilds the env. Folded only for container envs, and not for an
+    // Apptainer URI, so other envs keep their digest.
+    if (env_config.container) |ct| if (ct.runtime == .docker or !container.isUri(ct.image)) {
         sha.update("image\x00");
-        const p = try paths.resolvePath(allocator, anchor_dir, ct.image);
+        const p = if (ct.runtime == .docker)
+            try allocator.dupe(u8, ct.image)
+        else
+            try paths.resolvePath(allocator, anchor_dir, ct.image);
         defer allocator.free(p);
-        const fp = try container.fingerprint(allocator, io, p);
+        const fp = try container.fingerprint(allocator, io, ct.runtime, p);
         defer if (fp) |f| allocator.free(f);
         foldBytes(&sha, fp orelse "A");
     };

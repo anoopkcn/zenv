@@ -25,7 +25,7 @@ const shell = @import("shell.zig");
 
 /// Run by the base interpreter (with `-I`) to describe itself and the venv
 /// layout for `sys.argv[1]`. Mirrors venv.EnvBuilder.ensure_directories.
-const query_script =
+pub const query_script =
     \\import json, os, sys, sysconfig
     \\venv = sys.argv[1]
     \\exe = getattr(sys, "_base_executable", None) or sys.executable
@@ -95,7 +95,8 @@ pub fn query(
     return parseQuery(a, res.stdout);
 }
 
-fn parseQuery(a: Allocator, text: []const u8) !Interpreter {
+/// Reads `query_script`'s output.
+pub fn parseQuery(a: Allocator, text: []const u8) !Interpreter {
     const info = json.parseFromSliceLeaky(Interpreter, a, text, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -203,9 +204,7 @@ fn writeShims(a: Allocator, io: Io, scripts: []const u8, venv_dir: []const u8) !
 }
 
 /// Creates the venv at `venv_dir` (absolute) for interpreter `python` (an
-/// absolute path), querying it in `env`. Idempotent: existing links are kept,
-/// pyvenv.cfg and the shims are rewritten. `system_site` lets the venv import
-/// the interpreter's own packages. Allocates with `a` (use an arena).
+/// absolute path), querying it in `env`. See `createFrom`.
 pub fn create(
     a: Allocator,
     io: Io,
@@ -214,11 +213,28 @@ pub fn create(
     env: ?*const std.process.Environ.Map,
     system_site: bool,
 ) !void {
+    if (!Io.Dir.path.isAbsolute(venv_dir)) return error.VenvPathNotAbsolute;
+    const info = try query(a, io, python, venv_dir, env);
+    return createFrom(a, io, &info, venv_dir, system_site);
+}
+
+/// Creates the venv at `venv_dir` (absolute) for the interpreter `info`
+/// describes (`query_script` run with `venv_dir`). The interpreter need not
+/// exist on this host: a container env's lives in its image, and the links to
+/// it resolve only there. Idempotent: existing links are kept, pyvenv.cfg and
+/// the shims are rewritten. `system_site` lets the venv import the
+/// interpreter's own packages. Allocates with `a` (use an arena).
+pub fn createFrom(
+    a: Allocator,
+    io: Io,
+    info: *const Interpreter,
+    venv_dir: []const u8,
+    system_site: bool,
+) !void {
     const cwd = Io.Dir.cwd();
     const join = Io.Dir.path.join;
     if (!Io.Dir.path.isAbsolute(venv_dir)) return error.VenvPathNotAbsolute;
     try cwd.createDirPath(io, venv_dir);
-    const info = try query(a, io, python, venv_dir, env);
 
     // `venv` creates a plain include/ whatever the scheme says.
     const include = try join(a, &.{ venv_dir, "include" });
@@ -243,7 +259,7 @@ pub fn create(
         try join(a, &.{ info.scripts, exe_name }),
         false,
     );
-    for (try linkNames(a, &info, exe_name)) |name| {
+    for (try linkNames(a, info, exe_name)) |name| {
         try symlinkIfMissing(io, exe_name, try join(a, &.{ info.scripts, name }), false);
     }
 
@@ -251,7 +267,7 @@ pub fn create(
         io,
         .{
             .sub_path = try join(a, &.{ venv_dir, "pyvenv.cfg" }),
-            .data = try pyvenvCfg(a, &info, options.version, system_site),
+            .data = try pyvenvCfg(a, info, options.version, system_site),
         },
     );
     try writeGitignore(a, io, venv_dir);
