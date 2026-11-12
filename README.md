@@ -245,6 +245,7 @@ A few things differ from other environments:
 | `zenv ls` | List the environments for this machine. |
 | `cd $(zenv cd <name>)` | Go to the environment's project directory. |
 | `zenv validate` | Check `zenv.json` for mistakes. |
+| `zenv clean <name>` | Remove the Python bytecode files the environment left behind. |
 | `zenv rm <name>` | Delete the whole environment. |
 
 In place of `<name>` you can give an alias, the first seven or more characters of the environment's id, or `.` for the project you are in.

@@ -26,4 +26,5 @@ test {
     _ = @import("sources.zig");
     _ = @import("launch.zig");
     _ = @import("help.zig");
+    _ = @import("clean.zig");
 }

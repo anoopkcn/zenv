@@ -257,6 +257,20 @@ const topics = [_]Topic{
         ,
     },
     .{
+        .commands = &.{.clean},
+        .synopsis = "clean <name|id|.> [--project] [--dry-run]",
+        .entry =
+        \\  clean <name|id|.>          Removes the Python bytecode the environment left behind: the
+        \\                             __pycache__ directories in its directory, and its project's
+        \\                             files in its bytecode directory (PYTHONPYCACHEPREFIX).
+        \\                             Packages and everything else stay; Python writes the files
+        \\                             again when it next imports the modules.
+        \\                             --project: also the __pycache__ directories of the project's
+        \\                             own sources (not those of other venvs in it).
+        \\                             --dry-run: only says what would be removed.
+        ,
+    },
+    .{
         .commands = &.{.alias},
         .synopsis = "alias <create|remove|ls|show> [args]",
         .entry =

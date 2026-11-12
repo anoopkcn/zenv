@@ -27,6 +27,7 @@ const container = @import("container.zig");
 const venv = @import("venv.zig");
 const hook = @import("hook.zig");
 const launch = @import("launch.zig");
+const clean = @import("clean.zig");
 const sh_quote = @import("shell.zig").sq;
 const Ctx = runtime.Ctx;
 
@@ -45,6 +46,7 @@ pub const Command = enum {
     rename,
     python,
     log,
+    clean,
     run,
     add,
     remove,
@@ -2075,6 +2077,133 @@ test "pythonDisabled reads only an explicit false in a valid zenv.json" {
     try std.testing.expectEqual(@as(?bool, null), pythonDisabled(a, io, root ++ "/nope.json", "off"));
     try cwd.writeFile(io, .{ .sub_path = path, .data = "{ bad" });
     try std.testing.expectEqual(@as(?bool, null), pythonDisabled(a, io, path, "off"));
+}
+
+/// `zenv clean <name|id|.> [--project] [--dry-run]`
+/// Removes the Python bytecode the env left behind: the `__pycache__`
+/// directories in its env directory and its part of its bytecode directory
+/// (PYTHONPYCACHEPREFIX), and with `--project` the `__pycache__` directories
+/// of the project's own sources. Nothing else is touched, and Python writes
+/// the files again when it next imports the modules.
+pub fn handleClean(
+    ctx: Ctx,
+    registry: *const Registry,
+    args: []const []const u8,
+) !void {
+    const a = ctx.arena;
+    const io = ctx.io;
+    const usage = "clean <name|id|.> [--project] [--dry-run]";
+    var project = false;
+    var dry_run = false;
+    if (args.len > 2 and std.mem.startsWith(u8, args[2], "--")) {
+        output.printError(io, "The environment comes first. Usage: zenv " ++ usage, .{});
+        return error.ArgsError;
+    }
+    for (args[@min(args.len, 3)..]) |arg| {
+        if (std.mem.eql(u8, arg, "--project")) {
+            project = true;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+        } else {
+            output.printError(io, "Unknown argument '{s}' for 'zenv clean'. Usage: zenv " ++ usage, .{arg});
+            return error.ArgsError;
+        }
+    }
+    const entry = registry.get(try resolveArg(ctx, registry, args, usage));
+    const env_dir = entry.venv_path;
+    const verb: []const u8 = if (dry_run) "Would remove" else "Removed";
+    var total: clean.Found = .{};
+
+    const in_env = try clean.sweepPycache(a, io, env_dir, &.{}, false, dry_run);
+    if (in_env.dirs > 0) output.print(
+        io,
+        "{s} {d} file(s) in {d} __pycache__ directories under {s}",
+        .{ verb, in_env.files, in_env.dirs, env_dir },
+    );
+    total.add(in_env);
+
+    // The env's part of a bytecode directory that other envs may share. The
+    // env directory usually lies in the project, whose mirror then holds it.
+    const prefix = bytecodePrefix(ctx, env_dir);
+    if (prefix) |dir| {
+        var in_cache: clean.Found = .{};
+        const mirrored: []const []const u8 = if (container.covered(&.{entry.project_dir}, env_dir))
+            &.{entry.project_dir}
+        else
+            &.{ entry.project_dir, env_dir };
+        for (mirrored) |source| {
+            const mirror = try clean.mirrorOf(a, dir, source) orelse continue;
+            in_cache.add(try clean.sweepMirror(a, io, mirror, dry_run));
+            if (!dry_run) clean.pruneEmptyParents(io, mirror, dir);
+        }
+        if (in_cache.files > 0) output.print(
+            io,
+            "{s} {d} file(s) of this project from the bytecode directory {s}",
+            .{ verb, in_cache.files, dir },
+        );
+        total.add(in_cache);
+    }
+
+    if (project) {
+        // Other envs of the project and other venvs keep theirs.
+        const base = Io.Dir.path.dirname(env_dir) orelse env_dir;
+        const in_project = try clean.sweepPycache(a, io, entry.project_dir, &.{base}, true, dry_run);
+        if (in_project.dirs > 0) output.print(
+            io,
+            "{s} {d} file(s) in {d} __pycache__ directories under {s}",
+            .{ verb, in_project.files, in_project.dirs, entry.project_dir },
+        );
+        total.add(in_project);
+    }
+
+    if (total.files == 0 and total.dirs == 0) {
+        output.print(io, "No bytecode found for '{s}'.", .{entry.env_name});
+    }
+    if (prefix == null and total.dirs > 0) try hintBytecodeDir(ctx, entry);
+    if (total.failed > 0) {
+        output.printError(
+            io,
+            "{d} of them could not be removed (they may belong to another user).",
+            .{total.failed},
+        );
+        return error.ProcessError;
+    }
+}
+
+/// The env's PYTHONPYCACHEPREFIX as its last setup recorded it; null when it
+/// sets none (or an empty one), or was never built.
+fn bytecodePrefix(ctx: Ctx, env_dir: []const u8) ?[]const u8 {
+    // Not deinit: the value lives on in the arena.
+    const parsed = envspec.read(ctx.arena, ctx.io, env_dir) orelse return null;
+    var prefix: ?[]const u8 = null;
+    for (parsed.value.ops) |op| {
+        if (!std.mem.eql(u8, op.name, "PYTHONPYCACHEPREFIX")) continue;
+        prefix = if (op.op == .set and op.value.len > 0) op.value else null;
+    }
+    return prefix;
+}
+
+/// Says how to keep the bytecode of `entry`'s env in one directory: without
+/// a PYTHONPYCACHEPREFIX the files just removed come back next to the sources.
+fn hintBytecodeDir(ctx: Ctx, entry: *const Registry.Entry) !void {
+    const a = ctx.arena;
+    const io = ctx.io;
+    const config_path = try Io.Dir.path.join(a, &.{ entry.project_dir, "zenv.json" });
+    const base_dir = if (validation.load(a, io, config_path, .quiet)) |file|
+        file.project.base_dir
+    else |_|
+        ".zenv";
+    output.print(
+        io,
+        "'{s}' sets no PYTHONPYCACHEPREFIX, so Python writes these files again next to the sources. To keep them in one directory, add to its \"env\" in zenv.json:",
+        .{entry.env_name},
+    );
+    output.print(io, "  \"PYTHONDONTWRITEBYTECODE\": \"\",", .{});
+    output.print(
+        io,
+        "  \"PYTHONPYCACHEPREFIX\": \"{s}\"",
+        .{try pycachePrefix(a, ctx.getEnv("ZENV_PYCACHE_DIR"), base_dir)},
+    );
 }
 
 pub fn handleLog(

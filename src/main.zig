@@ -81,6 +81,7 @@ fn dispatch(ctx: runtime.Ctx, command: Command, args: []const []const u8) !void 
         .rename => try withRegistry(ctx, args, commands.handleRename),
         .cd => try withRegistry(ctx, args, commands.handleCd),
         .log => try withRegistry(ctx, args, commands.handleLog),
+        .clean => try withRegistry(ctx, args, commands.handleClean),
         .run => try withRegistry(ctx, args, commands.handleRun),
         .add => try withRegistry(ctx, args, commands.handleAdd),
         .remove => try withRegistry(ctx, args, commands.handleRemove),
