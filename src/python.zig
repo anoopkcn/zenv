@@ -117,6 +117,24 @@ pub fn pin(ctx: Ctx, version: []const u8) !void {
     );
 }
 
+/// Removes the pin by deleting ZENV_DIR/default-python. Having no pin is not
+/// an error. The installed Pythons are left in place.
+pub fn unpin(ctx: Ctx) !void {
+    const pinned = try pinnedPath(ctx) orelse {
+        output.print(ctx.io, "No Python is pinned", .{});
+        return;
+    };
+    const default_file_path = try paths.zenvPath(ctx.arena, ctx.env, "default-python");
+    Io.Dir.cwd().deleteFile(ctx.io, default_file_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            output.printError(ctx.io, "Failed to remove default-python file: {t}", .{err});
+            return err;
+        },
+    };
+    output.print(ctx.io, "Unpinned Python {s}", .{Io.Dir.path.basename(pinned)});
+}
+
 /// The pinned Python's install directory from ZENV_DIR/default-python, or
 /// null when nothing is pinned.
 pub fn pinnedPath(ctx: Ctx) !?[]const u8 {

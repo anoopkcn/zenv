@@ -380,6 +380,8 @@ zenv python pin <version>
 zenv setup <name> --python
 ```
 
+`zenv python unpin` removes the pin, so later setups fall back to the rest of the selection order. It does not uninstall the Python or change environments that were already built with it.
+
 ## Configuration Reference
 
 One can have multiple environment configurations in the same `zenv.json` file and it supports the following structure:
@@ -643,6 +645,7 @@ Commands:
   python <subcommand>        (Experimental feature) Manages Python installations:
     install <version>        Downloads and installs a specific Python version for zenv.
     pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
+    unpin                    Removes the pin; installed Pythons are kept.
     ls                       Shows Python versions installed and managed by zenv.
 
   version, -v, --version     Prints the installed zenv version.

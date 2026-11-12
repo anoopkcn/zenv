@@ -1269,13 +1269,13 @@ pub fn handlePython(ctx: Ctx, args: []const []const u8) !void {
     const io = ctx.io;
     if (args.len < 3) {
         output.printError(io, "Missing subcommand for 'python' command", .{});
-        output.print(io, "Available subcommands: install, pin, ls", .{});
+        output.print(io, "Available subcommands: install, pin, unpin, ls", .{});
         return error.ArgsError;
     }
 
-    const subcommand = std.meta.stringToEnum(enum { install, pin, use, ls, list }, args[2]) orelse {
+    const subcommand = std.meta.stringToEnum(enum { install, pin, unpin, ls, list }, args[2]) orelse {
         output.printError(io, "Unknown subcommand '{s}' for 'python' command", .{args[2]});
-        output.print(io, "Available subcommands: install, pin, ls", .{});
+        output.print(io, "Available subcommands: install, pin, unpin, ls", .{});
         return error.ArgsError;
     };
     switch (subcommand) {
@@ -1292,7 +1292,7 @@ pub fn handlePython(ctx: Ctx, args: []const []const u8) !void {
                 return err;
             };
         },
-        .pin, .use => {
+        .pin => {
             if (args.len < 4) {
                 output.printError(io, "Missing version argument for 'python pin' command", .{});
                 output.print(io, "Usage: zenv python pin <version>", .{});
@@ -1300,6 +1300,7 @@ pub fn handlePython(ctx: Ctx, args: []const []const u8) !void {
             }
             try python.pin(ctx, args[3]);
         },
+        .unpin => try python.unpin(ctx),
         .ls, .list => try python.listInstalled(ctx),
     }
 }
