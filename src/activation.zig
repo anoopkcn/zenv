@@ -848,7 +848,7 @@ test "renderSh: no bin/activate, venv-compatible deactivate, ops, prompt" {
     try expectContains(out, "PATH=\"${_OLD_VIRTUAL_PATH:-}\"");
     try expectContains(out, "PATH='/p/.zenv/demo/bin'\"${PATH:+:${PATH}}\"\nexport PATH");
     // zenv-owned vars are restored only under _ZENV_ACTIVE.
-    try expectContains(out, "_ZENV_OLD_PYTHONDONTWRITEBYTECODE=\"$PYTHONDONTWRITEBYTECODE\"");
+    try expectContains(out, "_ZENV_OLD_ZENV_ENV_DIR=\"$ZENV_ENV_DIR\"");
     try expectContains(out, "unset ZENV_ENV_DIR");
     try expectContains(out, "unset VIRTUAL_ENV\n");
     try expectContains(out, "export VIRTUAL_ENV='/p/.zenv/demo'");

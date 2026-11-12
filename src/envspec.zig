@@ -139,7 +139,6 @@ pub fn venvOps(allocator: Allocator, venv_path: []const u8, prompt: ?[]const u8)
         allocator,
         .{ .op = .set, .name = "VIRTUAL_ENV_PROMPT", .value = p },
     );
-    try ops.append(allocator, .{ .op = .set, .name = "PYTHONDONTWRITEBYTECODE", .value = "1" });
     try ops.append(allocator, .{ .op = .set, .name = "ZENV_ENV_DIR", .value = venv_path });
     return ops.toOwnedSlice(allocator);
 }
@@ -531,17 +530,19 @@ test "venvOps mirrors bin/activate + activate.sh exports, in order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const ops = try venvOps(arena.allocator(), "/p/.zenv/demo", "(demo) ");
-    try testing.expectEqual(@as(usize, 6), ops.len);
+    try testing.expectEqual(@as(usize, 5), ops.len);
     try testing.expectEqualStrings("VIRTUAL_ENV", ops[0].name);
     try testing.expectEqual(OpKind.prepend, ops[1].op);
     try testing.expectEqualStrings("/p/.zenv/demo/bin", ops[1].value);
     try testing.expectEqual(OpKind.unset, ops[2].op);
     try testing.expectEqualStrings("PYTHONHOME", ops[2].name);
     try testing.expectEqualStrings("(demo) ", ops[3].value);
-    try testing.expectEqualStrings("ZENV_ENV_DIR", ops[5].name);
+    try testing.expectEqualStrings("ZENV_ENV_DIR", ops[4].name);
+    // Bytecode is Python's own default: where it goes is the env's `env`.
+    for (ops) |op| try testing.expect(!std.mem.eql(u8, op.name, "PYTHONDONTWRITEBYTECODE"));
 
     const no_prompt = try venvOps(arena.allocator(), "/p/.zenv/demo", null);
-    try testing.expectEqual(@as(usize, 5), no_prompt.len);
+    try testing.expectEqual(@as(usize, 4), no_prompt.len);
 }
 
 test "plainOps puts bin/ on PATH without the venv variables" {
@@ -693,10 +694,10 @@ test "relocate moves venv paths and the name, nothing else" {
     try testing.expectEqualStrings("new", moved.ops[3].value); // VIRTUAL_ENV_PROMPT
     try testing.expectEqualStrings(
         "/p/.zenv/older",
-        moved.ops[6].value,
+        moved.ops[5].value,
     ); // a sibling path is not "inside"
-    try testing.expectEqualStrings("/opt/x:/p/.zenv/new/lib:/q/p/.zenv/old", moved.ops[7].value);
-    try testing.expectEqualStrings("--prefix=/p/.zenv/new", moved.ops[8].value);
+    try testing.expectEqualStrings("/opt/x:/p/.zenv/new/lib:/q/p/.zenv/old", moved.ops[6].value);
+    try testing.expectEqualStrings("--prefix=/p/.zenv/new", moved.ops[7].value);
     try testing.expectEqualStrings(
         "/p/.zenv/new/scripts/activate_hook.sh",
         moved.activate_script.?,
@@ -746,7 +747,7 @@ test "spec survives a stringify/parse round trip" {
     defer parsed.deinit();
     try testing.expectEqualStrings("jureca", parsed.value.module_cache.?.system);
     try testing.expectEqual(OpKind.prepend, parsed.value.module_cache.?.ops[0].op);
-    try testing.expectEqual(@as(usize, 6), parsed.value.ops.len);
+    try testing.expectEqual(@as(usize, 5), parsed.value.ops.len);
     try testing.expectEqualStrings("", parsed.value.ops[2].value); // unset: default value
     try testing.expectEqualStrings("gcc", parsed.value.modules[0]);
     try testing.expect(parsed.value.hasActivateHooks());

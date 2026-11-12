@@ -203,6 +203,7 @@ pub fn run(c: Ctx, options: Options) !void {
     _ = env.orderedRemove("PYTHONHOME");
     // The env's own variables, so installs and hooks see what activation will.
     try applyUserEnv(a, opts, &env);
+    keepBytecodeOutOfGit(c, opts.project_dir, env.get("PYTHONPYCACHEPREFIX"));
 
     if (!use_uv) try seedPip(c, opts.box, &env, venv_python, chosen);
 
@@ -421,6 +422,19 @@ fn applyUserEnv(a: Allocator, opts: Options, env: *Map) !void {
         opts.venv_dir,
         opts.project_dir,
     )) |op| try envspec.applyOp(env, op);
+}
+
+/// Creates the bytecode directory `prefix` (the env's PYTHONPYCACHEPREFIX)
+/// when it lies inside the project, and keeps it out of git as the env
+/// directory is. A directory that has a .gitignore already keeps it.
+fn keepBytecodeOutOfGit(c: Ctx, project_dir: []const u8, prefix: ?[]const u8) void {
+    const dir = std.mem.trimEnd(u8, prefix orelse return, "/");
+    if (!Io.Dir.path.isAbsolute(dir) or std.mem.eql(u8, dir, std.mem.trimEnd(u8, project_dir, "/"))) return;
+    if (!container.covered(&.{project_dir}, dir)) return;
+    const ignore = Io.Dir.path.join(c.arena, &.{ dir, ".gitignore" }) catch return;
+    if (runtime.lexists(c.io, ignore)) return;
+    Io.Dir.cwd().createDirPath(c.io, dir) catch return;
+    venv.writeGitignore(c.arena, c.io, dir) catch {};
 }
 
 /// Whether `venv_dir` holds any part of a Python venv. bin/ alone does not

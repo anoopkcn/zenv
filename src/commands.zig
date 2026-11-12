@@ -158,6 +158,7 @@ fn initConfigJson(
     description: []const u8,
     dependency_file: ?[]const u8,
     with_python: bool,
+    pycache: []const u8,
 ) ![]u8 {
     var out: Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -172,7 +173,10 @@ fn initConfigJson(
     try s.write(".zenv");
     try s.objectField(env_name);
     // A Python-free env gets "python": false and none of the Python-only keys
-    // (which validation would reject), plus an empty "env" to fill in.
+    // (which validation would reject), plus an empty "env" to fill in. A
+    // Python env gets the bytecode settings spelled out, to be edited: the
+    // empty value lets Python write bytecode even when the user's shell
+    // exports the variable, and the prefix keeps it out of the venv.
     if (with_python) try s.write(.{
         .target_machines = [_][]const u8{"*"},
         .description = description,
@@ -182,6 +186,7 @@ fn initConfigJson(
         .module_cache = true,
         .dependencies = none,
         .dependency_file = dependency_file,
+        .env = .{ .PYTHONDONTWRITEBYTECODE = "", .PYTHONPYCACHEPREFIX = pycache },
         .setup = empty_hook,
         .activate = empty_hook,
     }) else try s.write(.{
@@ -202,7 +207,7 @@ fn initConfigJson(
 
 test "initConfigJson writes every key in order and escapes user text" {
     const a = std.testing.allocator;
-    const text = try initConfigJson(a, "my\"env", "a \\ \"quoted\" desc", "requirements.txt", true);
+    const text = try initConfigJson(a, "my\"env", "a \\ \"quoted\" desc", "requirements.txt", true, "/s/pycache");
     defer a.free(text);
 
     // base_dir first, then the env, as the old template had it.
@@ -227,18 +232,46 @@ test "initConfigJson writes every key in order and escapes user text" {
         "module_cache",
         "dependencies",
         "dependency_file",
+        "env",
         "setup",
         "activate",
     };
     try std.testing.expectEqual(keys.len, env_obj.count());
     for (keys, env_obj.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+    const env_vars = env_obj.get("env").?.object;
+    try std.testing.expectEqualStrings("", env_vars.get("PYTHONDONTWRITEBYTECODE").?.string);
+    try std.testing.expectEqualStrings("/s/pycache", env_vars.get("PYTHONPYCACHEPREFIX").?.string);
 
-    const no_deps = try initConfigJson(a, "e", "d", null, true);
+    const no_deps = try initConfigJson(a, "e", "d", null, true, "/s/pycache");
     defer a.free(no_deps);
     try std.testing.expect(std.mem.find(u8, no_deps, "\"dependency_file\": null") != null);
 }
 
 const InitOutcome = enum { created, added, exists };
+
+/// The PYTHONPYCACHEPREFIX `zenv init` writes for a new env: `chosen`
+/// ($ZENV_PYCACHE_DIR) when the user set one, made absolute, else `pycache`
+/// in `base_dir` next to the env directories. A relative `base_dir` is
+/// written with `${ZENV_PROJECT_DIR}`, so the value holds for every clone.
+fn pycachePrefix(a: Allocator, chosen: ?[]const u8, base_dir: []const u8) ![]const u8 {
+    if (chosen) |dir| if (dir.len > 0) {
+        return if (Io.Dir.path.isAbsolute(dir)) dir else Io.Dir.path.resolve(a, &.{dir});
+    };
+    if (Io.Dir.path.isAbsolute(base_dir)) return Io.Dir.path.join(a, &.{ base_dir, "pycache" });
+    const rel = std.mem.trimEnd(u8, std.mem.cutPrefix(u8, base_dir, "./") orelse base_dir, "/");
+    return std.fmt.allocPrint(a, "${{ZENV_PROJECT_DIR}}/{s}/pycache", .{rel});
+}
+
+test "pycachePrefix: ZENV_PYCACHE_DIR, else pycache in base_dir" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const eq = std.testing.expectEqualStrings;
+    try eq("${ZENV_PROJECT_DIR}/.zenv/pycache", try pycachePrefix(a, null, ".zenv"));
+    try eq("${ZENV_PROJECT_DIR}/envs/pycache", try pycachePrefix(a, "", "./envs/"));
+    try eq("/scratch/envs/pycache", try pycachePrefix(a, null, "/scratch/envs"));
+    try eq("/scratch/me/pycache", try pycachePrefix(a, "/scratch/me/pycache", ".zenv"));
+}
 
 /// Defines environment `env_name` in ./zenv.json: writes a new file, or adds
 /// the env to an existing one. `exists` (nothing written) when the file
@@ -246,12 +279,13 @@ const InitOutcome = enum { created, added, exists };
 /// Without `with_python`, the env is written Python-free (`"python": false`).
 /// Allocates with `a` (use an arena).
 fn initConfig(
-    a: Allocator,
-    io: Io,
+    ctx: Ctx,
     env_name: []const u8,
     description: ?[]const u8,
     with_python: bool,
 ) !InitOutcome {
+    const a = ctx.arena;
+    const io = ctx.io;
     const cwd = Io.Dir.cwd();
     const config_path = "zenv.json";
 
@@ -274,7 +308,13 @@ fn initConfig(
         break :pyproject try deps.pyprojectField(a, content, "description");
     } orelse "Env config created by zenv";
 
-    const template = try initConfigJson(a, env_name, desc, dependency_file, with_python);
+    // An existing file may keep its envs elsewhere than the template does.
+    const base_dir = if (validation.load(a, io, config_path, .quiet)) |file|
+        file.project.base_dir
+    else |_|
+        ".zenv";
+    const pycache = try pycachePrefix(a, ctx.getEnv("ZENV_PYCACHE_DIR"), base_dir);
+    const template = try initConfigJson(a, env_name, desc, dependency_file, with_python, pycache);
 
     // Creating the file is the existence check: no window for another zenv
     // to create it in between.
@@ -336,7 +376,7 @@ fn defaultEnvName(allocator: Allocator, dir: []const u8) ![]u8 {
 
 test "initConfigJson without Python: python false, no Python-only keys, valid" {
     const a = std.testing.allocator;
-    const text = try initConfigJson(a, "tools", "d", "requirements.txt", false);
+    const text = try initConfigJson(a, "tools", "d", "requirements.txt", false, "/s/pycache");
     defer a.free(text);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, text, .{});
     defer parsed.deinit();
@@ -397,8 +437,7 @@ pub fn handleInit(ctx: Ctx, args: []const []const u8) void {
 
     const python_env = !Flags.parse(args).no_python;
     const outcome = initConfig(
-        allocator,
-        io,
+        ctx,
         env_name,
         positional(args, 1),
         python_env,
@@ -447,8 +486,7 @@ fn setupInit(ctx: Ctx, args: []const []const u8, flags: Flags) void {
     };
     requireValidEnvName(io, env_name) catch std.process.exit(1);
     const outcome = initConfig(
-        ctx.arena,
-        io,
+        ctx,
         env_name,
         positional(args, 1),
         !flags.no_python,

@@ -117,6 +117,8 @@ Only `target_machines` is required. These are the keys you will use most:
 | `python` | Set it to `false` for an environment without Python. |
 | `container` | An Apptainer or Docker image to run the environment in. |
 
+`zenv init` and `zenv setup --init` write two `env` entries into a new Python environment. `"PYTHONDONTWRITEBYTECODE": ""` lets Python save compiled bytecode, which makes later starts faster. `"PYTHONPYCACHEPREFIX"` makes Python keep those files in one directory, `pycache` under `base_dir`, and not in `__pycache__` directories next to every source file. When `ZENV_PYCACHE_DIR` is set while the entry is written, its value is used as that directory, for example a path on a scratch filesystem where files are cheap. Change or delete either entry as you like. An environment without them follows Python's defaults.
+
 The file may contain `//` and `/* */` comments. After you edit it, `zenv validate` checks it and reports any mistake with its line number. There are more keys than this table shows, and `zenv help` describes them.
 
 ## What you can do with it

@@ -38,6 +38,10 @@ const topics = [_]Topic{
         \\                             'desc' defaults to [project].description from pyproject.toml.
         \\                             --no-python: an environment without Python, for modules,
         \\                             environment variables and settings only.
+        \\                             A Python environment gets two "env" entries to edit:
+        \\                             PYTHONDONTWRITEBYTECODE "" (Python saves bytecode) and
+        \\                             PYTHONPYCACHEPREFIX, where it saves it: 'pycache' in
+        \\                             base_dir, or $ZENV_PYCACHE_DIR when that is set.
         \\                             Use to start defining your environments[z].
         ,
     },
@@ -351,6 +355,9 @@ const notes =
     \\Environment variables:
     \\  ZENV_DIR                   Where zenv keeps its registry and Python installs
     \\                             (default: $HOME/.zenv).
+    \\  ZENV_PYCACHE_DIR           The bytecode directory 'zenv init' writes into a new
+    \\                             environment as PYTHONPYCACHEPREFIX (default: 'pycache'
+    \\                             in base_dir).
     \\  ZENV_NO_AUTO_SETUP=1       Turns automatic rebuilds off.
     \\  ZENV_RUN_SHELL=1           'zenv run' sources activate.sh in bash instead of starting
     \\                             the command directly.
