@@ -84,6 +84,7 @@ fn dispatch(ctx: runtime.Ctx, command: Command, args: []const []const u8) !void 
         .log => try withRegistry(ctx, args, commands.handleLog),
         .run => try withRegistry(ctx, args, commands.handleRun),
         .add => try withRegistry(ctx, args, commands.handleAdd),
+        .remove => try withRegistry(ctx, args, commands.handleRemove),
         .alias => try withRegistry(ctx, args, commands.handleAlias),
         .jupyter => try withRegistry(ctx, args, commands.handleJupyter),
         // Internal: run by zenv itself inside an env's container.

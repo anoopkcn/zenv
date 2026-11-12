@@ -15,10 +15,10 @@ One top-level entry of the project file, and the directory setup builds for it.
 The project files an env's packages come from: zenv.json `dependencies`/`dev_dependencies`,
 the `dependency_file`, `--group` dependency groups, and `./pyproject.toml` for `--dev`.
 Owns what setup installs, which of these files the rebuild gate watches, and where
-`zenv add` records a package.
+`zenv add` records a package and `zenv remove` takes it out again.
 
 **Manifest**
-A file `zenv add` records a package in: zenv.json, a requirements file, or a pyproject.toml.
+A file `zenv add` records a package in, and `zenv remove` removes it from: zenv.json, a requirements file, or a pyproject.toml.
 
 **Build record** (`autosetup.zig`)
 What an env was last built from: a hash of its tracked files and the setup flags to replay,
@@ -29,7 +29,7 @@ The check `run`, `activate`, `cd` and `jupyter create` make first: when the buil
 longer matches, setup runs again (as a subprocess, with the recorded flags).
 
 **Change**
-A command changing an env's tracked files itself (`add`, `rename`). An env that was up to date
+A command changing an env's tracked files itself (`add`, `remove`, `rename`). An env that was up to date
 when the change began is re-recorded at its end, so it does not rebuild.
 
 **Launch** (`launch.zig`)

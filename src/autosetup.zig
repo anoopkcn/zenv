@@ -264,6 +264,18 @@ pub fn builtWith(allocator: Allocator, io: Io, venv_path: []const u8) cli.Flags 
     return cli.Flags.parse(stamp.value.flags);
 }
 
+/// The dependency groups rebuilds of the env install (`--group` replay), in
+/// `allocator`. None when there is no build record.
+pub fn replayedGroups(allocator: Allocator, io: Io, venv_path: []const u8) ![]const []const u8 {
+    const stamp = readStamp(allocator, io, venv_path) orelse return &.{};
+    defer stamp.deinit();
+    const names = try cli.groups(allocator, stamp.value.flags);
+    defer allocator.free(names);
+    const out = try allocator.alloc([]const u8, names.len);
+    for (names, out) |name, *o| o.* = try allocator.dupe(u8, name);
+    return out;
+}
+
 /// What `addReplayGroup` did.
 const ReplayGroup = enum { no_record, already, added };
 

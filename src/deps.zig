@@ -11,7 +11,7 @@ const toml = @import("toml");
 /// Empty for a line without a name: an option (`-r base.txt`), or a bare URL
 /// or path (`git+ssh://git@host/repo.git`, `./pkg`). The returned slice
 /// points INTO `spec` (no allocation).
-fn packageBaseName(spec: []const u8) []const u8 {
+pub fn packageBaseName(spec: []const u8) []const u8 {
     const s = std.mem.trim(u8, spec, " \t\r");
     if (s.len == 0 or !std.ascii.isAlphanumeric(s[0])) return "";
     var end: usize = 0;

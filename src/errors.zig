@@ -117,6 +117,7 @@ pub fn report(io: Io, err: anyerror) noreturn {
         error.InvalidDependencyGroup,
         error.InvalidPyproject,
         error.RecordFailed,
+        error.NotRecorded,
         error.ContainerEnv,
         => {},
         else => output.printError(io, "An unexpected error occurred: {t}", .{err}),

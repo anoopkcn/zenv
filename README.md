@@ -142,7 +142,7 @@ eval "$(zenv hook bash)"    # at the end of ~/.bashrc
 
 The hook only activates environments that you have built yourself with `zenv setup`. A `zenv.json` in a repository you just cloned does nothing until you set it up.
 
-### Add packages
+### Add and remove packages
 
 `zenv add` installs a package and writes it into your `requirements.txt`, `pyproject.toml` or `zenv.json`. Because the package is written down, it is still there the next time the environment is built.
 
@@ -153,6 +153,15 @@ zenv add myenv pytest --dev
 ```
 
 zenv installs packages with [uv](https://docs.astral.sh/uv/) when uv is installed, and with pip otherwise.
+
+`zenv remove` undoes `zenv add`. It takes the package out of the file it was written into and uninstalls it from the environment.
+
+```sh
+zenv remove myenv requests
+zenv remove myenv pytest --dev
+```
+
+Give `zenv remove` the same options you gave `zenv add`, such as `--dev`, so that it looks in the same place. When the package is written down somewhere else, zenv removes nothing and tells you which option to use. A package stays installed when another package in the environment still requires it. Packages that were installed only because the removed package required them also stay, until the environment is next rebuilt.
 
 ### Environments that stay up to date
 
@@ -212,10 +221,11 @@ With `container`, an environment runs inside an [Apptainer](https://apptainer.or
 | `zenv run <name> <command>` | Run a command inside the environment. |
 | `source $(zenv activate <name>)` | Activate the environment in your shell. |
 | `zenv add <name> <package>` | Install a package and record it. |
+| `zenv remove <name> <package>` | Uninstall a package and remove its record. |
 | `zenv ls` | List the environments for this machine. |
 | `cd $(zenv cd <name>)` | Go to the environment's project directory. |
 | `zenv validate` | Check `zenv.json` for mistakes. |
-| `zenv rm <name>` | Delete the environment. |
+| `zenv rm <name>` | Delete the whole environment. |
 
 In place of `<name>` you can give an alias, the first seven or more characters of the environment's id, or `.` for the project you are in.
 

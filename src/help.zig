@@ -157,6 +157,33 @@ const topics = [_]Topic{
         ,
     },
     .{
+        .commands = &.{.remove},
+        .synopsis = "remove <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]",
+        .entry =
+        \\  remove <name|id|.> <package>
+        \\                             Undoes 'zenv add': removes <package> from the project's manifest
+        \\                             and uninstalls it from the environment. A version given with
+        \\                             the name is ignored.
+        \\                             Options: --dev, --group <name> and --zenv pick the manifest as
+        \\                             they do for 'add'; --uv / --pip pick the uninstaller.
+        \\                             To delete a whole environment, use 'zenv rm'.
+        ,
+        .options =
+        \\Options for 'zenv remove <name> <package>':
+        \\  --dev, --group <name>, --zenv
+        \\                             Look for the package where 'zenv add' records it with the same
+        \\                             option. A package that is recorded somewhere else is not
+        \\                             removed; the error names the option that reaches it.
+        \\
+        \\  --uv, --pip                Uninstalls with 'uv pip uninstall' or 'python -m pip uninstall',
+        \\                             chosen as for 'add'. An environment in a container image always
+        \\                             uses the image's pip.
+        \\
+        \\  The package stays installed when another manifest of the environment still records it, or
+        \\  an installed package requires it. Packages that only it required stay installed too.
+        ,
+    },
+    .{
         .commands = &.{.cd},
         .synopsis = "cd <name|id|.>",
         .entry =

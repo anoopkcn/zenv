@@ -1790,6 +1790,19 @@ pub fn recordAdded(a: Allocator, io: Io, venv_dir: []const u8, package: []const 
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try linesOf(a, lines.items) });
 }
 
+/// Drops `package` from `<venv_dir>/requirements.txt`, so the next
+/// `zenv add` no longer resolves with it.
+pub fn recordRemoved(a: Allocator, io: Io, venv_dir: []const u8, package: []const u8) !void {
+    const before = try readRecord(a, io, venv_dir);
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (before) |line| {
+        if (!deps.samePackage(line, package)) try lines.append(a, line);
+    }
+    if (lines.items.len == before.len) return;
+    const path = try Io.Dir.path.join(a, &.{ venv_dir, "requirements.txt" });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try linesOf(a, lines.items) });
+}
+
 /// `lines`, each ended by a newline.
 fn linesOf(a: Allocator, lines: []const []const u8) ![]const u8 {
     var text: Io.Writer.Allocating = .init(a);
@@ -2198,7 +2211,7 @@ test "useHostUvSettings replaces the image's UV_* with the host's" {
     try testing.expectEqualStrings("/home/me", env.get("HOME").?);
 }
 
-test "recordAdded replaces the package's earlier line and keeps the rest" {
+test "recordAdded replaces the package's earlier line; recordRemoved drops it" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2220,6 +2233,12 @@ test "recordAdded replaces the package's earlier line and keeps the rest" {
     try testing.expectEqual(@as(usize, 2), lines.len);
     try testing.expectEqualStrings("numpy>=1.26", lines[0]);
     try testing.expectEqualStrings("requests>=2.30", lines[1]);
+
+    try recordRemoved(a, io, root, "Numpy>=2");
+    try recordRemoved(a, io, root, "absent");
+    const left = try readRecord(a, io, root);
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqualStrings("requests>=2.30", left[0]);
 }
 
 test "compileArgv resolves for the venv's Python under the constraints" {

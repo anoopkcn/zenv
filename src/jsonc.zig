@@ -118,6 +118,35 @@ pub fn append(a: Allocator, content: []const u8, s: []const u8, span: Span, entr
     };
 }
 
+/// The edit that removes element `index` of the array at `arr`, with the comma
+/// that separated it from its neighbour. An element on a line of its own
+/// takes the line, and a comment on it, along. An array left empty closes up
+/// to `[]`, unless that would drop a comment.
+pub fn removeItem(a: Allocator, content: []const u8, s: []const u8, arr: Span, index: usize) !Edit {
+    const is = try items(a, s, arr);
+    const item = is[index];
+    if (index + 1 < is.len) {
+        const comma = std.mem.findScalarPos(u8, s, item.end, ',').?;
+        if (ownLineIndent(s, item.start)) |indent| if (lineEnd(content, comma + 1)) |newline| return .{
+            .span = .{ .start = item.start - indent.len, .end = newline + 1 },
+            .text = "",
+        };
+        return .{ .span = .{ .start = item.start, .end = is[index + 1].start }, .text = "" };
+    }
+    if (index == 0) {
+        const inner: Span = .{ .start = arr.start + 1, .end = arr.end - 1 };
+        const plain = std.mem.eql(u8, content[inner.start..inner.end], s[inner.start..inner.end]);
+        return .{ .span = if (plain) inner else item, .text = "" };
+    }
+    // The last element: the comma before it goes too (JSON allows no trailing
+    // one), but a comment after that comma belongs to the element before.
+    const comma = std.mem.findScalarPos(u8, s, is[index - 1].end, ',').?;
+    return .{
+        .span = .{ .start = comma, .end = item.end },
+        .text = std.mem.trimEnd(u8, content[comma + 1 .. item.start], " \t\r\n"),
+    };
+}
+
 /// The index of the newline in `content` that ends the line at `i`, when only
 /// spaces and comments follow `i` on it; null when another token does. A block
 /// comment that spans lines moves the end to the line where it closes.

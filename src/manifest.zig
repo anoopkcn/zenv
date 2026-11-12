@@ -10,6 +10,10 @@
 //! De-duplication is by bare package name (case-insensitive) via
 //! `deps.samePackage`: re-adding a package replaces its spec (so the pin
 //! updates) instead of appending a duplicate.
+//!
+//! Each writer has a `removeFrom...` counterpart for `zenv remove`, which
+//! takes every entry for the package out of the same place and reports
+//! whether there was one.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,6 +25,10 @@ const deps = @import("deps.zig");
 const jsonc = @import("jsonc.zig");
 
 const max_file_size = 10 * 1024 * 1024;
+
+/// What a `removeFrom...` function does with the entries it finds: `check`
+/// only reports them and leaves the file alone.
+pub const Removal = enum { check, remove };
 
 // =======================================================================
 // requirements.txt
@@ -81,6 +89,53 @@ pub fn addToRequirementsTxt(
     try runtime.writeFileAtomic(io, path, out.items, .{});
 }
 
+/// Removes every entry for `package` from the requirements file at `path`,
+/// each with its `\\` continuation lines (the hashes of pip-compile output).
+/// Returns whether there was one; false for a missing file. Entries of a
+/// file it includes with `-r` are not looked at.
+pub fn removeFromRequirementsTxt(
+    allocator: Allocator,
+    io: Io,
+    path: []const u8,
+    package: []const u8,
+    mode: Removal,
+) !bool {
+    const content = Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(max_file_size),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var removed = false;
+    // Inside a removed entry that a trailing backslash continues.
+    var continued = false;
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| {
+        if (it.peek() == null and line.len == 0) break;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const is_entry = trimmed.len > 0 and trimmed[0] != '#';
+        const drop = continued or (is_entry and deps.samePackage(trimmed, package));
+        continued = drop and std.mem.endsWith(u8, trimmed, "\\");
+        if (drop) {
+            removed = true;
+            continue;
+        }
+        try out.appendSlice(allocator, line);
+        try out.append(allocator, '\n');
+    }
+
+    if (removed and mode == .remove) try runtime.writeFileAtomic(io, path, out.items, .{});
+    return removed;
+}
+
 // =======================================================================
 // zenv.json
 // =======================================================================
@@ -94,7 +149,11 @@ pub const ZenvJson = struct {
 
     /// Reads and parses the zenv.json at `path` into `a`, an arena.
     pub fn read(a: Allocator, io: Io, path: []const u8) !ZenvJson {
-        const content = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_file_size));
+        return parse(a, try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_file_size)));
+    }
+
+    /// Parses `content`, a zenv.json's text, into `a`, an arena.
+    fn parse(a: Allocator, content: []const u8) !ZenvJson {
         const text = try jsonc.strip(a, content);
         const doc = json.parseFromSliceLeaky(json.Value, a, text, .{}) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -162,6 +221,49 @@ pub fn addToZenvJson(
         try std.mem.concat(a, u8, &.{ "\"", key, "\": ", array }),
     );
     try file.write(a, io, path, edit);
+}
+
+/// Removes every entry for `package` from the `dependencies` (or
+/// `dev_dependencies` when `dev`) array of environment `env_name` inside the
+/// zenv.json at `path`, as a text edit like addToZenvJson. Returns whether
+/// there was one. The array stays, even when left empty.
+pub fn removeFromZenvJson(
+    allocator: Allocator,
+    io: Io,
+    path: []const u8,
+    env_name: []const u8,
+    package: []const u8,
+    dev: bool,
+    mode: Removal,
+) !bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const key: []const u8 = if (dev) "dev_dependencies" else "dependencies";
+    var file = try ZenvJson.read(a, io, path);
+    var removed = false;
+    // One entry per pass: each edit moves the spans of what follows it.
+    while (true) {
+        const env_index = file.root.getIndex(env_name) orelse return error.EnvironmentNotFound;
+        const env = file.root.values()[env_index];
+        if (env != .object) return error.InvalidFormat;
+        const key_index = env.object.getIndex(key) orelse break;
+        const list = env.object.values()[key_index];
+        if (list != .array) break;
+        const index = for (list.array.items, 0..) |item, j| {
+            if (item == .string and deps.samePackage(item.string, package)) break j;
+        } else null;
+        const j = index orelse break;
+        if (mode == .check) return true;
+        removed = true;
+        const env_span = (try file.members(a))[env_index].value;
+        const span = (try jsonc.members(a, file.text, env_span))[key_index].value;
+        const edit = try jsonc.removeItem(a, file.content, file.text, span, j);
+        file = try ZenvJson.parse(a, try jsonc.apply(a, file.content, edit));
+    }
+    if (removed) try runtime.writeFileAtomic(io, path, file.content, .{});
+    return removed;
 }
 
 /// Adds environment `env_name` to the zenv.json at `path`, copying its entry
@@ -264,7 +366,90 @@ pub fn addToPyproject(
     return true;
 }
 
+/// Removes every entry for `package` from the array `addToPyproject` records
+/// into: `[project].dependencies`, or `[dependency-groups].<group>`. Returns
+/// whether there was one; false for a missing file, table or key. The array
+/// stays, even when left empty.
+pub fn removeFromPyproject(
+    allocator: Allocator,
+    io: Io,
+    path: []const u8,
+    package: []const u8,
+    group: ?[]const u8,
+    mode: Removal,
+) !bool {
+    const content = Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(max_file_size),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const new_content = (try unlistPyproject(
+        arena.allocator(),
+        content,
+        if (group != null) "dependency-groups" else "project",
+        group orelse "dependencies",
+        package,
+    )) orelse return false;
+    if (mode == .remove) try runtime.writeFileAtomic(io, path, new_content, .{});
+    return true;
+}
+
 const LineList = std.ArrayList([]const u8);
+
+/// `content` as lines, and whether to end the joined result with a newline:
+/// the final '\n' is re-added on join, and a new file gets one too.
+fn splitLines(a: Allocator, content: []const u8) !struct { LineList, bool } {
+    const body = std.mem.cutSuffix(u8, content, "\n") orelse content;
+    var lines: LineList = .empty;
+    if (body.len > 0) {
+        var it = std.mem.splitScalar(u8, body, '\n');
+        while (it.next()) |line| try lines.append(a, line);
+    }
+    return .{ lines, body.len != content.len or content.len == 0 };
+}
+
+/// Where a table is in a document's lines: its header at `start`, its body up
+/// to `end`, and the line of its `key = ...` assignment, if it has one.
+const Table = struct { start: usize, end: usize, key_line: ?usize };
+
+/// Finds the `[section]` table and `key` in it; null without the table.
+fn locate(lines: []const []const u8, section: []const u8, key: []const u8) ?Table {
+    var start: ?usize = null;
+    var end: usize = lines.len;
+    for (lines, 0..) |line, i| {
+        const t = code(line);
+        if (!isHeader(t)) continue;
+        if (start == null) {
+            if (std.mem.eql(u8, headerName(t), section)) start = i;
+        } else {
+            end = i;
+            break;
+        }
+    }
+    const first = start orelse return null;
+    const key_line = for (first + 1..end) |i| {
+        if (isKeyLine(std.mem.trim(u8, lines[i], " \t\r"), key)) break i;
+    } else null;
+    return .{ .start = first, .end = end, .key_line = key_line };
+}
+
+/// The line and column of the `]` that closes a multi-line array opened on
+/// line `kl`, looking no further than line `end`.
+fn closingBracket(lines: []const []const u8, kl: usize, end: usize) ?struct { usize, usize } {
+    for (kl + 1..end) |i| {
+        if (findUnquoted(lines[i], 0, ']')) |col| return .{ i, col };
+    }
+    return null;
+}
 
 /// `line` trimmed, without a trailing `# comment`.
 fn code(line: []const u8) []const u8 {
@@ -356,57 +541,24 @@ fn editPyproject(
     spec: []const u8,
     create_section: bool,
 ) !?[]const u8 {
-    // The final '\n' is re-added on join; a new file gets one too.
-    const body = std.mem.cutSuffix(u8, content, "\n") orelse content;
-    const trailing_newline = body.len != content.len or content.len == 0;
-    var lines: LineList = .empty;
-    if (body.len > 0) {
-        var it = std.mem.splitScalar(u8, body, '\n');
-        while (it.next()) |line| try lines.append(a, line);
-    }
+    var lines, const trailing_newline = try splitLines(a, content);
 
-    // 1. Locate the [section] header and the span of lines belonging to it.
-    var sec_start: ?usize = null;
-    var sec_end: usize = lines.items.len;
-    for (lines.items, 0..) |line, i| {
-        const t = code(line);
-        if (!isHeader(t)) continue;
-        if (sec_start == null) {
-            if (std.mem.eql(u8, headerName(t), section)) sec_start = i;
-        } else {
-            sec_end = i;
-            break;
-        }
-    }
-
-    if (sec_start == null) {
+    // 1. Locate the [section] table and the `key = ...` line in it.
+    const table = locate(lines.items, section, key) orelse {
         if (!create_section) return null;
         // Append a fresh section + key block at EOF.
         try appendNewBlock(a, &lines, section, key, spec);
         return try joinLines(a, &lines, trailing_newline);
-    }
-
-    // 2. Within the section, find the `key = ...` line.
-    var key_line: ?usize = null;
-    {
-        var i = sec_start.? + 1;
-        while (i < sec_end) : (i += 1) {
-            const t = std.mem.trim(u8, lines.items[i], " \t\r");
-            if (isKeyLine(t, key)) {
-                key_line = i;
-                break;
-            }
-        }
-    }
-
-    if (key_line == null) {
+    };
+    const sec_end = table.end;
+    const key_line = table.key_line orelse {
         // Section exists but the array key doesn't: insert it right after header.
-        try insertKeyBlock(a, &lines, sec_start.? + 1, key, spec);
+        try insertKeyBlock(a, &lines, table.start + 1, key, spec);
         return try joinLines(a, &lines, trailing_newline);
-    }
+    };
 
-    // 3. Edit the existing array (inline or multi-line).
-    const kl = key_line.?;
+    // 2. Edit the existing array (inline or multi-line).
+    const kl = key_line;
     const lb = findUnquoted(lines.items[kl], 0, '[') orelse return null;
     if (findUnquoted(lines.items[kl], lb + 1, ']')) |rb| {
         try editInlineArray(a, &lines, kl, lb, rb, spec);
@@ -414,6 +566,125 @@ fn editPyproject(
         try editMultilineArray(a, &lines, kl, lb, sec_end, spec);
     }
     return try joinLines(a, &lines, trailing_newline);
+}
+
+/// Core text edit of a removal: the document without the entries for
+/// `package` in the `key` array of `[section]` (arena-owned), or null when
+/// there is none.
+fn unlistPyproject(
+    a: Allocator,
+    content: []const u8,
+    section: []const u8,
+    key: []const u8,
+    package: []const u8,
+) !?[]const u8 {
+    var lines, const trailing_newline = try splitLines(a, content);
+    const table = locate(lines.items, section, key) orelse return null;
+    const kl = table.key_line orelse return null;
+    const lb = findUnquoted(lines.items[kl], 0, '[') orelse return null;
+    const removed = if (findUnquoted(lines.items[kl], lb + 1, ']')) |rb|
+        try unlistInlineArray(a, &lines, kl, lb, rb, package)
+    else
+        try unlistMultilineArray(a, &lines, kl, lb, table.end, package);
+    return if (removed) try joinLines(a, &lines, trailing_newline) else null;
+}
+
+/// Removes the entries for `package` from the single-line array on line `kl`
+/// (see `editInlineArray`). Returns whether there was one.
+fn unlistInlineArray(
+    a: Allocator,
+    lines: *LineList,
+    kl: usize,
+    lb: usize,
+    rb: usize,
+    package: []const u8,
+) !bool {
+    const line = lines.items[kl];
+    const inner = line[lb + 1 .. rb];
+
+    var entries: std.ArrayList([]const u8) = .empty;
+    var removed = false;
+    var start: usize = 0;
+    while (start <= inner.len) {
+        const end = findUnquoted(inner, start, ',') orelse inner.len;
+        const p = std.mem.trim(u8, inner[start..end], " \t");
+        start = end + 1;
+        if (p.len == 0) continue;
+        const val = if (quotedSpan(p)) |q| p[q.start..q.end] else p;
+        if (deps.samePackage(val, package)) removed = true else try entries.append(a, p);
+    }
+    if (!removed) return false;
+
+    const joined = try std.mem.join(a, ", ", entries.items);
+    lines.items[kl] = try a.print("{s}{s}{s}", .{ line[0 .. lb + 1], joined, line[rb..] });
+    return true;
+}
+
+/// Removes the entries for `package` from the multi-line array opened at
+/// column `lb` of line `kl`. An entry alone on its line takes the line, and a
+/// comment on it, along; one that shares its line leaves the rest of it.
+/// Returns whether there was one.
+fn unlistMultilineArray(
+    a: Allocator,
+    lines: *LineList,
+    kl: usize,
+    lb: usize,
+    sec_end: usize,
+    package: []const u8,
+) !bool {
+    var close, var close_col = closingBracket(lines.items, kl, sec_end) orelse
+        return error.UnterminatedArray; // leave the file alone
+
+    var removed = false;
+    var i = kl;
+    while (i <= close) {
+        const line = lines.items[i];
+        const from = if (i == kl) lb + 1 else 0;
+        var entries = EntryIterator.init(line, from, if (i == close) close_col else line.len);
+        const q = while (entries.next()) |q| {
+            if (deps.samePackage(line[q.start..q.end], package)) break q;
+        } else {
+            i += 1;
+            continue;
+        };
+        removed = true;
+
+        // The entry goes with its comma and the space after it. Without a
+        // comma it is the array's last entry, and the one before it loses its.
+        var head = line[0 .. q.start - 1];
+        var tail = std.mem.trimStart(u8, line[q.end + 1 ..], " \t");
+        if (std.mem.startsWith(u8, tail, ",")) {
+            tail = std.mem.trimStart(u8, tail[1..], " \t");
+        } else {
+            const before = std.mem.trimEnd(u8, head, " \t");
+            if (std.mem.endsWith(u8, before, ",")) head = before[0 .. before.len - 1];
+        }
+        // A comment keeps the space before it.
+        const comment = std.mem.startsWith(u8, tail, "#");
+        if (comment) head = std.mem.trimEnd(u8, head, " \t");
+        const gap: []const u8 = if (comment) "  " else "";
+        const rest = std.mem.trimEnd(u8, try a.print("{s}{s}{s}", .{ head, gap, tail }), " \t");
+
+        if (i != kl and i != close and code(rest).len == 0) {
+            _ = lines.orderedRemove(i);
+            close -= 1;
+            continue;
+        }
+        lines.items[i] = rest;
+        if (i == close) {
+            close_col = findUnquoted(rest, 0, ']').?;
+            // A ']' left alone on its line lines up with the key.
+            if (std.mem.trim(u8, rest[0..close_col], " \t").len == 0) {
+                lines.items[i] = try a.print(
+                    "{s}{s}",
+                    .{ indentOf(lines.items[kl]), rest[close_col..] },
+                );
+                close_col = indentOf(lines.items[kl]).len;
+            }
+        }
+        // The same line again: it may hold the package twice.
+    }
+    return removed;
 }
 
 fn joinLines(a: Allocator, lines: *LineList, trailing_newline: bool) ![]const u8 {
@@ -531,15 +802,8 @@ fn editMultilineArray(
 ) !void {
     const new_entry = try tomlString(a, spec);
 
-    // The closing-bracket line and the bracket's column in it.
-    var close: usize = kl + 1;
-    var close_col: usize = 0;
-    while (close < sec_end) : (close += 1) {
-        if (findUnquoted(lines.items[close], 0, ']')) |col| {
-            close_col = col;
-            break;
-        }
-    } else return error.UnterminatedArray; // leave the file alone
+    const close, const close_col = closingBracket(lines.items, kl, sec_end) orelse
+        return error.UnterminatedArray; // leave the file alone
 
     // Try to replace an existing entry with the same package.
     var last: ?struct { line: usize, end: usize } = null;
@@ -1163,4 +1427,211 @@ test "zenv.json: addEnvToZenvJson appends a new env and refuses an existing one"
 
     try cwd.writeFile(io, .{ .sub_path = path, .data = "[1, 2]" });
     try testing.expectError(error.InvalidFormat, addEnvToZenvJson(a, io, path, "new", template));
+}
+
+// --- removal ---
+
+test "pyproject: removing an entry alone on its line takes the line" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\[project]
+        \\dependencies = [
+        \\    "requests>=2.28",
+        \\    "Flask[async]>=3",  # web
+        \\    # "flask-login",
+        \\    "numpy"
+        \\]
+        \\
+        \\[dependency-groups]
+        \\dev = ["pytest", "flask"]
+        \\
+    ;
+    try testing.expectEqualStrings(
+        \\[project]
+        \\dependencies = [
+        \\    "requests>=2.28",
+        \\    # "flask-login",
+        \\    "numpy"
+        \\]
+        \\
+        \\[dependency-groups]
+        \\dev = ["pytest", "flask"]
+        \\
+    , (try unlistPyproject(a, src, "project", "dependencies", "flask")).?);
+    // The last entry has no comma; the one before it keeps its own.
+    try testing.expectEqualStrings(
+        \\[project]
+        \\dependencies = [
+        \\    "requests>=2.28",
+        \\    "Flask[async]>=3",  # web
+        \\    # "flask-login",
+        \\]
+        \\
+        \\[dependency-groups]
+        \\dev = ["pytest", "flask"]
+        \\
+    , (try unlistPyproject(a, src, "project", "dependencies", "numpy==2")).?);
+    try testing.expect(std.mem.find(
+        u8,
+        (try unlistPyproject(a, src, "dependency-groups", "dev", "Flask")).?,
+        "dev = [\"pytest\"]\n",
+    ) != null);
+
+    // Not recorded there: a commented-out entry, another table, a missing key.
+    try testing.expect(try unlistPyproject(a, src, "project", "dependencies", "flask-login") == null);
+    try testing.expect(try unlistPyproject(a, src, "project", "dependencies", "pytest") == null);
+    try testing.expect(try unlistPyproject(a, src, "dependency-groups", "demo", "pytest") == null);
+    try testing.expect(try unlistPyproject(a, src, "tool", "dependencies", "flask") == null);
+}
+
+test "pyproject: removing an entry that shares its line keeps the rest" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "[project]\ndependencies = [\"requests\",\n    \"six\", \"idna\",  # misc\n    \"rich\", \"six\"]\n";
+    try testing.expectEqualStrings(
+        "[project]\ndependencies = [\n    \"six\", \"idna\",  # misc\n    \"rich\", \"six\"]\n",
+        (try unlistPyproject(a, src, "project", "dependencies", "requests")).?,
+    );
+    try testing.expectEqualStrings(
+        "[project]\ndependencies = [\"requests\",\n    \"six\",  # misc\n    \"rich\", \"six\"]\n",
+        (try unlistPyproject(a, src, "project", "dependencies", "idna")).?,
+    );
+    // Both entries for the package go, and the entry left last loses its comma.
+    try testing.expectEqualStrings(
+        "[project]\ndependencies = [\"requests\",\n    \"idna\",  # misc\n    \"rich\"]\n",
+        (try unlistPyproject(a, src, "project", "dependencies", "six")).?,
+    );
+
+    // A ']' left alone lines up with the key; an emptied array stays.
+    try testing.expectEqualStrings(
+        "[project]\ndependencies = [\n]\n",
+        (try unlistPyproject(a, "[project]\ndependencies = [\n    \"six\"]\n", "project", "dependencies", "six")).?,
+    );
+    try testing.expectEqualStrings(
+        "[project]\ndependencies = [] # none\n",
+        (try unlistPyproject(a, "[project]\ndependencies = ['six>=1, <2'] # none\n", "project", "dependencies", "six")).?,
+    );
+    try testing.expectError(
+        error.UnterminatedArray,
+        unlistPyproject(a, "[project]\ndependencies = [\n    \"six\",\n", "project", "dependencies", "six"),
+    );
+}
+
+test "requirements: remove drops every entry for the package, with its continuation lines" {
+    const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
+    const path = ".zig-cache/tmp/zenv-manifest-req-remove.txt";
+    cwd.deleteFile(io, path) catch {};
+    defer cwd.deleteFile(io, path) catch {};
+
+    try testing.expect(!try removeFromRequirementsTxt(a, io, path, "flask", .remove));
+
+    const original =
+        \\# deps
+        \\-r base.txt
+        \\Flask_Login==0.5  # auth
+        \\flask==3.0 \
+        \\    --hash=sha256:aa \
+        \\    --hash=sha256:bb
+        \\
+        \\numpy<2; python_version<'3.9'
+        \\numpy>=2; python_version>='3.9'
+        \\
+    ;
+    try cwd.writeFile(io, .{ .sub_path = path, .data = original });
+
+    // A check finds the entry and leaves the file alone.
+    try testing.expect(try removeFromRequirementsTxt(a, io, path, "flask", .check));
+    try testing.expect(!try removeFromRequirementsTxt(a, io, path, "requests", .remove));
+    {
+        const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+        defer a.free(c);
+        try testing.expectEqualStrings(original, c);
+    }
+
+    try testing.expect(try removeFromRequirementsTxt(a, io, path, "Flask>=2", .remove));
+    try testing.expect(try removeFromRequirementsTxt(a, io, path, "numpy", .remove));
+    const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+    defer a.free(c);
+    try testing.expectEqualStrings("# deps\n-r base.txt\nFlask_Login==0.5  # auth\n\n", c);
+}
+
+test "zenv.json: remove keeps comments, layout and valid JSON" {
+    const a = testing.allocator;
+    const io = testing.io;
+    const cwd = Io.Dir.cwd();
+    const path = ".zig-cache/tmp/zenv-manifest-remove.json";
+    cwd.deleteFile(io, path) catch {};
+    defer cwd.deleteFile(io, path) catch {};
+
+    const original =
+        \\{
+        \\    "base_dir": ".zenv",
+        \\    "demo": {
+        \\        "target_machines": ["*"], // anywhere
+        \\        "dependencies": [
+        \\            // http
+        \\            "requests>=2", /* pinned */
+        \\            "flask", // web
+        \\            "rich"
+        \\        ],
+        \\        "dev_dependencies": ["pytest", "flask", "ruff"]
+        \\    }
+        \\}
+        \\
+    ;
+    try cwd.writeFile(io, .{ .sub_path = path, .data = original });
+
+    try testing.expect(!try removeFromZenvJson(a, io, path, "demo", "numpy", false, .remove));
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "flask", false, .check));
+    {
+        const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+        defer a.free(c);
+        try testing.expectEqualStrings(original, c);
+    }
+    try testing.expectError(
+        error.EnvironmentNotFound,
+        removeFromZenvJson(a, io, path, "nope", "flask", false, .remove),
+    );
+
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "Flask==3", false, .remove));
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "rich", false, .remove));
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "pytest", true, .remove));
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "ruff", true, .remove));
+    {
+        const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+        defer a.free(c);
+        try testing.expectEqualStrings(
+            \\{
+            \\    "base_dir": ".zenv",
+            \\    "demo": {
+            \\        "target_machines": ["*"], // anywhere
+            \\        "dependencies": [
+            \\            // http
+            \\            "requests>=2" /* pinned */
+            \\        ],
+            \\        "dev_dependencies": ["flask"]
+            \\    }
+            \\}
+            \\
+        , c);
+    }
+
+    // The last entry leaves an empty array; a comment keeps its place.
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "requests", false, .remove));
+    try testing.expect(try removeFromZenvJson(a, io, path, "demo", "flask", true, .remove));
+    const c = try cwd.readFileAlloc(io, path, a, .limited(max_file_size));
+    defer a.free(c);
+    try testing.expect(std.mem.find(u8, c, "\"dev_dependencies\": []\n") != null);
+    try testing.expect(std.mem.find(u8, c, "// http\n") != null);
+    const stripped = try jsonc.strip(a, c);
+    defer a.free(stripped);
+    var parsed = try json.parseFromSlice(json.Value, a, stripped, .{});
+    defer parsed.deinit();
+    const demo = parsed.value.object.get("demo").?.object;
+    try testing.expectEqual(@as(usize, 0), demo.get("dependencies").?.array.items.len);
 }

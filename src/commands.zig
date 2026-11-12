@@ -47,6 +47,7 @@ pub const Command = enum {
     log,
     run,
     add,
+    remove,
     validate,
     alias,
     jupyter,
@@ -81,6 +82,8 @@ const setup_flags = [_]Flag{
 };
 const register_flags = [_]Flag{.@"--no-host"};
 const add_flags = [_]Flag{ .@"--dev", .@"--group", .@"--zenv", .@"--uv", .@"--pip" };
+/// The same flags pick the manifest `remove` looks in.
+const remove_flags = add_flags;
 
 /// Refuses a flag that `zenv <command>` does not take, naming the ones it
 /// does, and two flags that contradict each other.
@@ -1686,16 +1689,17 @@ fn installPackage(
     }
 }
 
-/// The dependency group `zenv add` records into: the one `--group` names, else
-/// `dev` for `--dev`, else null (a runtime dependency). Refuses several groups,
-/// `--dev` with another group, and a dotted name, which is no bare TOML key.
+/// The dependency group `zenv add` records into, and `zenv remove` removes
+/// from: the one `--group` names, else `dev` for `--dev`, else null (a runtime
+/// dependency). Refuses several groups, `--dev` with another group, and a
+/// dotted name, which is no bare TOML key.
 fn addGroup(allocator: Allocator, io: Io, args: []const []const u8, flags: Flags) !?[]const u8 {
     const groups = try cli.groups(allocator, args);
     if (groups.len > 1) {
         output.printError(
             io,
-            "'zenv add' records a package in one dependency group; got {d}.",
-            .{groups.len},
+            "'zenv {s}' takes one dependency group; got {d}.",
+            .{ args[1], groups.len },
         );
         return error.ArgsError;
     }
@@ -1712,8 +1716,8 @@ fn addGroup(allocator: Allocator, io: Io, args: []const []const u8, flags: Flags
     if (std.mem.findScalar(u8, group, '.') != null) {
         output.printError(
             io,
-            "'zenv add' cannot record into group '{s}': a '.' in the name would make a nested TOML key. Add it by hand.",
-            .{group},
+            "'zenv {s}' cannot edit group '{s}': a '.' in the name would make a nested TOML key. Edit it by hand.",
+            .{ args[1], group },
         );
         return error.ArgsError;
     }
@@ -1772,6 +1776,225 @@ fn addByRebuild(
         return err;
     };
     output.print(io, "Added '{s}' to environment '{s}'.", .{ package, entry.env_name });
+}
+
+/// `zenv remove <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]`
+/// Undoes `zenv add`: takes `<package>` out of the manifest the same flags
+/// make `add` record it in, then uninstalls it from the venv, unless another
+/// manifest of the env or an installed package still needs it. The manifest
+/// comes FIRST: a failed uninstall leaves a package too many, never one
+/// that is recorded but missing.
+pub fn handleRemove(
+    ctx: Ctx,
+    registry: *const Registry,
+    args: []const []const u8,
+) !void {
+    const io = ctx.io;
+    const allocator = ctx.arena;
+    const usage = "Usage: zenv remove <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]";
+    const env_id = positional(args, 0) orelse {
+        output.printError(io, "Missing environment name. " ++ usage, .{});
+        return error.ArgsError;
+    };
+    const spec = positional(args, 1) orelse {
+        output.printError(io, "Missing package name. " ++ usage, .{});
+        return error.ArgsError;
+    };
+    try checkFlags(io, args, &remove_flags);
+    const flags = Flags.parse(args);
+    const group = try addGroup(allocator, io, args, flags);
+    // A version or extras given with the name do not matter.
+    const package = deps.packageBaseName(spec);
+    if (package.len == 0) {
+        output.printError(io, "'{s}' is not a package name. " ++ usage, .{spec});
+        return error.ArgsError;
+    }
+
+    const ref = try resolve(ctx, registry, env_id);
+    const entry = registry.get(ref);
+    const env_name = entry.env_name;
+    const project_dir = entry.project_dir;
+
+    const zenv_json_path = try Io.Dir.path.join(allocator, &.{ project_dir, "zenv.json" });
+    const file = try validation.load(allocator, io, zenv_json_path, .loud);
+    const env_config = file.project.getEnvironment(env_name) orelse {
+        output.printError(
+            io,
+            "'{s}' is not defined in {s}, so it records no packages.",
+            .{ env_name, zenv_json_path },
+        );
+        return error.EnvironmentNotConfigured;
+    };
+    const dep_file = env_config.dependency_file;
+    const target = try sources.recordTarget(
+        allocator,
+        io,
+        project_dir,
+        dep_file,
+        group,
+        flags.zenv_only,
+    );
+
+    // Removing the package changes a tracked manifest, and the uninstall below
+    // makes the env match it again: an env up to date now stays so.
+    const change = try autosetup.Change.begin(ctx, entry);
+
+    // 1. Take it out of the manifest.
+    const removed = sources.unrecord(
+        allocator,
+        io,
+        zenv_json_path,
+        env_name,
+        target,
+        package,
+        .remove,
+    ) catch |err| {
+        output.printError(io, "Removing '{s}' from its manifest failed: {t}.", .{ package, err });
+        return error.RecordFailed;
+    };
+    const replayed = try autosetup.replayedGroups(allocator, io, entry.venv_path);
+    const elsewhere = try sources.recordedIn(
+        allocator,
+        io,
+        project_dir,
+        zenv_json_path,
+        env_name,
+        dep_file,
+        replayed,
+        package,
+    );
+    const place = removed orelse {
+        output.printError(
+            io,
+            "'{s}' is not recorded in {s}; nothing was removed.",
+            .{ package, try target.describe(allocator) },
+        );
+        for (elsewhere) |e| output.printError(
+            io,
+            "It is recorded in {s}: zenv remove {f}{s}{s}",
+            .{ e.where, shellWords(&.{ env_id, package }), if (e.flags.len > 0) " " else "", e.flags },
+        );
+        return error.NotRecorded;
+    };
+    output.print(io, "Removed '{s}' from {s}.", .{ package, try place.describe(allocator) });
+
+    // 2. Uninstall it, unless the env still needs it.
+    if (elsewhere.len > 0) {
+        for (elsewhere) |e| output.print(
+            io,
+            "'{s}' stays installed: it is still recorded in {s}.",
+            .{ package, e.where },
+        );
+    } else if (try venvHasPython(allocator, io, entry.venv_path)) {
+        // The venv's record of its requirements; the next add resolves with it.
+        envbuild.recordRemoved(allocator, io, entry.venv_path, package) catch {};
+        if (try uninstallPackage(ctx, entry.venv_path, package, flags)) output.print(
+            io,
+            "Removed '{s}' from environment '{s}'.",
+            .{ package, env_name },
+        );
+    }
+    change.finish(ctx, project_dir, env_name, entry.venv_path);
+}
+
+/// Run with the env's Python and a package name: says whether the venv itself
+/// holds the package and whether an installed package requires it, by exit
+/// status (`Probe`). A requirement that only an extra brings in does not
+/// count. Exits 0, for "uninstall", when it cannot tell.
+const uninstall_probe =
+    \\import re, sys, sysconfig
+    \\try:
+    \\    from importlib import metadata
+    \\except ImportError:
+    \\    sys.exit(0)
+    \\
+    \\def norm(name):
+    \\    return re.sub(r"[-_.]+", "-", name or "").lower()
+    \\
+    \\target = norm(sys.argv[1])
+    \\paths = sysconfig.get_paths()
+    \\own = metadata.distributions(path=[paths["purelib"], paths["platlib"]])
+    \\if not any(norm(d.metadata["Name"]) == target for d in own):
+    \\    sys.exit(11)
+    \\needed_by = set()
+    \\for d in metadata.distributions():
+    \\    name = d.metadata["Name"]
+    \\    if not name or norm(name) == target:
+    \\        continue
+    \\    for req in d.requires or []:
+    \\        spec, _, marker = req.partition(";")
+    \\        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+    \\        if m and norm(m.group(1)) == target and "extra" not in marker:
+    \\            needed_by.add(name)
+    \\if needed_by:
+    \\    print("Required by: " + ", ".join(sorted(needed_by)))
+    \\    sys.exit(10)
+;
+
+/// The exit statuses of `uninstall_probe` that keep the package.
+const Probe = struct {
+    const required: u8 = 10;
+    const not_in_venv: u8 = 11;
+};
+
+/// Uninstalls `package` from the venv at `venv_path`, unless an installed
+/// package requires it or the venv does not hold it (a module or the
+/// container image provides it, or it was never installed). Packages that
+/// only it required stay installed, as with `pip uninstall`. `flags` are the
+/// command's, for the installer (see `addInstaller`). Returns whether it
+/// uninstalled the package; a non-zero uninstaller exit maps to
+/// error.ProcessError.
+fn uninstallPackage(ctx: Ctx, venv_path: []const u8, package: []const u8, flags: Flags) !bool {
+    const io = ctx.io;
+    const probe = launch.start(
+        ctx,
+        venv_path,
+        "python",
+        &.{ "-c", uninstall_probe, package },
+        .wait,
+    ) catch |err| {
+        output.printError(io, "Failed to run the environment's Python: {t}", .{err});
+        return err;
+    };
+    switch (probe) {
+        .exited => |code| if (code == Probe.required) {
+            output.print(io, "'{s}' stays installed: the packages above require it.", .{package});
+            return false;
+        } else if (code == Probe.not_in_venv) {
+            output.print(
+                io,
+                "'{s}' is not installed in the environment's venv; nothing to uninstall.",
+                .{package},
+            );
+            return false;
+        },
+        else => {},
+    }
+
+    output.print(io, "Uninstalling '{s}'...", .{package});
+    // The host's uv is not in a container image; the image's pip is used there.
+    const uv = if (launch.containerOf(ctx, venv_path) != null)
+        null
+    else
+        try envbuild.resolveUv(ctx, addInstaller(ctx.arena, io, flags, venv_path));
+    const command: []const u8 = uv orelse "python";
+    const cmd_args: []const []const u8 = if (uv != null)
+        &.{ "pip", "uninstall", package }
+    else
+        &.{ "-m", "pip", "uninstall", "-y", package };
+    const term = launch.start(ctx, venv_path, command, cmd_args, .wait) catch |err| {
+        output.printError(io, "Failed to run uninstaller: {t}", .{err});
+        return err;
+    };
+    if (!term.success()) {
+        output.printError(
+            io,
+            "Uninstalling '{s}' failed; it is no longer recorded, but still installed.",
+            .{package},
+        );
+        return error.ProcessError;
+    }
+    return true;
 }
 
 /// `zenv __exec <venv> <command> [args...]`, run by `launch.start` inside
