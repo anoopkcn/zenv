@@ -544,6 +544,8 @@ A Python-free environment cannot have `dependencies`, `dev_dependencies` or a `d
 
 ## Help
 
+`zenv help` prints the full reference. `zenv help <command>`, `zenv <command> --help` and `zenv <command> -h` print the help of one command, with its options. For the commands that take a subcommand (`alias`, `jupyter` and `python`), `zenv python help` works too.
+
 ```bash
 zenv help
 ```
@@ -559,6 +561,7 @@ and its packages, HPC modules, environment variables and settings.
 Commands:
   init [name] [desc]         Creates 'zenv.json' with environment 'name', or adds it to an
                              existing one. 'name' defaults to the directory's name.
+                             'desc' defaults to [project].description from pyproject.toml.
                              --no-python: an environment without Python, for modules,
                              environment variables and settings only.
                              Use to start defining your environments[z].
@@ -650,7 +653,8 @@ Commands:
 
   version, -v, --version     Prints the installed zenv version.
 
-  help, --help               Shows this help message.
+  help [command]             Shows this help message, or the help for one command.
+                             'zenv <command> --help' (or -h) shows the same.
 
 Options for 'zenv setup <name>':
   --init                     Creates and populates 'zenv.json' file before 'zenv setup'.

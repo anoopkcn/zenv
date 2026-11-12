@@ -56,6 +56,7 @@ pub const Command = enum {
     @"-v",
     @"-V",
     @"--version",
+    @"-h",
     @"--help",
     /// Internal, run inside an env's container (container.zig): setup's
     /// build (`envbuild.runInside`) and a command in the env (`handleExecInside`).
@@ -63,7 +64,7 @@ pub const Command = enum {
     __exec,
 };
 
-/// The flags each command takes (see printUsage in main.zig).
+/// The flags each command takes (see help.zig).
 const setup_flags = [_]Flag{
     .@"--init",
     .@"--no-python",
@@ -238,14 +239,6 @@ test "initConfigJson writes every key in order and escapes user text" {
     try std.testing.expect(std.mem.find(u8, no_deps, "\"dependency_file\": null") != null);
 }
 
-const init_usage =
-    \\Usage: zenv init [name] [description] [--no-python]
-    \\Creates zenv.json with environment <name>, or adds <name> to an existing zenv.json.
-    \\  name         defaults to the current directory's name
-    \\  description  defaults to [project].description from pyproject.toml, if any
-    \\  --no-python  an environment without Python, for modules, env variables and settings
-;
-
 const InitOutcome = enum { created, added, exists };
 
 /// Defines environment `env_name` in ./zenv.json: writes a new file, or adds
@@ -386,14 +379,8 @@ test "defaultEnvName uses the directory name, made valid" {
 pub fn handleInit(ctx: Ctx, args: []const []const u8) void {
     const io = ctx.io;
     const allocator = ctx.arena;
-    for (args[2..]) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            output.rawOut(io, init_usage ++ "\n", .{});
-            return;
-        }
-    }
     if (unknownFlag(args, &.{.@"--no-python"})) |arg| {
-        output.printError(io, "Unknown option '{s}' for 'zenv init'.\n" ++ init_usage, .{arg});
+        output.printError(io, "Unknown option '{s}' for 'zenv init'. Usage: zenv init [name] [desc] [--no-python]", .{arg});
         std.process.exit(1);
     }
 

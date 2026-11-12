@@ -23,7 +23,7 @@ fn takesValue(flag: Flag) bool {
     return flag == .@"--group";
 }
 
-/// The flags of a command line; see `printUsage` in main.zig for what each does.
+/// The flags of a command line; see help.zig for what each does.
 pub const Flags = struct {
     /// --force
     force_deps: bool = false,

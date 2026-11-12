@@ -25,4 +25,5 @@ test {
     _ = @import("jsonc.zig");
     _ = @import("sources.zig");
     _ = @import("launch.zig");
+    _ = @import("help.zig");
 }
