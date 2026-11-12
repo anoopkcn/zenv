@@ -12,13 +12,13 @@ Environments are registered globally, so you can activate one, run a command in 
 
 - **One file per project.** `zenv.json` holds one or more environments, and may contain `//` and `/* */` comments. `zenv init` writes a starting point from what it finds in the project, and `zenv validate` checks it.
 - **Variables and modules as data.** Environment variables and the result of `module load` are recorded rather than re-executed, so activation is fast on clusters and `deactivate` (or switching to another environment) restores the variables they changed.
-- **Python when the project needs it.** A venv built with uv when it is installed, else pip, from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, checked against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
+- **Python when the project needs it.** zenv builds a venv with uv when uv is installed, and with pip otherwise, from `requirements.txt`, `pyproject.toml` or a list in `zenv.json`, and checks it against `requires-python`. Packages the loaded modules already provide are not installed again, and `zenv add` installs a package and records it in the project's manifest. Set `"python": false` for a project without Python.
 - **Use it from anywhere.** Refer to an environment by name, id, alias, or `.` for the project you are in. `zenv run` runs a command in it without activating, `zenv cd` takes you to its project, and Jupyter kernels start through `zenv run` so they get the environment's modules.
 - **Containers.** With `container`, an environment runs in an Apptainer image: its venv sits on the image's Python and gets only the packages the image lacks, and `zenv run` starts commands in the image.
 - **Activate on `cd`.** A zsh or bash hook activates a project's environment when you enter the project and deactivates it when you leave.
 - **Always current.** When `zenv.json` or a file it names changes, the next `zenv run`, `zenv activate` or `zenv cd` rebuilds the environment first.
 - **One config, many machines.** `target_machines` ties each environment to the machines it is for, and on a shared filesystem one alias picks the environment that matches the machine you are on.
-- **Most shells.** Activation scripts for bash, zsh, csh/tcsh and fish.
+- **Most shells.** zenv writes activation scripts for bash, zsh, csh/tcsh and fish.
 
 ## Installation
 
@@ -28,8 +28,7 @@ Environments are registered globally, so you can activate one, run a command in 
 curl -fsSL https://raw.githubusercontent.com/anoopkcn/zenv/HEAD/install.sh | bash
 ```
 
-Run the same command to update an already installed `zenv`
-
+Run the same command to update an already installed `zenv`.
 
 ### Homebrew (macOS / Linux)
 
@@ -44,7 +43,7 @@ Upgrade later with `brew upgrade zenv`.
 <details>
 <summary>Manual download of stable release</summary>
 
-**Change the `<tag>` according to the latest version**
+**Replace `<tag>` with the latest release version.**
 
 ```bash
 # Replace <tag> with last stable release version:
@@ -78,8 +77,7 @@ export PATH="$PATH:path/to/zig-out/bin"
 
 </details>
 
-Check [release](https://github.com/anoopkcn/zenv/releases) for specific versions.
-Supported OS: Linux(`aarch64`, `x86_64`), MacOS(`aarch64`, `x86_64`). _Windows support is not planned_
+Check the [releases](https://github.com/anoopkcn/zenv/releases) for specific versions. zenv supports Linux (`aarch64`, `x86_64`) and macOS (`aarch64`, `x86_64`). _Windows support is not planned._
 
 ## Usage
 
@@ -153,9 +151,7 @@ The `python` line shows the interpreter the venv was built from (omitted until t
 
 ### Activating environments
 
-Activate an environment by name or ID
-
-Example:
+Activate an environment by name or ID, for example:
 
 ```bash
 # Activate by name
@@ -220,13 +216,13 @@ The hook runs `zenv activate --auto`, which you can also use by hand: `source $(
 zenv run <name|id> <command>
 ```
 
-For example to run a script using python from the environment:
+For example, to run a script with the environment's Python:
 
 ```bash
 zenv run test python my_test_file.py
 ```
 
-Or to run a server:
+To run a server:
 
 ```bash
 zenv run test jupyter notebook
@@ -234,7 +230,7 @@ zenv run test jupyter notebook
 zenv run test mkdocs serve
 ```
 
-Or make the environment available to your editor without activation:
+To make the environment available to your editor without activating it:
 
 ```bash
 # for vim or neovim
@@ -248,19 +244,13 @@ zenv run test vim
 
 ### Adding packages to an environment
 
-`zenv add` installs a package into an existing environment **and** records it in the
-project's manifest, so the dependency persists and is reinstalled on the next setup/rebuild.
-The package is installed first; the manifest is only updated if the install succeeds.
-`zenv.json` must be valid and define the environment: otherwise `zenv add` shows what is wrong
-and installs nothing.
+`zenv add` installs a package into an existing environment **and** records it in the project's manifest, so the dependency persists and is reinstalled on the next setup or rebuild. The package is installed first, and the manifest is updated only if the install succeeds. `zenv.json` must be valid and define the environment; otherwise `zenv add` shows what is wrong and installs nothing.
 
 ```bash
 zenv add <name|id|.> <package> [--dev | --group <name>] [--zenv] [--uv|--pip]
 ```
 
-The `<package>` may include a version specifier (e.g. `flask>=2.0`). Re-adding a package
-that is already recorded replaces its spec, so you can use `zenv add` to update a pin.
-Names match the way pip compares them: `Flask_Login` replaces an existing `flask-login`.
+The `<package>` may include a version specifier (for example `flask>=2.0`). Re-adding a package that is already recorded replaces its spec, so you can use `zenv add` to update a pin. Names are compared the way pip compares them, so `Flask_Login` replaces an existing `flask-login`.
 
 ```bash
 # install requests and record it in the manifest
@@ -286,35 +276,20 @@ zenv add test ipykernel --group demo
 
 Flags:
 
-- `--dev` — record the package as a development dependency (see the table above). It is
-  `--group dev`, except that without a `pyproject.toml` `dependency_file` the package goes to
-  `dev_dependencies` in `zenv.json`.
-- `--group <name>` — record the package in that dependency group. A group other than `dev` lives
-  only in `pyproject.toml`, so `zenv add` refuses it when there is none (nothing is installed then).
-- `--zenv` — record the package **only** in `zenv.json` (under `dependencies`, or
-  `dev_dependencies` with `--dev`), leaving `requirements.txt` / `pyproject.toml` untouched.
-  The package is still installed into the environment.
-- `--uv` / `--pip` — install with `uv pip install` or `python -m pip install`. Without either,
-  `zenv add` uses the installer the environment was set up with if `zenv setup` was given
-  `--uv` or `--pip`, and otherwise uv when it is on `PATH`, else pip.
+- `--dev` records the package as a development dependency (see the table above). It is the same as `--group dev`, except that without a `pyproject.toml` `dependency_file` the package goes to `dev_dependencies` in `zenv.json`.
+- `--group <name>` records the package in that dependency group. A group other than `dev` lives only in `pyproject.toml`, so `zenv add` refuses it when there is no `pyproject.toml`, and nothing is installed then.
+- `--zenv` records the package **only** in `zenv.json` (under `dependencies`, or `dev_dependencies` with `--dev`) and leaves `requirements.txt` and `pyproject.toml` untouched. The package is still installed into the environment.
+- `--uv` and `--pip` install with `uv pip install` or `python -m pip install`. Without either, `zenv add` uses the installer the environment was set up with if `zenv setup` was given `--uv` or `--pip`, and otherwise uv when it is on `PATH`, else pip.
 
-> Note: `--dev` is interpreted per-command — it means *editable install of the current
-> project* for `zenv setup`, but *development dependency* for `zenv add`.
+> Note: `--dev` means different things per command. For `zenv setup` it is an *editable install of the current project*, and for `zenv add` it is a *development dependency*.
 
-**Dependency groups.** `zenv setup` installs `[project].dependencies` but no dependency group
-unless you name it, as `pip install --group` does:
+**Dependency groups.** `zenv setup` installs `[project].dependencies` but no dependency group unless you name it, as `pip install --group` does:
 
 ```bash
 zenv setup test --uv --group dev --group demo   # or --group=demo
 ```
 
-Groups are read from the `pyproject.toml` `dependency_file`, else from `pyproject.toml` next to
-`zenv.json`; `{include-group = "..."}` entries are followed, and names compare normalized
-(`--group Docs_Build` selects `docs-build`). A group that does not exist stops setup and lists
-the groups that do. The chosen groups are part of the build record, so automatic rebuilds keep
-installing them. When `zenv add` records a package in a group (with `--group`, or `--dev` into
-`pyproject.toml`), it adds that group to the build record as well, so the package survives the
-next rebuild. A manual `zenv setup` uses only the groups you pass it.
+Groups are read from the `pyproject.toml` `dependency_file`, or else from the `pyproject.toml` next to `zenv.json`. `{include-group = "..."}` entries are followed, and names are compared in normalized form (`--group Docs_Build` selects `docs-build`). A group that does not exist stops setup, and the error lists the groups that do. The chosen groups are part of the build record, so automatic rebuilds keep installing them. When `zenv add` records a package in a group (with `--group`, or with `--dev` into `pyproject.toml`), it adds that group to the build record as well, so the package survives the next rebuild. A manual `zenv setup` uses only the groups you pass it.
 
 In `pyproject.toml` only the affected entry changes: the rest of the file, including comments, stays as it was. If the package installs but cannot be recorded, `zenv add` says so, and you add it to the manifest by hand. Recording the package does not make the next `zenv run` rebuild the environment (see [Automatic rebuilds](#automatic-rebuilds)).
 
@@ -352,22 +327,16 @@ zenv deregister <name>     # Remove by name or ID
 The default priority of the Python is as follows:
 
 1. Module-provided Python: a Python the env's modules put on `PATH` (a `python3` that was on `PATH` already, such as `/usr/bin/python3`, does not count)
-2. Explicitly configured 'fallback_python' from zenv.json (if not null)
-3. zenv-managed pinned Python
-4. System python3
-5. System python
+2. The `fallback_python` set in `zenv.json` (if not null)
+3. The zenv-managed pinned Python
+4. System `python3`
+5. System `python`
 
 Environments with `"python": false` skip this entirely: no interpreter is looked up.
 
-If the project's `pyproject.toml` declares `requires-python` and zenv reads it (it is the
-`dependency_file`, or `--dev` installs the project), setup checks the selected Python against it
-before creating the venv. When it does not match, setup stops and says how to make a matching
-Python the one zenv selects: a Python module, `fallback_python`, or a zenv-installed Python you pin.
-When the selected Python changes (a new `fallback_python`, another Python module), setup makes the
-venv again with it and reinstalls the packages. An existing venv of the selected Python that does
-not match `requires-python` is reported; remove it with `zenv rm <name>` and set it up again.
+If the project's `pyproject.toml` declares `requires-python` and zenv reads that file (because it is the `dependency_file`, or because `--dev` installs the project), setup checks the selected Python against it before creating the venv. When it does not match, setup stops and says how to make a matching Python the one zenv selects: load a Python module, set `fallback_python`, or pin a zenv-installed Python. When the selected Python changes (a new `fallback_python`, another Python module), setup creates the venv again with it and reinstalls the packages. An existing venv of the selected Python that does not match `requires-python` is reported; remove it with `zenv rm <name>` and set it up again.
 
-If you would like to use zenv-managed default Python for the environment, run:
+To build the environment with a zenv-managed Python, run:
 
 ```bash
 # Install a python version if not done already
@@ -384,7 +353,7 @@ zenv setup <name> --python
 
 ## Configuration Reference
 
-One can have multiple environment configurations in the same `zenv.json` file and it supports the following structure:
+A `zenv.json` file can hold several environments, with this structure:
 
 ```json
 {
@@ -424,11 +393,11 @@ One can have multiple environment configurations in the same `zenv.json` file an
 }
 ```
 
-One can run `zenv validate` to validate the config file. If there are errors in the JSON it will try to inform the context of the error.
+Run `zenv validate` to check the file. When it finds errors, it reports them with line numbers and field names.
 
 `zenv.json` may contain comments: `// to the end of the line` and `/* block */`, as in JSONC. Other JSON extensions, such as trailing commas, are not accepted. `zenv add`, `zenv init` and `zenv rename` edit the file in place, so comments and layout are kept, and a change to a comment alone does not trigger an [automatic rebuild](#automatic-rebuilds).
 
-In the configuration `target_machines` is required key(If you want, you can disable the validation check using `--no-host`), all other entries are optional. Top-level `base_dir` can be an absolute path or relative one(relative to the `zenv.json` file), if not provided it will create a directory called `.zenv` at the project root. One can use wildcards to target specific systems, to match any machine use `*` or `any` (`"target_machines": ["*"]`). The lookup location of the `dependency_file` is the same directory as `zenv.json`.
+In an environment, `target_machines` is the only required key (`zenv setup --no-host` skips the machine check), and all other keys are optional. The top-level `base_dir` can be an absolute path or a path relative to `zenv.json`; without it, environments go into a `.zenv` directory at the project root. `target_machines` accepts wildcards, and `*` or `any` matches every machine (`"target_machines": ["*"]`). The `dependency_file` is looked up in the same directory as `zenv.json`.
 
 `python` (default `true`) says whether the environment has a Python venv; set it to `false` for a project that only needs modules, environment variables and settings (see [Environments without Python](#environments-without-python)). `env` sets environment variables (see [Environment variables](#environment-variables)). `container` runs the environment in an Apptainer image (see [Container images](#container-images-apptainer)).
 
@@ -436,7 +405,7 @@ The `dependencies` and `dev_dependencies` arrays list packages that `zenv setup`
 
 The machine identity that `target_machines` is matched against is taken from `$SYSTEMNAME` when it is set (falling back to `$HOSTNAME`/`$HOST`, then the `hostname` command). On HPC systems every node of a cluster exports the same `$SYSTEMNAME` while per-node `hostname`s differ (e.g. `jrlogin01` vs `jrc0042`), so keying off `$SYSTEMNAME` lets a single entry like `"target_machines": ["jureca"]` match on login and compute nodes alike. This is the same cluster identity used for the module cache (below). Off HPC, where `$SYSTEMNAME` is unset, matching uses the hostname as before.
 
-**Host-aware selection (shared filesystems).** When several machines share a filesystem (e.g. HPC login/compute nodes), you can register one environment per machine — distinct names like `env_machine1`, `env_machine2`, each with its own `target_machines` — and give them all the **same alias** (e.g. `zenv alias create dev env_machine1`, then `... dev env_machine2`). Resolving that alias, or the `.` current-directory shortcut, then auto-selects the environment whose `target_machines` matches the machine you are on, so the *same* command (`zenv run dev`, `zenv activate .`, `zenv cd .`) works on every node. If the current host matches none of the candidates — or more than one (e.g. two share a `*`/`any` target) — resolution reports an ambiguity listing each candidate and its target machines; use the exact environment name or id to disambiguate. A unique alias (one holder) still resolves regardless of host.
+**Host-aware selection (shared filesystems).** When several machines share a filesystem (such as HPC login and compute nodes), you can register one environment per machine, with distinct names like `env_machine1` and `env_machine2` and each with its own `target_machines`, and give them all the **same alias** (`zenv alias create dev env_machine1`, then `zenv alias create dev env_machine2`). Resolving that alias, or the `.` current-directory shortcut, then selects the environment whose `target_machines` matches the machine you are on, so the *same* command (`zenv run dev`, `zenv activate .`, `zenv cd .`) works on every node. If the current host matches none of the candidates, or more than one (for example when two share a `*` or `any` target), resolution reports an ambiguity and lists each candidate with its target machines; use the exact environment name or id then. A unique alias (one holder) still resolves regardless of host.
 
 ### Environment variables
 
@@ -464,7 +433,7 @@ Variables zenv's activation manages (`VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `ZENV_
 
 For custom scripts, you can use `setup.script` and `activate.script` to specify paths to shell scripts that will be copied to the environment's directory and executed during setup or activation. These scripts allow for more complex customization than inline commands. The scripts are copied to the environment directory, making the environment portable and independent of the original script location.
 
-The key-val `"modules_file": "path/to/file.txt"` can be specified in an environment to load module names from an external file. The file has one module name per line; blank lines and lines starting with `#` are skipped, and a repeated name is loaded once. When specified, any modules listed in the "modules" array are ignored.
+Set `"modules_file": "path/to/file.txt"` in an environment to read its module names from an external file. The file has one module name per line; blank lines and lines starting with `#` are skipped, and a repeated name is loaded once. When `modules_file` is set, the `modules` array is ignored.
 
 ### Module caching
 
@@ -473,14 +442,14 @@ On HPC systems, `module load` (Lmod) can be slow, and the generated `activate.sh
 The cache is used only when it is trustworthy; otherwise activation transparently falls back to a real `module --force purge` + `module load`:
 
 - It is keyed to the **cluster** via `$SYSTEMNAME` (falling back to `hostname`), so it is reused across all nodes of a system but never replayed on a different one.
-- Path-style variables (`PATH`, `LD_LIBRARY_PATH`, …) are replayed as the entries the modules put before or after the previous value (prepends and appends), so your live login environment is preserved.
+- Path-style variables (`PATH`, `LD_LIBRARY_PATH` and others) are replayed as the entries the modules put before or after the previous value (prepends and appends), so your live login environment is preserved.
 - If any module fails to load, `zenv setup` fails and names the module, instead of building an environment without it.
 - Replaying the cache does not need a `module` command, so it also works in shells where Lmod is not initialised (e.g. a non-login `tcsh`). Only the `module load` fallback needs one; if `module` is missing but `$LMOD_CMD` is set, the activation script defines it the way Lmod does.
 - `deactivate` undoes everything the cache replay set, so deactivating and re-activating does not stack path entries.
 
 If your login shell is not bash (e.g. zsh), `module` is not visible to the bash that `zenv setup` uses to load modules. zenv then defines it from `$LMOD_CMD`, the way Lmod's own bash init does.
 
-**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed (see [Automatic rebuilds](#automatic-rebuilds)). To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`), and automatic rebuilds pass `--reuse-module-cache`. When such a rebuild leaves the module set unchanged — e.g. you only edited `requirements.txt` — setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. A `zenv setup` you run yourself always re-captures; pass `--reuse-module-cache` to skip that when you know the modules have not changed.
+**Reuse on rebuild.** zenv re-runs `zenv setup` automatically when it detects that `zenv.json` or a referenced dependency/modules file changed (see [Automatic rebuilds](#automatic-rebuilds)). To avoid paying the Lmod cost on every such rebuild, the cache also records a signature of the module set (`modules_sig`), and automatic rebuilds pass `--reuse-module-cache`. When such a rebuild leaves the module set unchanged (for example when you only edited `requirements.txt`), setup skips `module --force purge` + `module load` and instead replays the existing cache to establish the build environment, provided the cache is still trustworthy for this cluster (same `$SYSTEMNAME`, not untrusted). When the module set itself changes (you edit `modules`/`modules_file`), setup re-runs Lmod and re-captures the cache. A `zenv setup` you run yourself always re-captures; pass `--reuse-module-cache` to skip that when you know the modules have not changed.
 
 The cache is **not** auto-invalidated when the system's modules change underneath you, and automatic rebuilds keep replaying it. If a `module load` is updated by site maintenance, re-run `zenv setup` to refresh the cache. Set `"module_cache": false` to always run `module load` at activation. Environments without `modules` are unaffected.
 
@@ -760,9 +729,7 @@ Environment variables:
 
 ## Issues
 
-If you encounter any bugs open an Issue. To use the debug logging feature, set the `ZENV_DEBUG` environment variable:
-
-Example:
+If you run into a bug, please open an issue. For debug output, set the `ZENV_DEBUG` environment variable:
 
 ```bash
 ZENV_DEBUG=1 zenv setup <name>
