@@ -22,6 +22,10 @@ fn getVersion(b: *std.Build) Version {
         return .{ .tag = ver }; // Treat override as a tag
     }
 
+    // git describe reads state the configure cache cannot track (new tags, and
+    // edits anywhere in the tree for -dirty), so rerun configure every build.
+    b.graph.poisonCache();
+
     // Determine the build root directory containing .git
     const build_root_path = b.root.toString(b.allocator) catch @panic("OOM");
 
