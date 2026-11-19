@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const paths = @import("paths.zig");
@@ -250,8 +251,88 @@ fn uniformMtimes(gpa: Allocator, io: Io, dir: Io.Dir) !void {
     }
 }
 
+/// The version and configure options of `zenv python install [version] [-- opts...]`,
+/// or the first argument before `--` that is neither: an extra word, or an
+/// option that belongs after `--`.
+pub const InstallArgs = union(enum) {
+    ok: struct { version: ?[]const u8, configure: []const []const u8 },
+    unexpected: []const u8,
+
+    /// `rest` is what follows `install` on the command line.
+    pub fn parse(rest: []const []const u8) InstallArgs {
+        var split = rest.len;
+        for (rest, 0..) |arg, i| if (std.mem.eql(u8, arg, "--")) {
+            split = i;
+            break;
+        };
+        const before = rest[0..split];
+        const configure = if (split < rest.len) rest[split + 1 ..] else &.{};
+        if (before.len > 1) return .{ .unexpected = before[1] };
+        if (before.len == 1 and std.mem.startsWith(u8, before[0], "-"))
+            return .{ .unexpected = before[0] };
+        return .{ .ok = .{
+            .version = if (before.len == 1) before[0] else null,
+            .configure = configure,
+        } };
+    }
+};
+
+/// The prefix of Homebrew's openssl@3 when it has headers, else null. Not
+/// openssl@4: its opaque ASN1 types break _ssl.c in CPython 3.13.0. CPython's
+/// configure does not look in Homebrew's prefixes, and macOS ships no OpenSSL
+/// headers, so without this the build silently leaves out the ssl module.
+fn homebrewOpenssl(a: Allocator, io: Io, env: *const std.process.Environ.Map) !?[]const u8 {
+    if (builtin.os.tag != .macos) return null;
+    for ([_]?[]const u8{ env.get("HOMEBREW_PREFIX"), "/opt/homebrew", "/usr/local" }) |brew| {
+        const prefix = try Io.Dir.path.join(a, &.{ brew orelse continue, "opt", "openssl@3" });
+        const header = try Io.Dir.path.join(a, &.{ prefix, "include", "openssl", "ssl.h" });
+        if (runtime.exists(io, header)) return prefix;
+    }
+    return null;
+}
+
+/// The `./configure` command: zenv's defaults, `--with-openssl=<openssl>`
+/// unless the user gives one, then ZENV_PYTHON_CONFIGURE_OPTS (split on
+/// whitespace) and `cli`. User options come last because autoconf keeps the
+/// last of a repeated option, so they override the defaults.
+fn configureArgv(
+    a: Allocator,
+    install_dir: []const u8,
+    openssl: ?[]const u8,
+    env_opts: ?[]const u8,
+    cli: []const []const u8,
+) ![]const []const u8 {
+    var user: std.ArrayList([]const u8) = .empty;
+    if (env_opts) |opts| {
+        var it = std.mem.tokenizeAny(u8, opts, " \t\r\n");
+        while (it.next()) |arg| try user.append(a, arg);
+    }
+    try user.appendSlice(a, cli);
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(a, &.{
+        "./configure",
+        "--prefix",
+        install_dir,
+        "--enable-optimizations",
+        "--disable-test-modules",
+        "--with-ensurepip=install",
+    });
+    const user_openssl = for (user.items) |arg| {
+        if (std.mem.startsWith(u8, arg, "--with-openssl=")) break true;
+    } else false;
+    if (openssl) |dir| if (!user_openssl) try argv.append(a, try a.print("--with-openssl={s}", .{dir}));
+    try argv.appendSlice(a, user.items);
+    return argv.items;
+}
+
 /// Configure and build Python
-fn buildPython(ctx: Ctx, source_dir: []const u8, install_dir: []const u8) !void {
+fn buildPython(
+    ctx: Ctx,
+    source_dir: []const u8,
+    install_dir: []const u8,
+    configure_argv: []const []const u8,
+) !void {
     const io = ctx.io;
     output.print(io, "Configuring Python build in {s}", .{source_dir});
     output.print(io, "Python will be installed to {s}", .{install_dir});
@@ -282,15 +363,11 @@ fn buildPython(ctx: Ctx, source_dir: []const u8, install_dir: []const u8) !void 
     };
     const steps = [_]Step{
         .{
-            .msg = "Configuring Python (./configure)...",
-            .argv = &.{
-                "./configure",
-                "--prefix",
-                install_dir,
-                "--enable-optimizations",
-                "--disable-test-modules",
-                "--with-ensurepip=install",
-            },
+            .msg = try ctx.arena.print(
+                "Configuring Python: {s}",
+                .{try std.mem.join(ctx.arena, " ", configure_argv)},
+            ),
+            .argv = configure_argv,
             .failed = "Configuration failed",
             .err = error.ConfigureFailed,
         },
@@ -323,8 +400,31 @@ fn buildPython(ctx: Ctx, source_dir: []const u8, install_dir: []const u8) !void 
     );
 }
 
-/// Main function to install Python
-pub fn install(ctx: Ctx, version: ?[]const u8) !void {
+/// Warns when the Python at `install_dir` cannot import ssl: pip then cannot
+/// reach PyPI, and the build only mentions it among its last lines.
+fn checkSsl(ctx: Ctx, install_dir: []const u8, version: []const u8) void {
+    const python3 = Io.Dir.path.join(ctx.arena, &.{ install_dir, "bin", "python3" }) catch return;
+    const ok = if (runtime.run(ctx.arena, ctx.io, &.{ python3, "-c", "import ssl" }, .{})) |r|
+        r.term == .exited and r.term.exited == 0
+    else |_|
+        false;
+    if (ok) return;
+    output.printWarning(
+        ctx.io,
+        "Python {s} was built without the ssl module, so pip cannot download packages.",
+        .{version},
+    );
+    output.printWarning(
+        ctx.io,
+        "Install OpenSSL with its headers, then reinstall with its prefix: rm -rf {s} && zenv python install {s} -- --with-openssl=<dir>",
+        .{ install_dir, version },
+    );
+}
+
+/// Downloads, builds and installs Python `version` (default: `default_version`)
+/// into ZENV_DIR/python/<version>. `configure_opts` go to ./configure after
+/// zenv's own options and those of ZENV_PYTHON_CONFIGURE_OPTS.
+pub fn install(ctx: Ctx, version: ?[]const u8, configure_opts: []const []const u8) !void {
     const io = ctx.io;
     const a = ctx.arena;
     const python_version = version orelse default_version;
@@ -383,10 +483,18 @@ pub fn install(ctx: Ctx, version: ?[]const u8) !void {
         try uniformMtimes(a, io, source);
     }
 
-    try buildPython(ctx, build_dir, install_dir);
+    const configure_argv = try configureArgv(
+        a,
+        install_dir,
+        try homebrewOpenssl(a, io, ctx.env),
+        ctx.getEnv("ZENV_PYTHON_CONFIGURE_OPTS"),
+        configure_opts,
+    );
+    try buildPython(ctx, build_dir, install_dir, configure_argv);
 
     output.print(io, "Python {s} has been successfully installed!", .{python_version});
     output.print(io, "Installation path: {s}", .{install_dir});
+    checkSsl(ctx, install_dir, python_version);
 }
 
 /// The release numbers of a version ("3.12.1" -> 3, 12, 1), zero-padded so
@@ -511,6 +619,65 @@ test "installedVersions lists installs with bin/python3, newest first" {
         want,
         got,
     );
+}
+
+test "InstallArgs.parse splits the version from the configure options" {
+    const ok = InstallArgs.parse(&.{ "3.13.0", "--", "--with-lto", "--with-openssl=/x" }).ok;
+    try testing.expectEqualStrings("3.13.0", ok.version.?);
+    try testing.expectEqual(@as(usize, 2), ok.configure.len);
+    try testing.expectEqualStrings("--with-openssl=/x", ok.configure[1]);
+
+    const no_version = InstallArgs.parse(&.{ "--", "--with-lto" }).ok;
+    try testing.expect(no_version.version == null);
+    try testing.expectEqual(@as(usize, 1), no_version.configure.len);
+
+    const bare = InstallArgs.parse(&.{"3.12.0"}).ok;
+    try testing.expectEqualStrings("3.12.0", bare.version.?);
+    try testing.expectEqual(@as(usize, 0), bare.configure.len);
+    try testing.expect(InstallArgs.parse(&.{}).ok.version == null);
+
+    // A configure option before `--`, or a second word, is refused.
+    try testing.expectEqualStrings(
+        "--with-lto",
+        InstallArgs.parse(&.{ "3.13.0", "--with-lto" }).unexpected,
+    );
+    try testing.expectEqualStrings(
+        "--with-lto",
+        InstallArgs.parse(&.{"--with-lto"}).unexpected,
+    );
+    try testing.expectEqualStrings("3.12", InstallArgs.parse(&.{ "3.13", "3.12" }).unexpected);
+}
+
+test "configureArgv puts user options after the defaults, the env var before the CLI" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const defaults = [_][]const u8{
+        "./configure",
+        "--prefix",
+        "/p",
+        "--enable-optimizations",
+        "--disable-test-modules",
+        "--with-ensurepip=install",
+    };
+
+    const argv = try configureArgv(a, "/p", "/brew/openssl@3", "  --with-lto\t--enable-shared ", &.{"--without-ensurepip"});
+    const want = defaults ++ [_][]const u8{
+        "--with-openssl=/brew/openssl@3",
+        "--with-lto",
+        "--enable-shared",
+        "--without-ensurepip",
+    };
+    try testing.expectEqual(want.len, argv.len);
+    for (want, argv) |w, g| try testing.expectEqualStrings(w, g);
+
+    // The user's --with-openssl replaces the detected one.
+    const own = try configureArgv(a, "/p", "/brew/openssl@3", null, &.{"--with-openssl=/mine"});
+    try testing.expectEqual(defaults.len + 1, own.len);
+    try testing.expectEqualStrings("--with-openssl=/mine", own[defaults.len]);
+
+    // Nothing detected or given: the defaults alone.
+    try testing.expectEqual(defaults.len, (try configureArgv(a, "/p", null, "", &.{})).len);
 }
 
 test "satisfies matches requires-python specifiers on release numbers" {

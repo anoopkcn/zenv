@@ -298,10 +298,16 @@ const topics = [_]Topic{
     },
     .{
         .commands = &.{.python},
-        .synopsis = "python <install|pin|unpin|ls> [version]",
+        .synopsis = "python <install|pin|unpin|ls> [version] [-- <configure options>]",
         .entry =
         \\  python <subcommand>        (Experimental feature) Manages Python installations:
-        \\    install <version>        Downloads and installs a specific Python version for zenv.
+        \\    install <version> [-- <configure options>]
+        \\                             Downloads, builds and installs a specific Python version
+        \\                             for zenv. Options after '--', and before them those in
+        \\                             ZENV_PYTHON_CONFIGURE_OPTS, go to CPython's ./configure
+        \\                             after zenv's own, so they override them. On macOS,
+        \\                             Homebrew's openssl@3 is passed as --with-openssl when
+        \\                             present.
         \\    pin <version>            Sets <version> as the pinned Python for zenv to prioritize.
         \\    unpin                    Removes the pin; installed Pythons are kept.
         \\    ls                       Shows Python versions installed and managed by zenv.
@@ -372,6 +378,8 @@ const notes =
     \\  ZENV_PYCACHE_DIR           The bytecode directory 'zenv init' writes into a new
     \\                             environment as PYTHONPYCACHEPREFIX (default: 'pycache'
     \\                             in base_dir).
+    \\  ZENV_PYTHON_CONFIGURE_OPTS Extra ./configure options for 'zenv python install',
+    \\                             split on whitespace.
     \\  ZENV_NO_AUTO_SETUP=1       Turns automatic rebuilds off.
     \\  ZENV_RUN_SHELL=1           'zenv run' sources activate.sh in bash instead of starting
     \\                             the command directly.
@@ -427,6 +435,8 @@ pub fn requested(command: Command, args: []const []const u8) bool {
     // After the environment, `run`'s arguments belong to the command it runs.
     const own = if (command == .run) args[2..3] else args[2..];
     for (own) |arg| {
+        // What follows `--` belongs to another program (configure, for `python install`).
+        if (std.mem.eql(u8, arg, "--")) break;
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return true;
     }
     return false;

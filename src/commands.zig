@@ -1312,14 +1312,22 @@ pub fn handlePython(ctx: Ctx, args: []const []const u8) !void {
     };
     switch (subcommand) {
         .install => {
-            const version: ?[]const u8 = if (args.len >= 4) args[3] else null;
+            const parsed = switch (python.InstallArgs.parse(args[3..])) {
+                .ok => |ok| ok,
+                .unexpected => |arg| {
+                    output.printError(io, "Unexpected argument '{s}' for 'python install'", .{arg});
+                    output.print(io, "Usage: zenv python install [version] [-- <configure options>]", .{});
+                    return error.ArgsError;
+                },
+            };
+            const version = parsed.version;
             if (version) |v| {
                 output.print(io, "Installing Python version: {s}", .{v});
             } else {
                 output.print(io, "No version specified, will install default version", .{});
             }
             // Installing does not pin; `zenv python pin` does.
-            python.install(ctx, version) catch |err| {
+            python.install(ctx, version, parsed.configure) catch |err| {
                 output.printError(io, "Python installation failed: {t}", .{err});
                 return err;
             };
