@@ -67,7 +67,7 @@ pub const Command = enum {
 const setup_flags = [_]Flag{
     .@"--init",
     .@"--no-python",
-    .@"--dev",
+    .@"--editable",
     .@"--uv",
     .@"--pip",
     .@"--no-host",
@@ -569,7 +569,7 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
     const groups = try cli.groups(allocator, args);
 
     if (!env_config.python) {
-        if (flags.dev_mode) return noPython(io, env_name, "--dev installs the project into it");
+        if (flags.editable) return noPython(io, env_name, "--editable installs the project into it");
         if (groups.len > 0) return noPython(io, env_name, "--group installs packages into it");
         if (flags.create_jupyter_kernel) return noPython(io, env_name, "--jupyter needs Python");
     }
@@ -616,7 +616,7 @@ pub fn handleSetup(ctx: Ctx, registry: *Registry, args: []const []const u8) !voi
 
     // 1. Collect the dependencies. They live in `allocator` (main's arena);
     // config strings are borrowed.
-    const collected = try sources.collect(ctx, env_config, setup_cwd, groups, flags.dev_mode);
+    const collected = try sources.collect(ctx, env_config, setup_cwd, groups, flags.editable);
     output.print(io, "Combined dependency list ({d} items):", .{collected.deps.len});
     for (collected.deps) |dep| {
         output.print(io, "  - {s}", .{dep});
@@ -1768,9 +1768,9 @@ fn addGroup(allocator: Allocator, io: Io, args: []const []const u8, flags: Flags
         );
         return error.ArgsError;
     }
-    if (groups.len == 0) return if (flags.dev_mode) "dev" else null;
+    if (groups.len == 0) return if (flags.dev_group) "dev" else null;
     const group = groups[0];
-    if (flags.dev_mode and !deps.sameName(group, "dev")) {
+    if (flags.dev_group and !deps.sameName(group, "dev")) {
         output.printError(
             io,
             "'--dev' means '--group dev'; it cannot be combined with '--group {s}'.",

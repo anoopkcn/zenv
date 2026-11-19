@@ -22,7 +22,7 @@ const runtime = @import("runtime.zig");
 const Ctx = runtime.Ctx;
 
 /// The project's own pyproject.toml, relative to the project directory: what
-/// `--dev` installs and, without a pyproject `dependency_file`, where
+/// `--editable` installs and, without a pyproject `dependency_file`, where
 /// dependency groups live.
 const project_pyproject = "pyproject.toml";
 
@@ -40,14 +40,14 @@ fn groupsFile(dep_file: ?[]const u8) []const u8 {
     return project_pyproject;
 }
 
-/// Whether a build of `env` with `groups` (and `--dev` when `dev`) reads the
+/// Whether a build of `env` with `groups` (and `--editable` when `editable`) reads the
 /// project's ./pyproject.toml although it is not the env's `dependency_file`:
 /// for the groups when the `dependency_file` is no pyproject.toml, and for
-/// `--dev`, which installs the project. The rebuild gate watches it then.
-pub fn readsProjectPyproject(env: *const config.Env, groups: []const []const u8, dev: bool) bool {
-    const df = env.dependency_file orelse return groups.len > 0 or dev;
+/// `--editable`, which installs the project. The rebuild gate watches it then.
+pub fn readsProjectPyproject(env: *const config.Env, groups: []const []const u8, editable: bool) bool {
+    const df = env.dependency_file orelse return groups.len > 0 or editable;
     if (groups.len > 0 and !isPyproject(df)) return true;
-    if (!dev) return false;
+    if (!editable) return false;
     const plain = if (std.mem.startsWith(u8, df, "./")) df[2..] else df;
     return !std.mem.eql(u8, plain, project_pyproject);
 }
@@ -64,21 +64,21 @@ pub const Collected = struct {
     /// Dependency lines, in requirements.txt syntax, in source order.
     deps: []const []const u8,
     /// The project's requires-python, from a pyproject.toml dependency file;
-    /// with `--dev`, ./pyproject.toml (the project pip installs) takes
+    /// with `--editable`, ./pyproject.toml (the project pip installs) takes
     /// precedence. Null when neither sets it.
     requires_python: ?RequiresPython,
 };
 
 /// Collects what setup installs for `env`, whose relative files are anchored
 /// at `project_dir`, logging each source as it goes. `groups` are the
-/// `--group` names; `dev` is `--dev`. Allocates with `ctx.arena`; config
+/// `--group` names; `editable` is `--editable`. Allocates with `ctx.arena`; config
 /// strings are borrowed.
 pub fn collect(
     ctx: Ctx,
     env: *const config.Env,
     project_dir: []const u8,
     groups: []const []const u8,
-    dev: bool,
+    editable: bool,
 ) !Collected {
     const io = ctx.io;
     const allocator = ctx.arena;
@@ -189,7 +189,7 @@ pub fn collect(
         );
     }
 
-    if (dev) {
+    if (editable) {
         if (readProjectFile(ctx, project_dir, project_pyproject, 10 * 1024 * 1024)) |content| {
             if (try deps.pyprojectField(
                 allocator,
@@ -451,7 +451,7 @@ test "readsProjectPyproject: only when the build reads a pyproject.toml it does 
     env.dependency_file = "./pyproject.toml";
     try testing.expect(!readsProjectPyproject(&env, &.{"demo"}, true));
 
-    // Groups come from this file; --dev still reads ./pyproject.toml.
+    // Groups come from this file; --editable still reads ./pyproject.toml.
     env.dependency_file = "sub/pyproject.toml";
     try testing.expect(!readsProjectPyproject(&env, &.{"demo"}, false));
     try testing.expect(readsProjectPyproject(&env, &.{}, true));

@@ -42,7 +42,7 @@ pub const Options = struct {
     /// Absolute venv directory.
     venv_dir: []const u8,
     /// Absolute project directory (where zenv.json is): the cwd for installs
-    /// (`--dev` installs `.`) and hooks.
+    /// (`--editable` installs `.`) and hooks.
     project_dir: []const u8,
     /// Dependency lines, in requirements.txt syntax; run drops invalid and
     /// duplicate ones.
@@ -106,7 +106,7 @@ pub fn run(c: Ctx, options: Options) !void {
 
     if (opts.env_config.python) {
         if (flags.use_default_python) info(c, "--python: using only the zenv-pinned Python", .{});
-        if (flags.dev_mode) info(c, "--dev: will install the project as an editable package", .{});
+        if (flags.editable) info(c, "--editable: will install the project as an editable package", .{});
         if (flags.no_cache) info(c, "--no-cache: package caches are disabled", .{});
         opts.uv = if (in_image)
             try imageUv(c, flags.installer())
@@ -237,7 +237,7 @@ pub fn run(c: Ctx, options: Options) !void {
     const provided: []const Package = if (flags.force_deps) &.{} else provided_pkgs;
     try installRequirements(c, opts, venv_python, install_env, plan, provided, source);
 
-    if (flags.dev_mode) try installEditable(c, opts, venv_python, install_env);
+    if (flags.editable) try installEditable(c, opts, venv_python, install_env);
 
     if (bytecode) |v| try env.put(
         "PYTHONDONTWRITEBYTECODE",

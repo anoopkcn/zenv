@@ -60,7 +60,7 @@ const topics = [_]Topic{
         \\                             Convenient for creating and setting up in one step.
         \\  --no-python                With --init (or 'zenv init'): write the env as "python": false.
         \\
-        \\  --dev                      Installs the current directory's project in editable mode.
+        \\  -e, --editable             Installs the current directory's project in editable mode.
         \\                             Equivalent to 'pip install --editable .' command.
         \\
         \\  --group <name>             Also installs [dependency-groups].<name> (PEP 735) from the
@@ -145,8 +145,7 @@ const topics = [_]Topic{
         \\Options for 'zenv add <name> <package>':
         \\  --dev                      Records the package as a development dependency: '--group dev',
         \\                             except that without a pyproject.toml dependency_file it goes to
-        \\                             zenv.json's dev_dependencies. (Note: --dev means editable install
-        \\                             for 'setup', dev dependency for 'add'.)
+        \\                             zenv.json's dev_dependencies.
         \\
         \\  --group <name>             Records the package in [dependency-groups].<name> of the
         \\                             pyproject.toml dependency_file, else ./pyproject.toml, and makes
@@ -359,7 +358,7 @@ const notes =
     \\  4. System Python.
     \\  Use 'zenv setup <name> --python' to use only the pinned version.
     \\  When pyproject.toml sets requires-python (as the dependency_file, or with
-    \\  --dev), setup stops if the selected Python does not satisfy it.
+    \\  --editable), setup stops if the selected Python does not satisfy it.
     \\
     \\[.] Dot Notation:
     \\  Use '.' as the environment identifier to select the environment of the project

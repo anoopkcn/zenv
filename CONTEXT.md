@@ -13,7 +13,7 @@ One top-level entry of the project file, and the directory setup builds for it.
 
 **Dependency sources** (`sources.zig`)
 The project files an env's packages come from: zenv.json `dependencies`/`dev_dependencies`,
-the `dependency_file`, `--group` dependency groups, and `./pyproject.toml` for `--dev`.
+the `dependency_file`, `--group` dependency groups, and `./pyproject.toml` for `--editable`.
 Owns what setup installs, which of these files the rebuild gate watches, and where
 `zenv add` records a package and `zenv remove` takes it out again.
 

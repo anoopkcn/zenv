@@ -6,6 +6,7 @@ pub const Flag = enum {
     @"--force",
     @"--no-host",
     @"--python",
+    @"--editable",
     @"--dev",
     @"--uv",
     @"--pip",
@@ -17,6 +18,12 @@ pub const Flag = enum {
     @"--no-python",
     @"--group",
 };
+
+/// The flag `arg` spells, by its long name or its one-letter alias.
+fn flagOf(arg: []const u8) ?Flag {
+    if (std.mem.eql(u8, arg, "-e")) return .@"--editable";
+    return std.meta.stringToEnum(Flag, arg);
+}
 
 /// Flags that take a value, as `--flag value` or `--flag=value`.
 fn takesValue(flag: Flag) bool {
@@ -31,8 +38,10 @@ pub const Flags = struct {
     skip_hostname_check: bool = false,
     /// --python
     use_default_python: bool = false,
-    /// --dev
-    dev_mode: bool = false,
+    /// --editable, -e (setup)
+    editable: bool = false,
+    /// --dev (add, remove): the same as `--group dev`
+    dev_group: bool = false,
     /// --uv
     use_uv: bool = false,
     /// --pip
@@ -55,7 +64,8 @@ pub const Flags = struct {
         .@"--force" = "force_deps",
         .@"--no-host" = "skip_hostname_check",
         .@"--python" = "use_default_python",
-        .@"--dev" = "dev_mode",
+        .@"--editable" = "editable",
+        .@"--dev" = "dev_group",
         .@"--uv" = "use_uv",
         .@"--pip" = "use_pip",
         .@"--init" = "init_mode",
@@ -69,7 +79,7 @@ pub const Flags = struct {
 
     pub fn parse(args: []const []const u8) Flags {
         var flags: Flags = .{};
-        for (args) |arg| switch (std.meta.stringToEnum(Flag, arg) orelse continue) {
+        for (args) |arg| switch (flagOf(arg) orelse continue) {
             .@"--group" => {},
             inline else => |flag| @field(flags, @field(fields, @tagName(flag)).?) = true,
         };
@@ -101,7 +111,7 @@ pub const Flags = struct {
         errdefer list.deinit(allocator);
         if (f.force_deps) try list.append(allocator, "--force");
         if (f.use_default_python) try list.append(allocator, "--python");
-        if (f.dev_mode) try list.append(allocator, "--dev");
+        if (f.editable) try list.append(allocator, "--editable");
         if (f.use_uv) try list.append(allocator, "--uv");
         if (f.use_pip) try list.append(allocator, "--pip");
         if (f.no_cache) try list.append(allocator, "--no-cache");
@@ -131,7 +141,7 @@ pub fn unknownFlag(args: []const []const u8, allowed: []const Flag) ?[]const u8 
         if (!std.mem.startsWith(u8, arg, "-")) continue;
         const name = std.mem.sliceTo(arg, '=');
         const has_value = name.len < arg.len;
-        const flag = std.meta.stringToEnum(Flag, name) orelse return arg;
+        const flag = flagOf(name) orelse return arg;
         if (std.mem.findScalar(Flag, allowed, flag) == null) return arg;
         if (!takesValue(flag)) {
             if (has_value) return arg;
@@ -294,7 +304,22 @@ test "groups: both spellings, in order, repeats dropped; badGroup names the bad 
 test "fromArgs sets the field of each flag it sees" {
     const f = Flags.parse(&.{ "zenv", "setup", "--uv", "e", "--no-host", "--no-python" });
     try std.testing.expect(f.use_uv and f.skip_hostname_check and f.no_python);
-    try std.testing.expect(!f.force_deps and !f.dev_mode and !f.init_mode and !f.zenv_only);
+    try std.testing.expect(!f.force_deps and !f.editable and !f.dev_group and !f.init_mode and !f.zenv_only);
+}
+
+test "-e is --editable, and --dev is not" {
+    const short = Flags.parse(&.{ "zenv", "setup", "e", "-e" });
+    try std.testing.expect(short.editable and !short.dev_group);
+    try std.testing.expect(Flags.parse(&.{ "zenv", "setup", "e", "--editable" }).editable);
+    try std.testing.expect(!Flags.parse(&.{ "zenv", "add", "e", "p", "--dev" }).editable);
+    const setup = [_]Flag{ .@"--editable", .@"--uv" };
+    try std.testing.expect(unknownFlag(&.{ "zenv", "setup", "e", "-e", "--uv" }, &setup) == null);
+    try std.testing.expectEqualStrings("--dev", unknownFlag(&.{ "zenv", "setup", "e", "--dev" }, &setup).?);
+    try std.testing.expectEqualStrings("-e=1", unknownFlag(&.{ "zenv", "setup", "e", "-e=1" }, &setup).?);
+    try std.testing.expectEqualStrings("e", positional(&.{ "zenv", "setup", "-e", "e" }, 0).?);
+    const toks = try short.buildTokens(std.testing.allocator, &.{});
+    defer std.testing.allocator.free(toks);
+    try std.testing.expectEqualStrings("--editable", toks[0]);
 }
 
 test "installer: --uv, --pip, else auto; both conflict" {
@@ -324,7 +349,7 @@ pub fn positional(args: []const []const u8, idx: usize) ?[]const u8 {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.startsWith(u8, arg, "-")) {
-            const flag = std.meta.stringToEnum(Flag, arg) orelse continue;
+            const flag = flagOf(arg) orelse continue;
             if (takesValue(flag)) i += 1; // `--group dev`: "dev" is not positional
             continue;
         }

@@ -121,11 +121,11 @@ fn foldEnvConfig(
 }
 
 /// What a build read besides its config: the `--group` dependency groups and
-/// `--dev`, from the setup flags. They decide whether the project's
+/// `--editable`, from the setup flags. They decide whether the project's
 /// ./pyproject.toml is tracked (`sources.readsProjectPyproject`).
 const Build = struct {
     groups: []const []const u8 = &.{},
-    dev: bool = false,
+    editable: bool = false,
 };
 
 /// The `Build` that setup flag tokens (`cli.Flags.buildTokens`) describe.
@@ -136,7 +136,7 @@ fn buildOf(allocator: Allocator, tokens: []const []const u8) !Build {
     while (i + 1 < tokens.len) : (i += 1) {
         if (std.mem.eql(u8, tokens[i], "--group")) try groups.append(allocator, tokens[i + 1]);
     }
-    return .{ .groups = try groups.toOwnedSlice(allocator), .dev = cli.Flags.parse(tokens).dev_mode };
+    return .{ .groups = try groups.toOwnedSlice(allocator), .editable = cli.Flags.parse(tokens).editable };
 }
 
 /// Lowercase-hex SHA-1 over what `env_name` is built from, in a fixed order:
@@ -184,7 +184,7 @@ fn hashTracked(
         defer if (fp) |f| allocator.free(f);
         foldBytes(&sha, fp orelse "A");
     };
-    if (sources.readsProjectPyproject(env_config, build.groups, build.dev)) {
+    if (sources.readsProjectPyproject(env_config, build.groups, build.editable)) {
         const p = try paths.resolvePath(allocator, anchor_dir, "pyproject.toml");
         defer allocator.free(p);
         foldFile(allocator, io, &sha, "project_pyproject", p);
@@ -259,7 +259,7 @@ fn readStamp(allocator: Allocator, io: Io, venv_dir: []const u8) ?json.Parsed(St
 // ===========================================================================
 
 /// The flags of the env's last setup that shape its builds (`--uv`, `--pip`,
-/// `--force`, `--no-cache`, `--dev`, ...), which a command installing into
+/// `--force`, `--no-cache`, `--editable`, ...), which a command installing into
 /// the env (`zenv add`) uses too. Defaults when there is no build record.
 pub fn builtWith(allocator: Allocator, io: Io, venv_path: []const u8) cli.Flags {
     const stamp = readStamp(allocator, io, venv_path) orelse return .{};
@@ -520,7 +520,7 @@ pub fn recordSetup(ctx: Ctx, setup: Setup) !void {
         setup.env_name,
         env_cfg,
         setup.file.content,
-        .{ .groups = setup.groups, .dev = setup.flags.dev_mode },
+        .{ .groups = setup.groups, .editable = setup.flags.editable },
     );
     const tokens = try setup.flags.buildTokens(allocator, setup.groups);
     defer allocator.free(tokens);
@@ -648,7 +648,7 @@ fn recordingExec(_: Io, _: []const []const u8, _: runtime.ExecOptions) anyerror!
 }
 
 /// The hash of env `env_name` in `dir`/zenv.json, built without `--group`
-/// or `--dev`.
+/// or `--editable`.
 fn computeTrackedHash(
     allocator: Allocator,
     io: Io,
